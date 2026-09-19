@@ -44,7 +44,8 @@ from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.models.fundamental import FiscalPeriod, FundamentalSource
-from app.repositories import fundamental_repo, instrument_repo
+from app.repositories import filing_repo, fundamental_repo, instrument_repo
+from app.repositories.filing_repo import FilingRow
 from app.repositories.fundamental_repo import FundamentalRow
 
 logger = logging.getLogger(__name__)
@@ -173,8 +174,16 @@ class SecEdgarCollector(BaseCollector):
         with httpx.Client() as client:
             for instrument in instruments:
                 cik = str(instrument.us_cik).zfill(10)
-                facts = self._get(client, f"/api/xbrl/companyfacts/CIK{cik}.json")
 
+                # The filing register first. It reaches back to the 1990s and
+                # covers reports whose values XBRL never tagged, which is what
+                # lets a later lookup distinguish "the market did not have this
+                # figure" from "our value source starts too late to say".
+                filings = self._collect_filings(client, cik, instrument.instrument_id, calendar)
+                read += len(filings)
+                saved += filing_repo.save_filings(session, filings)
+
+                facts = self._get(client, f"/api/xbrl/companyfacts/CIK{cik}.json")
                 rows, seen, skipped = self._to_rows(facts, instrument.instrument_id, calendar)
                 read += seen
                 saved += fundamental_repo.save_facts(session, rows)
@@ -189,6 +198,78 @@ class SecEdgarCollector(BaseCollector):
             warnings=warnings,
             detail=f"{len(instruments)} instruments, {sum(len(c) for c in self.concepts.values())} concepts",
         )
+
+    def _collect_filings(
+        self,
+        client: httpx.Client,
+        cik: str,
+        instrument_id: int,
+        calendar: MarketCalendar,
+    ) -> list[FilingRow]:
+        """Every filing SEC lists, across the recent block and the archives.
+
+        `submissions` holds the most recent thousand filings inline and links
+        older ones in separate files. Both are needed: Apple's FY2008 10-K,
+        filed 2008-11-05, lives in the archive, and it is precisely the filing
+        that proves the market had FY2008 EPS long before XBRL tagged it.
+        """
+        payload = self._get(client, f"/submissions/CIK{cik}.json")
+
+        blocks: list[dict[str, Any]] = [payload.get("filings", {}).get("recent", {})]
+        for archive in payload.get("filings", {}).get("files", []):
+            name = archive.get("name")
+            if name:
+                blocks.append(self._get(client, f"/submissions/{name}"))
+
+        rows: list[FilingRow] = []
+        for block in blocks:
+            rows.extend(self._filings_from(block, instrument_id, calendar))
+        return rows
+
+    @staticmethod
+    def _filings_from(
+        block: dict[str, Any], instrument_id: int, calendar: MarketCalendar
+    ) -> list[FilingRow]:
+        """Columnar submissions data into rows.
+
+        SEC returns parallel arrays rather than a list of objects, so the
+        lengths are checked before zipping: a short column would silently
+        misalign every field after it.
+        """
+        forms = block.get("form") or []
+        filed = block.get("filingDate") or []
+        reports = block.get("reportDate") or []
+        accessions = block.get("accessionNumber") or []
+
+        count = len(forms)
+        if not all(len(col) == count for col in (filed, reports, accessions)):
+            raise UpstreamUnavailableError(
+                "SEC submissions columns have mismatched lengths; refusing to "
+                "zip them because the rows would silently misalign"
+            )
+
+        rows: list[FilingRow] = []
+        for i in range(count):
+            if not filed[i]:
+                continue
+            try:
+                filed_at = date.fromisoformat(filed[i])
+                period = date.fromisoformat(reports[i]) if reports[i] else None
+            except ValueError:
+                continue
+
+            rows.append(
+                FilingRow(
+                    instrument_id=instrument_id,
+                    form=str(forms[i]),
+                    filed_at=filed_at,
+                    period_of_report=period,
+                    available_at=calendar.next_session_open(filed_at),
+                    accession=str(accessions[i]),
+                    source=FundamentalSource.SEC,
+                )
+            )
+        return rows
 
     def _to_rows(
         self,

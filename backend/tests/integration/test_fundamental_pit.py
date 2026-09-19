@@ -156,7 +156,7 @@ class TestTheRealTimeline:
         assert result.outcome is FactOutcome.SOURCE_COVERAGE_UNAVAILABLE
         assert result.outcome is not FactOutcome.NOT_YET_FILED
         assert result.coverage_start == date(2009, 10, 27)
-        assert "does not mean the market lacked the figure" in result.explain()
+        assert "says nothing about what the market knew" in result.explain()
 
     def test_the_originally_tagged_figure(self, apple: tuple[Session, int]) -> None:
         session, iid = apple

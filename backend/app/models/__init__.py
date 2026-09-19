@@ -7,6 +7,7 @@ invisible to migrations.
 
 from app.models.base import Base
 from app.models.collector import CollectorRun, CollectorStatus
+from app.models.filing import Filing
 from app.models.fundamental import (
     FiscalPeriod,
     Fundamental,
@@ -35,6 +36,7 @@ __all__ = [
     "CollectorStatus",
     "CorporateAction",
     "CorporateActionType",
+    "Filing",
     "FiscalPeriod",
     "Fundamental",
     "FundamentalSource",

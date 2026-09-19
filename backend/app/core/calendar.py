@@ -41,10 +41,17 @@ _CALENDAR_CODE: dict[Market, str] = {
 }
 
 
+# `exchange_calendars` defaults to roughly the last twenty years, which is
+# not enough here: SEC's filing register reaches back to the 1990s, and
+# resolving a 1994 filing's availability needs a session that far back. Loading
+# from 1990 costs about 0.2s for XNYS and 2.5s for XKRX, once per process.
+CALENDAR_START = "1990-01-01"
+
+
 @lru_cache(maxsize=4)
 def _calendar(market: Market) -> xcals.ExchangeCalendar:
     """Load and cache the underlying calendar. Construction is expensive."""
-    return xcals.get_calendar(_CALENDAR_CODE[market])
+    return xcals.get_calendar(_CALENDAR_CODE[market], start=CALENDAR_START)
 
 
 class MarketCalendar:
@@ -80,11 +87,28 @@ class MarketCalendar:
             raise ValueError(f"{day} is not a {self.market} trading session")
         return ensure_utc(self._cal.session_close(ts).to_pydatetime(), field="session_close")
 
+    @property
+    def first_session(self) -> date:
+        """Earliest session this calendar knows about."""
+        result: date = self._cal.first_session.date()
+        return result
+
     def next_session(self, day: date) -> date:
         """The first trading session strictly after `day`.
 
         `day` need not itself be a session — a filing can land on a Saturday.
+
+        Raises:
+            ValueError: if `day` predates the calendar's range. Deliberately
+                not clamped: silently snapping a 1970 date to 1990 would make
+                an availability timestamp quietly wrong.
         """
+        if day < self.first_session:
+            raise ValueError(
+                f"{day} is before the {self.market} calendar begins "
+                f"({self.first_session}); widen CALENDAR_START rather than "
+                "guessing a session"
+            )
         # Walk to the first session on or after `day`, then step once more if
         # that landed on `day` itself, since we need strictly after.
         following = self._cal.date_to_session(pd.Timestamp(day), direction="next")

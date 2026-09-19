@@ -38,8 +38,9 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.models import Fundamental
+from app.models import Filing, Fundamental
 from app.models.fundamental import FiscalPeriod, FundamentalSource
+from app.repositories import filing_repo
 
 
 class RevisionPolicy(StrEnum):
@@ -58,11 +59,33 @@ class RevisionPolicy(StrEnum):
 
 
 class FactOutcome(StrEnum):
-    """Why a lookup returned what it did."""
+    """Why a lookup returned what it did.
+
+    Three distinct kinds of absence, ordered from weakest to strongest claim:
+
+    SOURCE_COVERAGE_UNAVAILABLE
+        The value source does not reach this era at all. Says nothing about
+        the world.
+
+    NO_OBSERVATION_IN_SOURCE
+        The source covers this era but holds no value for this context. Still
+        says nothing about the world — the figure may well have been published
+        in a filing our source never tagged.
+
+    NOT_YET_FILED
+        A claim about the world, and only returned when the filing register
+        positively shows no qualifying report had been submitted by then.
+
+    The middle state exists because the earlier design lacked it and therefore
+    over-claimed: an instrument-wide coverage start of 2009-07-22 made a
+    2009-08-01 lookup for FY2008 EPS report NOT_YET_FILED, when that report had
+    in fact been filed on 2008-11-05.
+    """
 
     FOUND = "FOUND"
-    NOT_YET_FILED = "NOT_YET_FILED"
     SOURCE_COVERAGE_UNAVAILABLE = "SOURCE_COVERAGE_UNAVAILABLE"
+    NO_OBSERVATION_IN_SOURCE = "NO_OBSERVATION_IN_SOURCE"
+    NOT_YET_FILED = "NOT_YET_FILED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +116,7 @@ class FactLookup:
     outcome: FactOutcome
     fact: Fundamental | None = None
     coverage_start: date | None = None
+    covering_filing: Filing | None = None
 
     @property
     def value(self) -> Decimal | None:
@@ -106,11 +130,25 @@ class FactLookup:
         """A sentence the UI can show instead of an empty cell."""
         if self.outcome is FactOutcome.FOUND and self.fact is not None:
             return f"{self.fact.value} as filed {self.fact.filed_at} ({self.fact.form})"
+
         if self.outcome is FactOutcome.NOT_YET_FILED:
-            return "not filed yet at this date"
+            return "no report covering this period had been filed by this date"
+
+        if self.outcome is FactOutcome.SOURCE_COVERAGE_UNAVAILABLE:
+            return (
+                f"outside source coverage — this source begins {self.coverage_start}, "
+                "so absence here says nothing about what the market knew"
+            )
+
+        if self.covering_filing is not None:
+            return (
+                f"a {self.covering_filing.form} covering this period was filed "
+                f"{self.covering_filing.filed_at}, but our value source carries no "
+                "figure for it — the market had it and we cannot read it"
+            )
         return (
-            f"outside source coverage — this source begins {self.coverage_start}, "
-            "so absence here does not mean the market lacked the figure"
+            "the source covers this era but holds no value for this context; "
+            "absence is not evidence the figure was unpublished"
         )
 
 
@@ -196,11 +234,40 @@ def _empty_result(
     instrument_id: int,
     asof: datetime,
     source: FundamentalSource | None,
+    period_end: date | None = None,
 ) -> FactLookup:
-    """Distinguish "not filed yet" from "before this source starts"."""
+    """Classify an absent value into the weakest claim the evidence supports.
+
+    The order matters. Only after ruling out both kinds of source limitation,
+    and only with a filing register that positively shows no covering report,
+    may this assert NOT_YET_FILED — a statement about the world rather than
+    about our plumbing.
+    """
     begins = coverage_start(session, instrument_id, source=source)
-    if begins is not None and asof.date() < begins:
+
+    if begins is None or asof.date() < begins:
         return FactLookup(FactOutcome.SOURCE_COVERAGE_UNAVAILABLE, coverage_start=begins)
+
+    if period_end is None:
+        # Without a period there is nothing to look up in the register.
+        return FactLookup(FactOutcome.NO_OBSERVATION_IN_SOURCE, coverage_start=begins)
+
+    register_begins = filing_repo.register_start(session, instrument_id)
+    if register_begins is None or asof.date() < register_begins:
+        # The register cannot speak to this date either, so no claim is made.
+        return FactLookup(FactOutcome.NO_OBSERVATION_IN_SOURCE, coverage_start=begins)
+
+    covering = filing_repo.covering_report_exists(
+        session, instrument_id, period_end=period_end, asof=asof
+    )
+    if covering is not None:
+        # The report existed; our value source simply never tagged it.
+        return FactLookup(
+            FactOutcome.NO_OBSERVATION_IN_SOURCE,
+            coverage_start=begins,
+            covering_filing=covering,
+        )
+
     return FactLookup(FactOutcome.NOT_YET_FILED, coverage_start=begins)
 
 
@@ -243,7 +310,7 @@ def value_as_of(
 
     if fact is not None:
         return FactLookup(FactOutcome.FOUND, fact)
-    return _empty_result(session, instrument_id, asof, source)
+    return _empty_result(session, instrument_id, asof, source, context.period_end)
 
 
 def latest_value_as_of(
@@ -256,6 +323,8 @@ def latest_value_as_of(
     taxonomy: str = "us-gaap",
     months: int | None = None,
     policy: RevisionPolicy = RevisionPolicy.AS_KNOWN_THEN,
+    ingested_before: datetime | None = None,
+    source: FundamentalSource | None = None,
 ) -> FactLookup:
     """Most recent period of `concept` that was knowable at `asof`.
 
@@ -265,6 +334,17 @@ def latest_value_as_of(
         months: required duration in months for period facts, so a quarterly
             figure is never silently compared against a year-to-date one. Pass
             None for instantaneous facts, which carry no start date.
+        ingested_before: restrict to rows the database already held then.
+            **Not optional in a backtest.** Without it this helper reaches past
+            the transaction-time axis: a filing backfilled in 2026 carries a
+            2025 filing date, satisfies `available_at <= asof`, and silently
+            changes the result of a backtest that ran before the backfill
+            existed. The period-selection query below applies it too, because
+            picking the newest period from rows we did not have then would be
+            the same leak one step earlier.
+        source: restrict to one provider. A historical backtest should ask for
+            SEC only — the yfinance fallback carries no filing dates and cannot
+            support a point-in-time claim.
     """
     stmt = select(Fundamental).where(
         Fundamental.instrument_id == instrument_id,
@@ -273,6 +353,10 @@ def latest_value_as_of(
         Fundamental.unit == unit,
         Fundamental.available_at <= asof,
     )
+    if ingested_before is not None:
+        stmt = stmt.where(Fundamental.ingested_at <= ingested_before)
+    if source is not None:
+        stmt = stmt.where(Fundamental.source == source)
 
     if months is None:
         stmt = stmt.where(Fundamental.period_start.is_(None))
@@ -288,7 +372,7 @@ def latest_value_as_of(
     )
 
     if newest is None:
-        return _empty_result(session, instrument_id, asof, None)
+        return _empty_result(session, instrument_id, asof, source)
 
     return value_as_of(
         session,
@@ -302,6 +386,8 @@ def latest_value_as_of(
         ),
         asof=asof,
         policy=policy,
+        ingested_before=ingested_before,
+        source=source,
     )
 
 
