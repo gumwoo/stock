@@ -1,0 +1,355 @@
+/* Linear-flavoured surface: thin borders, quiet hover, no decoration.
+ * The drawer genuinely floats, so it is one of the few places a shadow is
+ * warranted. */
+
+.drawer__scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 50;
+}
+
+.drawer {
+  width: min(560px, 100vw);
+  height: 100%;
+  overflow-y: auto;
+  background: var(--c-surface);
+  border-left: 1px solid var(--c-border);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--s-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5);
+}
+
+.drawer__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s-4);
+}
+
+.drawer__eyebrow {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-bottom: var(--s-1);
+}
+
+.drawer__title {
+  font-size: var(--t-h2);
+  font-weight: var(--w-semibold);
+}
+
+.drawer__symbol {
+  color: var(--c-text-tertiary);
+  font-weight: var(--w-regular);
+  font-size: var(--t-body);
+  margin-left: var(--s-2);
+}
+
+.drawer__close {
+  background: none;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  color: var(--c-text-secondary);
+  width: 32px;
+  height: 32px;
+  line-height: 1;
+  transition: border-color 0.12s, color 0.12s;
+}
+
+.drawer__close:hover {
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+}
+
+.drawer__total {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-3);
+  padding-bottom: var(--s-4);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.drawer__total-num {
+  font-size: var(--t-display);
+  font-weight: var(--w-bold);
+  letter-spacing: -0.02em;
+}
+
+.drawer__total-label {
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+  letter-spacing: 0.04em;
+}
+
+.drawer__abstain {
+  font-size: var(--t-small);
+  color: var(--c-warn);
+  background: var(--c-warn-soft);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  padding: var(--s-3);
+}
+
+.drawer__factors {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5);
+}
+
+/* --- one factor ----------------------------------------------------- */
+
+.factor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.factor--out {
+  opacity: 0.66;
+}
+
+.factor__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.factor__name {
+  font-size: var(--t-small);
+  font-weight: var(--w-semibold);
+  letter-spacing: 0.06em;
+  color: var(--c-text-secondary);
+}
+
+.factor__score {
+  font-size: var(--t-h2);
+  font-weight: var(--w-semibold);
+}
+
+.factor__outof {
+  font-size: var(--t-small);
+  font-weight: var(--w-regular);
+  color: var(--c-text-tertiary);
+}
+
+.factor__badge {
+  font-size: var(--t-micro);
+  letter-spacing: 0.06em;
+  color: var(--c-warn);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 2px var(--s-2);
+}
+
+.factor__reason {
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+}
+
+/* --- metric table ---------------------------------------------------- */
+
+.metrics {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-small);
+}
+
+.metrics th {
+  text-align: left;
+  font-weight: var(--w-medium);
+  font-size: var(--t-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-tertiary);
+  padding-bottom: var(--s-2);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.metrics td {
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-text-secondary);
+}
+
+.metrics tr:last-child td {
+  border-bottom: none;
+}
+
+.metrics .r {
+  text-align: right;
+}
+
+.metrics__detail {
+  display: block;
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
+
+.metrics__norm {
+  color: var(--c-text);
+  font-weight: var(--w-medium);
+}
+
+/* --- weights --------------------------------------------------------- */
+
+.weights {
+  display: flex;
+  gap: var(--s-6);
+  margin: 0;
+  padding: var(--s-3) 0;
+  border-top: 1px solid var(--c-border);
+}
+
+.weights dt {
+  font-size: var(--t-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-tertiary);
+}
+
+.weights dd {
+  margin: var(--s-1) 0 0;
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+}
+
+/* When effective differs from requested, something sat out. Say so. */
+.weights--changed {
+  color: var(--c-warn);
+}
+
+.weights--contrib {
+  font-weight: var(--w-semibold);
+}
+
+.provenance {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
+
+.freshness {
+  font-weight: var(--w-medium);
+  letter-spacing: 0.04em;
+}
+
+.freshness--fresh {
+  color: var(--c-supports);
+}
+.freshness--stale {
+  color: var(--c-warn);
+}
+.freshness--missing {
+  color: var(--c-text-tertiary);
+}
+
+/* --- arithmetic ------------------------------------------------------ */
+
+.drawer__sum {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s-4);
+  padding: var(--s-4) 0;
+  border-top: 1px solid var(--c-border);
+  border-bottom: 1px solid var(--c-border);
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.drawer__sum strong {
+  font-size: var(--t-h3);
+  color: var(--c-text);
+}
+
+.drawer__shrunk {
+  font-size: var(--t-small);
+  color: var(--c-warn);
+}
+
+/* --- evidence -------------------------------------------------------- */
+
+.evidence__title,
+.clocks__title {
+  font-size: var(--t-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--c-text-tertiary);
+  margin-bottom: var(--s-3);
+}
+
+.evidence ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.evidence li {
+  display: flex;
+  gap: var(--s-3);
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+}
+
+.evidence__mark {
+  flex: none;
+  width: 1em;
+  font-weight: var(--w-semibold);
+}
+
+.evidence__mark--supports {
+  color: var(--c-supports);
+}
+.evidence__mark--neutral {
+  color: var(--c-neutral);
+}
+.evidence__mark--opposes {
+  color: var(--c-opposes);
+}
+
+/* --- the three clocks ------------------------------------------------ */
+
+.clocks dl {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.clocks dl > div {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--t-small);
+}
+
+.clocks dt {
+  color: var(--c-text-tertiary);
+}
+
+.clocks dd {
+  margin: 0;
+  color: var(--c-text-secondary);
+}
+
+.clocks__note {
+  margin-top: var(--s-3);
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  line-height: 1.6;
+}
+
+.drawer__foot {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--c-border);
+}

@@ -1,0 +1,174 @@
+/*
+ * Design tokens.
+ *
+ * Toss as the primary language: wide whitespace, one large number carrying the
+ * headline, clear hierarchy built from size rather than decoration, minimal
+ * icons. TradingView density appears only on the instrument detail screen.
+ * Linear's restraint — thin borders, quiet hover — covers settings and tables.
+ *
+ * What is deliberately absent, and must stay absent:
+ *   - purple/indigo gradients (the strongest tell of generated UI)
+ *   - glassmorphism (translucency + backdrop-blur)
+ *   - border-left accent bars on cards
+ *   - decorative gradient backgrounds, per-card background colours
+ *   - box-shadow on anything that is not genuinely floating
+ *
+ * Cards are separated by a 1px neutral border and generous whitespace, never
+ * by a background fill. Colour appears only where it carries meaning.
+ */
+
+:root {
+  /* --- neutrals: the default for almost everything ------------------- */
+  --c-bg: #ffffff;
+  --c-bg-subtle: #fafafa;
+  --c-surface: #ffffff;
+  --c-border: #e8e8ea;
+  --c-border-strong: #d4d4d8;
+
+  --c-text: #17171c;
+  --c-text-secondary: #5b5b66;
+  --c-text-tertiary: #8e8e99;
+
+  /* --- semantic colour, used only where it means something -----------
+   * Korean convention: rising is red, falling is blue. Settings can flip
+   * this for users who read US charts, where rising is green.
+   */
+  --c-up: #e5484d;
+  --c-up-soft: #fdf3f3;
+  --c-down: #1d6ef0;
+  --c-down-soft: #f1f6fe;
+  --c-flat: var(--c-text-tertiary);
+  --c-warn: #b8791a;
+  --c-warn-soft: #fdf8f0;
+
+  /* Single accent. One, not a palette. */
+  --c-accent: #1d6ef0;
+
+  /* Evidence markers: check / triangle / cross */
+  --c-supports: #128a5e;
+  --c-neutral: #8e8e99;
+  --c-opposes: #c2454a;
+
+  /* --- type ---------------------------------------------------------- */
+  --font: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "Cascadia Mono", Menlo, monospace;
+
+  --t-display: 2.75rem;
+  --t-h1: 1.75rem;
+  --t-h2: 1.25rem;
+  --t-h3: 1rem;
+  --t-body: 0.9375rem;
+  --t-small: 0.8125rem;
+  --t-micro: 0.75rem;
+
+  --w-regular: 400;
+  --w-medium: 500;
+  --w-semibold: 600;
+  --w-bold: 700;
+
+  /* --- space: generous, so the page can be scanned ------------------- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --s-8: 64px;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+
+  /* Shadows exist only for things that genuinely float. */
+  --shadow-overlay: 0 8px 32px rgba(0, 0, 0, 0.12);
+}
+
+/* Dark is the default on the instrument detail screen, where a chart is the
+ * subject; a global toggle is available for the rest. */
+[data-theme="dark"] {
+  --c-bg: #0e0e11;
+  --c-bg-subtle: #16161a;
+  --c-surface: #16161a;
+  --c-border: #26262c;
+  --c-border-strong: #35353d;
+
+  --c-text: #f2f2f5;
+  --c-text-secondary: #a1a1ad;
+  --c-text-tertiary: #71717d;
+
+  --c-up: #f0595e;
+  --c-up-soft: #241618;
+  --c-down: #4b8ff5;
+  --c-down-soft: #141c29;
+  --c-warn: #d9a04a;
+  --c-warn-soft: #241e14;
+
+  --c-supports: #34b681;
+  --c-neutral: #71717d;
+  --c-opposes: #e26b70;
+}
+
+/* Users who read US charts can flip the direction convention. */
+[data-updown="us"] {
+  --c-up: #128a5e;
+  --c-up-soft: #f0f9f5;
+  --c-down: #e5484d;
+  --c-down-soft: #fdf3f3;
+}
+
+[data-theme="dark"][data-updown="us"] {
+  --c-up: #34b681;
+  --c-up-soft: #12241c;
+  --c-down: #f0595e;
+  --c-down-soft: #241618;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font);
+  font-size: var(--t-body);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Digits line up in columns. Without this, a table of prices visibly wobbles. */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}

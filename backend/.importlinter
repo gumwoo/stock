@@ -58,6 +58,7 @@ name = Layered architecture
 type = layers
 layers =
     app.api
+    app.services
     app.scoring
     app.engines
     app.repositories
@@ -65,3 +66,4 @@ layers =
     app.core
 ignore_imports =
     app.api.* -> app.models
+    app.services.* -> app.models

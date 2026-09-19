@@ -19,7 +19,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import health
+from app.api import health, signals
 from app.config import get_settings
 
 logger = logging.getLogger("app")
@@ -70,6 +70,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(signals.router)
     return app
 
 

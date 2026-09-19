@@ -39,3 +39,6 @@ Thumbs.db
 # --- logs ---
 *.log
 logs/
+
+# vite/npm lockfile is kept; local launch config is not
+.claude/launch.json
