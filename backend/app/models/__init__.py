@@ -7,6 +7,11 @@ invisible to migrations.
 
 from app.models.base import Base
 from app.models.collector import CollectorRun, CollectorStatus
+from app.models.fundamental import (
+    FiscalPeriod,
+    Fundamental,
+    FundamentalSource,
+)
 from app.models.instrument import Instrument, SymbolHistory
 from app.models.market import (
     Candle,
@@ -30,6 +35,9 @@ __all__ = [
     "CollectorStatus",
     "CorporateAction",
     "CorporateActionType",
+    "FiscalPeriod",
+    "Fundamental",
+    "FundamentalSource",
     "FxRate",
     "Holding",
     "Instrument",

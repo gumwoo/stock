@@ -6,6 +6,6 @@ layer for data; they never query directly. That is enforced by the contracts in
 here and a query that goes around it reintroduces look-ahead bias invisibly.
 """
 
-from app.repositories import candle_repo, instrument_repo
+from app.repositories import candle_repo, fundamental_repo, instrument_repo
 
-__all__ = ["candle_repo", "instrument_repo"]
+__all__ = ["candle_repo", "fundamental_repo", "instrument_repo"]

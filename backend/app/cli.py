@@ -19,6 +19,7 @@ import logging
 import sys
 
 from app.collectors.base import run_collector
+from app.collectors.sec_edgar import SecEdgarCollector
 from app.collectors.yfinance_history import FxRateCollector, YFinanceHistoryCollector
 from app.config import get_settings
 from app.core.calendar import Market
@@ -33,6 +34,7 @@ logger = logging.getLogger("app.cli")
 COLLECTORS = {
     "yfinance": YFinanceHistoryCollector,
     "fx": FxRateCollector,
+    "sec": SecEdgarCollector,
 }
 
 
