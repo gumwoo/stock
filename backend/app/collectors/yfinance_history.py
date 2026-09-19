@@ -109,7 +109,8 @@ class YFinanceHistoryCollector(BaseCollector):
 
         yfinance indexes daily bars by date in the exchange's local timezone.
         We re-anchor each bar to that session's actual opening instant in UTC,
-        so a bar's timestamp means the same thing for KR and US alike.
+        so a bar's timestamp means the same thing for KR and US alike, and
+        record separately when the bar finished and became knowable.
         """
         rows: list[CandleRow] = []
         for index, row in frame.iterrows():  # type: ignore[attr-defined]
@@ -117,11 +118,14 @@ class YFinanceHistoryCollector(BaseCollector):
             if not calendar.is_session(day):
                 # yfinance occasionally emits a bar for a non-session day.
                 continue
+            opened_at = calendar.session_open(day)
             rows.append(
                 CandleRow(
                     instrument_id=instrument_id,
                     interval=Interval.DAY_1,
-                    ts=calendar.session_open(day),
+                    ts=opened_at,
+                    # A daily bar's close does not exist until the session ends.
+                    available_at=calendar.bar_available_at(opened_at),
                     open=Decimal(str(round(float(row["Open"]), 6))),
                     high=Decimal(str(round(float(row["High"]), 6))),
                     low=Decimal(str(round(float(row["Low"]), 6))),

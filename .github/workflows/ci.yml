@@ -1,0 +1,103 @@
+name: CI
+
+# The README claims five gates pass. Until this runs in CI, the only evidence
+# for that claim is a commit message. Now it is checked on every push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      # Integration tests need a real Postgres: they exercise ON CONFLICT,
+      # advisory locks and JSONB, none of which SQLite would reproduce
+      # faithfully enough to be worth testing against.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: stock
+          POSTGRES_PASSWORD: stock
+          POSTGRES_DB: stock
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U stock -d stock"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://stock:stock@localhost:5432/stock
+      # Several source files carry non-ASCII characters in docstrings, and
+      # tooling that opens them with the platform codec fails to decode them.
+      PYTHONUTF8: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Ordered fastest-failing first, matching backend/check.sh.
+      - name: ruff format
+        run: ruff format --check .
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: mypy
+        run: mypy app
+
+      # The architecture boundary is a build gate, not a convention: factor
+      # engines must not reach the ORM, because the point-in-time filter lives
+      # in the repository layer and a query around it reintroduces look-ahead
+      # bias without failing a single test.
+      - name: import-linter
+        run: lint-imports
+
+      - name: Migrations apply cleanly
+        run: alembic upgrade head
+
+      - name: pytest
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build

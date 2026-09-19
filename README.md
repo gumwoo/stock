@@ -41,6 +41,12 @@ Each XBRL fact carries its own `filed` date and accession number, and the same
 makes "the value as known on date X" recoverable. yfinance only exposes the
 latest revision, so it is a fallback for gaps, never the primary source.
 
+**A bar is not knowable until it closes.** A daily bar carries a close, a high,
+a low and a volume, none of which exist while the session is still running. So
+`ts` (bar open) and `available_at` (bar complete) are separate columns, and
+simulations filter on the second. Filtering on the first would hand a decision
+made at 10:00 that day's closing price.
+
 **A decision cannot fill at the price that produced it.** A signal computed from
 a session's close is finalised *after* that close, so the earliest honest fill
 is the next session's open. Three separate timestamps — `data_asof`,
@@ -111,6 +117,10 @@ cd backend && ./check.sh
 Runs, in order: `ruff format --check`, `ruff check`, `mypy`, `lint-imports`,
 `pytest`. All five must pass.
 
+The same five run in GitHub Actions on every push and pull request, against a
+real Postgres service, alongside a frontend typecheck and build — so the claim
+above is checked rather than asserted.
+
 ### The architecture contract is executable
 
 Factor engines and the backtest engine are forbidden from importing SQLAlchemy,
@@ -134,6 +144,12 @@ reintroduces look-ahead bias without failing a single test.
   with the historical master in Phase 2.
 - The `portfolio` screen has no live account behind it until Toss credentials
   exist; it says so rather than showing an invented balance.
+- The instrument detail screen forces dark mode and clears the attribute on
+  exit. Once a user-selectable theme exists this must save and restore the
+  previous value instead.
+- Chart colours are read from CSS variables once at mount, so changing the
+  theme or the up/down convention while a chart is open will not recolour it
+  until remount. Due with the settings screen.
 
 ### Layout
 

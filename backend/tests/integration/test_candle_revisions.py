@@ -82,6 +82,8 @@ def bar(instrument_id: int, close: str, ts: datetime = BAR_TS) -> CandleRow:
         instrument_id=instrument_id,
         interval=Interval.DAY_1,
         ts=ts,
+        # KRX sessions run 6h30m, so the bar completes at 06:30 UTC.
+        available_at=ts + timedelta(hours=6, minutes=30),
         open=price,
         high=price,
         low=price,
@@ -229,3 +231,71 @@ class TestBitemporalReproducibility:
         ]
 
         assert before == after == ["100.000000"]
+
+
+class TestBarAvailability:
+    """A bar is not knowable while it is still open.
+
+    `ts` is when the bar started; `available_at` is when it finished. A daily
+    bar carries a close, a high, a low and a volume, none of which exist until
+    the session ends. Filtering a simulation on `ts` would let a decision made
+    at 10:00 read that day's closing price — the same look-ahead the three
+    signal clocks exist to prevent, arriving through a different door.
+    """
+
+    def test_a_bar_is_not_available_while_it_is_open(self, session: Session) -> None:
+        iid = session.info["instrument_id"]
+        candle_repo.save_revisions(session, [bar(iid, "100")])
+        session.commit()
+
+        # 03:00 UTC: the session opened at 00:00 and closes at 06:30.
+        mid_session = BAR_TS + timedelta(hours=3)
+
+        visible = candle_repo.history(session, iid, Interval.DAY_1, available_before=mid_session)
+
+        assert visible == [], "the day's close cannot be read while the day is still trading"
+
+    def test_the_bar_becomes_available_at_the_close(self, session: Session) -> None:
+        iid = session.info["instrument_id"]
+        candle_repo.save_revisions(session, [bar(iid, "100")])
+        session.commit()
+
+        at_close = BAR_TS + timedelta(hours=6, minutes=30)
+
+        visible = candle_repo.history(session, iid, Interval.DAY_1, available_before=at_close)
+
+        assert len(visible) == 1
+        assert visible[0].close == Decimal("100.000000")
+
+    def test_filtering_on_ts_would_have_leaked_it(self, session: Session) -> None:
+        """Names the bug this column prevents, so the distinction stays visible."""
+        iid = session.info["instrument_id"]
+        candle_repo.save_revisions(session, [bar(iid, "100")])
+        session.commit()
+
+        mid_session = BAR_TS + timedelta(hours=3)
+
+        by_bar_start = candle_repo.history(session, iid, Interval.DAY_1, until=mid_session)
+        by_availability = candle_repo.history(
+            session, iid, Interval.DAY_1, available_before=mid_session
+        )
+
+        assert len(by_bar_start) == 1, "the bar had already opened"
+        assert by_availability == [], "but it had not finished, so it was not knowable"
+
+    def test_yesterdays_bar_is_available_during_todays_session(self, session: Session) -> None:
+        """The filter must not be so strict that it hides completed history."""
+        iid = session.info["instrument_id"]
+        candle_repo.save_revisions(
+            session, [bar(iid, "100"), bar(iid, "110", BAR_TS + timedelta(days=1))]
+        )
+        session.commit()
+
+        during_the_next_session = BAR_TS + timedelta(days=1, hours=3)
+
+        visible = candle_repo.history(
+            session, iid, Interval.DAY_1, available_before=during_the_next_session
+        )
+
+        assert len(visible) == 1
+        assert visible[0].close == Decimal("100.000000")

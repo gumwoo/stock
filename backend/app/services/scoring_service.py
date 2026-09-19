@@ -66,7 +66,7 @@ def score_instrument(
         instrument_id=instrument.instrument_id,
         closes=tuple(float(b.close) for b in bars),
         volumes=tuple(float(b.volume) for b in bars),
-        asof=bars[-1].ts,
+        asof=bars[-1].available_at,
     )
 
     # Technical freshness counts trading sessions, not calendar days, so that
@@ -74,7 +74,7 @@ def score_instrument(
     provenance = evaluate_freshness(
         SessionFreshnessRule(),
         now=now,
-        source_asof=bars[-1].ts,
+        source_asof=bars[-1].available_at,
         calendar=calendar,
     )
 
@@ -85,10 +85,13 @@ def score_instrument(
         provenance=provenance,
     )
 
-    # The decision is finalised after the data's session closes. Deriving it
-    # rather than using "now" keeps live scoring and backtesting identical.
-    data_asof = bars[-1].ts
-    decision_at = max(calendar.session_close(data_asof.date()), data_asof)
+    # `data_asof` is when the inputs became knowable, not when the last bar
+    # opened. A daily bar carries a close that does not exist until the session
+    # ends, so using `ts` would claim the score was computed from data nobody
+    # had yet. Deriving both from the bar rather than from "now" keeps live
+    # scoring and backtesting identical.
+    data_asof = bars[-1].available_at
+    decision_at = data_asof
 
     return build_signal(
         instrument_id=instrument.instrument_id,

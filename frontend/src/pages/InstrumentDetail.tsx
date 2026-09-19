@@ -82,14 +82,21 @@ export function InstrumentDetail({ instrumentId, onBack }: Props) {
       .catch((e: Error) => setError(e.message));
   }, [instrumentId]);
 
-  const visible = useMemo(() => {
-    const bars = RANGES.find((r) => r.label === range)?.bars ?? 130;
-    return candles.slice(-bars);
-  }, [candles, range]);
+  // Moving averages are computed over the *whole* series and only then sliced
+  // to the visible window. Narrowing first would discard the history each
+  // average needs, blanking the first 59 points of MA60 on a 6M view even
+  // though those earlier bars are already loaded.
+  const start = Math.max(0, candles.length - (RANGES.find((r) => r.label === range)?.bars ?? 130));
 
-  const closes = useMemo(() => visible.map((c) => c.close), [visible]);
-  const ma20 = useMemo(() => movingAverage(closes, 20), [closes]);
-  const ma60 = useMemo(() => movingAverage(closes, 60), [closes]);
+  const visible = useMemo(() => candles.slice(start), [candles, start]);
+
+  const allMa = useMemo(() => {
+    const closes = candles.map((c) => c.close);
+    return { ma20: movingAverage(closes, 20), ma60: movingAverage(closes, 60) };
+  }, [candles]);
+
+  const ma20 = useMemo(() => allMa.ma20.slice(start), [allMa, start]);
+  const ma60 = useMemo(() => allMa.ma60.slice(start), [allMa, start]);
 
   const chartRef = useCandleChart({ candles: visible, ma20, ma60, height: 400 });
 

@@ -69,6 +69,12 @@ class Candle(Base):
     So (instrument_id, interval, ts) is deliberately **not** unique. Reads take
     the newest revision; point-in-time reads take the newest revision whose
     `ingested_at` is within the snapshot.
+
+    Three timestamps, three distinct questions:
+
+        ts            when the bar opened
+        available_at  when the bar finished, and so became knowable
+        ingested_at   when our database received it
     """
 
     __tablename__ = "candle"
@@ -83,7 +89,16 @@ class Candle(Base):
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        doc="Bar open instant, UTC. For daily bars this is the session open.",
+        doc="Bar OPEN instant, UTC. For daily bars this is the session open.",
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        doc="When the bar was COMPLETE and therefore knowable. A daily bar "
+        "carries close, high, low and volume, none of which exist until the "
+        "session ends, so this is the session close — not `ts`. Filtering a "
+        "simulation on `ts` alone would hand a 10:00 decision that day's "
+        "closing price.",
     )
 
     open: Mapped[Decimal] = mapped_column(Price, nullable=False)
@@ -100,6 +115,8 @@ class Candle(Base):
         # revision, distinguished by ingested_at.
         Index("ix_candle_lookup", "instrument_id", "interval", "ts", "ingested_at"),
         Index("ix_candle_ingested", "ingested_at"),
+        # Point-in-time reads filter on availability, not on bar start.
+        Index("ix_candle_available", "instrument_id", "interval", "available_at"),
     )
 
     def __repr__(self) -> str:

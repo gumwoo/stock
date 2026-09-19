@@ -18,7 +18,7 @@ Two rules in this system depend on getting sessions right:
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from functools import lru_cache
 
@@ -105,6 +105,22 @@ class MarketCalendar:
         dated `day` is treated as usable only from the following session's open.
         """
         return self.session_open(self.next_session(day))
+
+    def bar_available_at(self, ts: datetime, *, minutes: int | None = None) -> datetime:
+        """When a bar starting at `ts` is complete, and therefore knowable.
+
+        A bar's close, high, low and volume do not exist until it ends, so the
+        instant it becomes usable is its end, never its start. For a daily bar
+        that is the session close; for an intraday bar it is `ts` plus the bar
+        length.
+
+        Args:
+            minutes: bar length for intraday bars. Omit for daily bars.
+        """
+        moment = ensure_utc(ts, field="ts")
+        if minutes is not None:
+            return moment + timedelta(minutes=minutes)
+        return self.session_close(moment.date())
 
     def next_tradable_open(self, after: datetime) -> datetime:
         """Earliest session open strictly after the instant `after`.

@@ -39,6 +39,7 @@ class CandleRow(TypedDict):
     instrument_id: int
     interval: Interval
     ts: datetime
+    available_at: datetime
     open: Decimal
     high: Decimal
     low: Decimal
@@ -146,16 +147,22 @@ def history(
     *,
     limit: int = 250,
     until: datetime | None = None,
+    available_before: datetime | None = None,
     ingested_before: datetime | None = None,
 ) -> list[Candle]:
     """Newest revision of each bar, oldest first.
 
     Args:
-        until: bound by bar timestamp, for ordinary display.
+        until: bound by bar *start*, for ordinary display. Not a
+            point-in-time filter — a bar that has opened is not yet knowable.
+        available_before: bound by bar *completion*. This is the honest
+            simulation filter: at 10:00 the day's bar has opened but its close
+            does not exist yet, so it must not be returned.
         ingested_before: bound by arrival time, so a caller can reconstruct
-            what was stored at a past instant. Backtests should still go
-            through `app.backtest.pit_repository`, which applies both this and
-            the `available_at` filter as a single enforced rule.
+            what was stored at a past instant.
+
+    Backtests should still go through `app.backtest.pit_repository`, which
+    applies the last two together as one enforced rule.
     """
     newest = _newest_revision_subquery(instrument_id, interval, ingested_before=ingested_before)
 
@@ -169,6 +176,8 @@ def history(
     )
     if until is not None:
         stmt = stmt.where(Candle.ts <= until)
+    if available_before is not None:
+        stmt = stmt.where(Candle.available_at <= available_before)
 
     stmt = stmt.order_by(Candle.ts.desc()).limit(limit)
     return list(reversed(session.execute(stmt).scalars().all()))
