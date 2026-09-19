@@ -192,17 +192,26 @@ def save_facts(session: Session, rows: Sequence[FundamentalRow]) -> int:
 
 
 def coverage_start(
-    session: Session, instrument_id: int, *, source: FundamentalSource | None = None
+    session: Session,
+    instrument_id: int,
+    *,
+    source: FundamentalSource | None = None,
+    ingested_before: datetime | None = None,
 ) -> date | None:
     """Earliest filing date this source holds for the instrument.
 
     The boundary below which absence is uninformative. For SEC this lands
     around mid-2009 regardless of how old the company is, because XBRL tagging
     was phased in from June 2009 and not applied to earlier filings.
+
+    Bounded by `ingested_before` so a reproduced run sees the boundary as it
+    stood then, not as later backfills have extended it.
     """
     stmt = select(func.min(Fundamental.filed_at)).where(Fundamental.instrument_id == instrument_id)
     if source is not None:
         stmt = stmt.where(Fundamental.source == source)
+    if ingested_before is not None:
+        stmt = stmt.where(Fundamental.ingested_at <= ingested_before)
     return session.execute(stmt).scalar()
 
 
@@ -235,6 +244,7 @@ def _empty_result(
     asof: datetime,
     source: FundamentalSource | None,
     period_end: date | None = None,
+    ingested_before: datetime | None = None,
 ) -> FactLookup:
     """Classify an absent value into the weakest claim the evidence supports.
 
@@ -242,8 +252,13 @@ def _empty_result(
     and only with a filing register that positively shows no covering report,
     may this assert NOT_YET_FILED — a statement about the world rather than
     about our plumbing.
+
+    Every query below carries `ingested_before`. Filtering the fact lookup
+    alone is not enough: the value stays absent either way, but a backfilled
+    filing would change the *reason*, and a reproduced run that reports a
+    different provenance has not been reproduced.
     """
-    begins = coverage_start(session, instrument_id, source=source)
+    begins = coverage_start(session, instrument_id, source=source, ingested_before=ingested_before)
 
     if begins is None or asof.date() < begins:
         return FactLookup(FactOutcome.SOURCE_COVERAGE_UNAVAILABLE, coverage_start=begins)
@@ -252,13 +267,19 @@ def _empty_result(
         # Without a period there is nothing to look up in the register.
         return FactLookup(FactOutcome.NO_OBSERVATION_IN_SOURCE, coverage_start=begins)
 
-    register_begins = filing_repo.register_start(session, instrument_id)
+    register_begins = filing_repo.register_start(
+        session, instrument_id, ingested_before=ingested_before
+    )
     if register_begins is None or asof.date() < register_begins:
         # The register cannot speak to this date either, so no claim is made.
         return FactLookup(FactOutcome.NO_OBSERVATION_IN_SOURCE, coverage_start=begins)
 
     covering = filing_repo.covering_report_exists(
-        session, instrument_id, period_end=period_end, asof=asof
+        session,
+        instrument_id,
+        period_end=period_end,
+        asof=asof,
+        ingested_before=ingested_before,
     )
     if covering is not None:
         # The report existed; our value source simply never tagged it.
@@ -310,7 +331,7 @@ def value_as_of(
 
     if fact is not None:
         return FactLookup(FactOutcome.FOUND, fact)
-    return _empty_result(session, instrument_id, asof, source, context.period_end)
+    return _empty_result(session, instrument_id, asof, source, context.period_end, ingested_before)
 
 
 def latest_value_as_of(
@@ -372,7 +393,7 @@ def latest_value_as_of(
     )
 
     if newest is None:
-        return _empty_result(session, instrument_id, asof, source)
+        return _empty_result(session, instrument_id, asof, source, None, ingested_before)
 
     return value_as_of(
         session,
