@@ -90,7 +90,7 @@ class YFinanceHistoryCollector(BaseCollector):
                 warnings.append(f"{ticker}: no data returned")
                 continue
 
-            rows = self._to_rows(frame, instrument.instrument_id, calendar)
+            rows = self._to_rows(frame, instrument.instrument_id, calendar, now=utc_now())
             read += len(rows)
             saved += candle_repo.save_revisions(session, rows)
 
@@ -104,13 +104,20 @@ class YFinanceHistoryCollector(BaseCollector):
         )
 
     @staticmethod
-    def _to_rows(frame: object, instrument_id: int, calendar: MarketCalendar) -> list[CandleRow]:
+    def _to_rows(
+        frame: object, instrument_id: int, calendar: MarketCalendar, *, now: datetime
+    ) -> list[CandleRow]:
         """Convert a yfinance frame into candle rows anchored to session opens.
 
         yfinance indexes daily bars by date in the exchange's local timezone.
         We re-anchor each bar to that session's actual opening instant in UTC,
         so a bar's timestamp means the same thing for KR and US alike, and
         record separately when the bar finished and became knowable.
+
+        A bar whose session has not closed yet is skipped entirely. yfinance
+        happily serves the day's partial bar during trading hours, and storing
+        it would put an unfinished OHLCV in front of the scorer. The repository
+        filters on availability as well, so this is the first of two guards.
         """
         rows: list[CandleRow] = []
         for index, row in frame.iterrows():  # type: ignore[attr-defined]
@@ -119,13 +126,17 @@ class YFinanceHistoryCollector(BaseCollector):
                 # yfinance occasionally emits a bar for a non-session day.
                 continue
             opened_at = calendar.session_open(day)
+            available_at = calendar.bar_available_at(opened_at)
+            if available_at > now:
+                # The session is still running; this bar is not final.
+                continue
             rows.append(
                 CandleRow(
                     instrument_id=instrument_id,
                     interval=Interval.DAY_1,
                     ts=opened_at,
                     # A daily bar's close does not exist until the session ends.
-                    available_at=calendar.bar_available_at(opened_at),
+                    available_at=available_at,
                     open=Decimal(str(round(float(row["Open"]), 6))),
                     high=Decimal(str(round(float(row["High"]), 6))),
                     low=Decimal(str(round(float(row["Low"]), 6))),

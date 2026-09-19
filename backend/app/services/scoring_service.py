@@ -24,7 +24,7 @@ from app.engines.technical import PriceSeries, TechnicalEngine, TechnicalParams
 from app.models import Instrument, Interval, Signal, SignalFactor
 from app.repositories import candle_repo, instrument_repo
 from app.scoring.availability import SessionFreshnessRule, evaluate_freshness
-from app.scoring.combine import Thresholds, build_signal
+from app.scoring.combine import ExecutionTimingError, Thresholds, build_signal
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +55,17 @@ def score_instrument(
     now = now or utc_now()
     calendar = MarketCalendar(instrument.market)
 
+    # `available_before=now` is not optional. Without it a bar that has opened
+    # but not closed comes back, and the scorer reads an OHLCV that is still
+    # being formed — producing a signal stamped with a data_asof in the future.
+    # The backtest was already going to apply this filter; the live path has to
+    # apply the same one, or the two stop being comparable.
     bars = candle_repo.history(
-        session, instrument.instrument_id, Interval.DAY_1, limit=HISTORY_BARS
+        session,
+        instrument.instrument_id,
+        Interval.DAY_1,
+        limit=HISTORY_BARS,
+        available_before=now,
     )
     if not bars:
         logger.info("instrument %s: no bars stored", instrument.instrument_id)
@@ -92,6 +101,15 @@ def score_instrument(
     # scoring and backtesting identical.
     data_asof = bars[-1].available_at
     decision_at = data_asof
+
+    # Defence in depth. If this ever fires, the availability filter above has
+    # stopped working — an internal invariant, so it raises rather than being
+    # quietly clamped to `now`.
+    if data_asof > now:
+        raise ExecutionTimingError(
+            f"data_asof {data_asof.isoformat()} is in the future relative to "
+            f"{now.isoformat()}: an incomplete bar reached the scorer"
+        )
 
     return build_signal(
         instrument_id=instrument.instrument_id,

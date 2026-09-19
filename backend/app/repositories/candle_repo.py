@@ -30,7 +30,12 @@ from app.models import Candle, Interval
 
 # Columns that define a bar's content. A change in any of them is a genuine
 # restatement and earns a new revision; `source` and `ingested_at` do not.
-_VALUE_COLUMNS = ("open", "high", "low", "close", "volume")
+#
+# `available_at` is included deliberately. It is derived from the exchange
+# calendar, so a correction to it — an early close that a fixed-offset backfill
+# got wrong, say — is a change in what we claim about the bar and deserves to
+# be recorded as a revision rather than silently skipped.
+_VALUE_COLUMNS = ("available_at", "open", "high", "low", "close", "volume")
 
 
 class CandleRow(TypedDict):
