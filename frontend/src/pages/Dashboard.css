@@ -241,3 +241,8 @@
 .card__more:hover {
   text-decoration: underline;
 }
+
+.card__actions {
+  display: flex;
+  gap: var(--s-4);
+}

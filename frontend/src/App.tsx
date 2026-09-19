@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Dashboard } from "./pages/Dashboard";
+import { InstrumentDetail } from "./pages/InstrumentDetail";
 import { api } from "./api/client";
 import type { Diagnostics } from "./api/types";
 import "./App.css";
@@ -14,6 +15,7 @@ import "./App.css";
  */
 export function App() {
   const [config, setConfig] = useState<Diagnostics | null>(null);
+  const [detailId, setDetailId] = useState<number | null>(null);
 
   useEffect(() => {
     api.config().then(setConfig).catch(() => setConfig(null));
@@ -29,10 +31,14 @@ export function App() {
       </header>
 
       <main className="shell__main">
-        <Dashboard />
+        {detailId === null ? (
+          <Dashboard onOpenDetail={setDetailId} />
+        ) : (
+          <InstrumentDetail instrumentId={detailId} onBack={() => setDetailId(null)} />
+        )}
       </main>
 
-      {config && config.disabled.length > 0 && (
+      {detailId === null && config && config.disabled.length > 0 && (
         <footer className="setup">
           <p className="setup__summary">{config.summary}</p>
           <details>

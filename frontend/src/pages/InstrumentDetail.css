@@ -1,0 +1,250 @@
+/* TradingView density, applied only here. The chart is the subject, so the
+ * surface is dark and the indicators sit beside it rather than below the fold. */
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+
+.detail__back {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+}
+
+.detail__back:hover {
+  color: var(--c-text);
+}
+
+.detail__error {
+  font-size: var(--t-small);
+  color: var(--c-warn);
+}
+
+.detail__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s-4);
+}
+
+.detail__name {
+  font-size: var(--t-h1);
+  font-weight: var(--w-semibold);
+  letter-spacing: -0.01em;
+}
+
+.detail__symbol {
+  font-size: var(--t-small);
+  color: var(--c-text-tertiary);
+  margin-top: 2px;
+}
+
+.detail__price {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-3);
+  font-size: var(--t-h1);
+  font-weight: var(--w-semibold);
+  letter-spacing: -0.02em;
+}
+
+.detail__delta {
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+}
+
+.detail__delta--up {
+  color: var(--c-up);
+}
+.detail__delta--down {
+  color: var(--c-down);
+}
+.detail__delta--flat {
+  color: var(--c-flat);
+}
+
+/* --- segmented range control (Linear-ish) ---------------------------- */
+
+.ranges {
+  display: flex;
+  gap: var(--s-1);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  align-self: flex-start;
+}
+
+.ranges__btn {
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: var(--s-1) var(--s-3);
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  transition: color 0.12s, background 0.12s;
+}
+
+.ranges__btn:hover {
+  color: var(--c-text-secondary);
+}
+
+.ranges__btn--on {
+  background: var(--c-bg-subtle);
+  color: var(--c-text);
+}
+
+/* --- chart ------------------------------------------------------------ */
+
+.chart {
+  width: 100%;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.chart__legend {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
+
+.chart__ma20::before,
+.chart__ma60::before {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 1px;
+  margin-right: var(--s-2);
+  vertical-align: middle;
+}
+
+.chart__ma20::before {
+  background: var(--c-text);
+}
+.chart__ma60::before {
+  background: var(--c-text-tertiary);
+}
+
+.chart__note {
+  margin-left: auto;
+}
+
+/* --- indicator strip: the density this screen exists for -------------- */
+
+.strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.strip__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s-3) var(--s-4);
+  border-right: 1px solid var(--c-border);
+}
+
+.strip__item:last-child {
+  border-right: none;
+}
+
+.strip__label {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.strip__raw {
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+}
+
+/* The normalized value, kept visually subordinate to the raw measurement:
+ * the raw number is what the market did, the normalized one is our opinion. */
+.strip__norm {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
+
+.strip__norm::after {
+  content: " / 100";
+}
+
+/* --- evidence --------------------------------------------------------- */
+
+.evidence-block {
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  padding: var(--s-5);
+}
+
+.evidence-block__title {
+  font-size: var(--t-h3);
+  font-weight: var(--w-semibold);
+  margin-bottom: var(--s-4);
+}
+
+.evidence-block__title span {
+  font-size: var(--t-micro);
+  font-weight: var(--w-regular);
+  color: var(--c-text-tertiary);
+  margin-left: var(--s-2);
+}
+
+.evidence-block ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.evidence-block li {
+  display: flex;
+  gap: var(--s-3);
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+}
+
+.evidence-block__empty {
+  font-size: var(--t-small);
+  color: var(--c-text-tertiary);
+}
+
+.mark {
+  flex: none;
+  width: 1em;
+  font-weight: var(--w-semibold);
+}
+
+.mark--supports {
+  color: var(--c-supports);
+}
+.mark--neutral {
+  color: var(--c-neutral);
+}
+.mark--opposes {
+  color: var(--c-opposes);
+}
+
+.detail__clocks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-4);
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}

@@ -160,12 +160,14 @@ collector runs twice. Jobs additionally take a Postgres advisory lock.
 
 ## Status
 
-**Phase 1 (in progress)** — project skeleton, toolchain, schema, instrument
-identity, trading calendar, capability diagnostics.
+**Phase 1 complete** — a vertical slice runs end to end with no credentials
+configured: watchlist, daily bars and FX from yfinance, the technical factor
+engine, signal assembly with all three clocks enforced, and a dashboard whose
+drawer shows raw → normalized → weight → contribution for every metric.
 
-Then: Phase 2 fundamentals (SEC EDGAR + DART) · Phase 3 backtest and
-walk-forward · Phase 4 sentiment and forward-test · Phase 5 alerts, portfolio
-optimisation and the remaining dashboard screens.
+Next: Phase 2 fundamentals (SEC EDGAR point-in-time reconstruction + DART) ·
+Phase 3 backtest and walk-forward · Phase 4 sentiment and forward-test ·
+Phase 5 alerts, portfolio optimisation and the remaining screens.
 
 ---
 

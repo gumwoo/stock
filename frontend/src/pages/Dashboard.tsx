@@ -35,10 +35,12 @@ function SignalCard({
   signal,
   instrument,
   onOpen,
+  onOpenDetail,
 }: {
   signal: Signal;
   instrument: Instrument | undefined;
   onOpen: () => void;
+  onOpenDetail: () => void;
 }) {
   const change = instrument?.change_pct ?? null;
   const dir = change === null ? "flat" : direction(change);
@@ -86,15 +88,20 @@ function SignalCard({
         <span className="card__timing">
           체결 가능 {datetime(signal.earliest_execution_at)}부터
         </span>
-        <button className="card__more" onClick={onOpen}>
-          분석 보기
-        </button>
+        <div className="card__actions">
+          <button className="card__more" onClick={onOpenDetail}>
+            차트
+          </button>
+          <button className="card__more" onClick={onOpen}>
+            분석 보기
+          </button>
+        </div>
       </footer>
     </article>
   );
 }
 
-export function Dashboard() {
+export function Dashboard({ onOpenDetail }: { onOpenDetail: (id: number) => void }) {
   const [signals, setSignals] = useState<Signal[]>([]);
   const [instruments, setInstruments] = useState<Instrument[]>([]);
   const [open, setOpen] = useState<Signal | null>(null);
@@ -161,6 +168,7 @@ export function Dashboard() {
               signal={s}
               instrument={byId.get(s.instrument_id)}
               onOpen={() => setOpen(s)}
+              onOpenDetail={() => onOpenDetail(s.instrument_id)}
             />
           ))}
         </div>
