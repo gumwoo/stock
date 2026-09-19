@@ -21,6 +21,7 @@ from types import FrameType
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+from app.collectors.base import CollectorError
 from app.config import get_settings
 from app.db import advisory_lock, session_scope
 
@@ -30,12 +31,11 @@ logger = logging.getLogger("app.worker")
 def guarded(job_name: str, fn: Callable[[], None]) -> Callable[[], None]:
     """Wrap a job so it only runs if it can take its advisory lock.
 
-    Note the asymmetry in error handling, which is deliberate. A job that raises
-    is logged and the scheduler carries on, because one collector failing must
-    not stop the others. Internal invariant violations (point-in-time leaks,
-    execution-timing breaches) are not caught here — they propagate, because a
-    system that quietly continues after a correctness violation produces
-    confident, wrong numbers.
+    Error handling mirrors the collector boundary. A `CollectorError` is logged
+    and the scheduler carries on, because one source failing must not stop the
+    others. Everything else — invariant violations, programming mistakes —
+    propagates, so a correctness bug surfaces as a crash rather than as a log
+    line nobody reads.
     """
 
     def run() -> None:
@@ -46,8 +46,9 @@ def guarded(job_name: str, fn: Callable[[], None]) -> Callable[[], None]:
             logger.info("%s: start", job_name)
             try:
                 fn()
-            except Exception:
-                logger.exception("%s: failed", job_name)
+            except CollectorError:
+                # Expected external failure; already recorded on collector_run.
+                logger.warning("%s: source failed, continuing", job_name)
             else:
                 logger.info("%s: done", job_name)
 

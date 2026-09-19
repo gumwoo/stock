@@ -4,14 +4,26 @@ Two principles shape this module, and they pull in opposite directions on
 purpose.
 
 **External failure is isolated.** One source being down must not stop the other
-nine. A collector that raises is caught here, recorded as FAILED, and the
-pipeline continues. That is why this is the single place in the codebase where
-a broad `except Exception` is permitted.
+nine. Network errors, timeouts and malformed responses are recorded as FAILED
+and the pipeline continues.
 
-**Internal invariant violations are not caught.** Point-in-time leaks, execution
-timing breaches and identity collisions propagate. A system that quietly
-recovers from a correctness violation goes on to produce confident wrong
-numbers, which is worse than stopping.
+**Internal invariant violations are not caught.** Point-in-time leaks,
+execution-timing breaches, identity collisions — and ordinary programming
+mistakes such as `AttributeError` or `KeyError` — propagate. A system that
+quietly logs a bug as though it were an outage goes on producing confident
+wrong numbers, and the run log stops meaning what it says.
+
+Making that real means **not** catching `Exception` here. Only `CollectorError`
+and a narrow set of genuinely external failure types are contained. Collectors
+are responsible for wrapping their own outbound calls:
+
+    try:
+        response = client.get(url)
+    except httpx.HTTPError as exc:
+        raise UpstreamUnavailableError(...) from exc
+
+Anything a collector does not wrap and does not expect is a defect, and defects
+should stop the work rather than be filed under "the API was down".
 
 The `SKIPPED` status carries real weight. A collector with no credentials did
 not fail — it was never configured. Conflating the two makes a fresh install
@@ -76,6 +88,17 @@ class RateLimitedError(CollectorError):
 
 class UpstreamUnavailableError(CollectorError):
     """The remote is down, unreachable or returning garbage."""
+
+
+# Failures that can only have come from outside the process. Kept short on
+# purpose: every addition is a way for a bug to be misfiled as an outage.
+# `OSError` covers socket, DNS and connection errors, and most HTTP client
+# libraries derive their transport errors from it or wrap them.
+EXTERNAL_FAILURES: tuple[type[BaseException], ...] = (
+    OSError,
+    TimeoutError,
+    ConnectionError,
+)
 
 
 class TokenBucket:
@@ -187,13 +210,24 @@ def run_collector(collector: Collector, session: Session) -> CollectorRun:
         run.status = CollectorStatus.FAILED
         run.error = f"{type(exc).__name__}: {exc}"
         logger.warning("%s: failed — %s", collector.name, exc)
-    except Exception as exc:
-        # The isolation boundary. Anything unexpected from the outside world
-        # stops here so the other collectors still run.
+    except EXTERNAL_FAILURES as exc:
+        # Unmistakably the outside world: sockets, DNS, timeouts. Contained,
+        # but noted as unwrapped so the collector can be tightened later.
         run.status = CollectorStatus.FAILED
         run.error = f"{type(exc).__name__}: {exc}"
-        logger.exception("%s: unexpected failure", collector.name)
-        del exc
+        logger.warning(
+            "%s: external failure not wrapped by the collector — %s", collector.name, exc
+        )
+    except Exception:
+        # Deliberately re-raised. A programming error recorded as FAILED would
+        # be indistinguishable from an outage, and the bug would survive.
+        run.status = CollectorStatus.FAILED
+        run.error = "internal error; see logs"
+        run.finished_at = utc_now()
+        session.add(run)
+        session.commit()
+        logger.exception("%s: internal error — re-raising", collector.name)
+        raise
     else:
         run.status = result.status()
         run.items_read = result.items_read

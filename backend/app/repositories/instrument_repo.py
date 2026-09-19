@@ -10,7 +10,7 @@ window. Callers that genuinely want today's mapping say so explicitly.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -32,8 +32,10 @@ def resolve_symbol(
 ) -> Instrument | None:
     """Find the instrument that carried `symbol` on `asof`.
 
-    `valid_to IS NULL` means the mapping is still current, so an open-ended row
-    matches any date on or after its `valid_from`.
+    Windows are closed intervals: `valid_from <= asof <= valid_to`. A row with
+    `valid_to IS NULL` is the currently active mapping and matches any date on
+    or after its `valid_from`. Writers must close a superseded window on the
+    day before its successor opens, or a changeover date would match twice.
     """
     stmt = (
         select(Instrument)
@@ -172,9 +174,12 @@ def _ensure_symbol(
     if current is not None:
         if current.symbol == symbol:
             return
-        # The ticker changed under us. Close the old window the day before the
-        # new one opens rather than deleting it: the old mapping was true then.
-        current.valid_to = valid_from
+        # The ticker changed under us. Close the old window on the day *before*
+        # the new one opens rather than deleting it: the old mapping was true
+        # then. Both bounds are inclusive, matching the `valid_from <= asof <=
+        # valid_to` lookup, so closing on `valid_from` itself would leave the
+        # changeover date resolving to two instruments at once.
+        current.valid_to = valid_from - timedelta(days=1)
         source = "OBSERVED"
 
     session.add(

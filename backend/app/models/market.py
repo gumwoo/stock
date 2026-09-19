@@ -53,11 +53,22 @@ Price = Numeric(20, 6)
 
 
 class Candle(Base):
-    """One raw OHLCV bar.
+    """One raw OHLCV bar, as reported at a point in time.
 
-    Uniqueness on (instrument_id, interval, ts) plus upsert-on-conflict makes
-    re-collection idempotent, which matters because backfill and the daily job
-    overlap by design.
+    **Revisions are kept, never overwritten.** A provider that restates a past
+    bar produces a new row rather than mutating the old one.
+
+    The alternative is worse than it looks. Updating OHLCV in place while
+    holding `ingested_at` at its original value yields a row whose *values*
+    arrived later but whose *transaction time* claims they were always there.
+    A reproduce-mode query filtering `ingested_at <= data_snapshot_at` would
+    then admit a correction into a snapshot that predates it — which is the
+    exact failure this schema exists to prevent. Same reasoning as
+    `fundamental`, which keeps every filed revision.
+
+    So (instrument_id, interval, ts) is deliberately **not** unique. Reads take
+    the newest revision; point-in-time reads take the newest revision whose
+    `ingested_at` is within the snapshot.
     """
 
     __tablename__ = "candle"
@@ -85,15 +96,17 @@ class Candle(Base):
     ingested_at: Mapped[IngestedAt]
 
     __table_args__ = (
-        UniqueConstraint(
-            "instrument_id", "interval", "ts", name="uq_candle_instrument_interval_ts"
-        ),
-        Index("ix_candle_lookup", "instrument_id", "interval", "ts"),
+        # Not unique on (instrument_id, interval, ts): a restated bar is a new
+        # revision, distinguished by ingested_at.
+        Index("ix_candle_lookup", "instrument_id", "interval", "ts", "ingested_at"),
         Index("ix_candle_ingested", "ingested_at"),
     )
 
     def __repr__(self) -> str:
-        return f"<Candle {self.instrument_id} {self.interval} {self.ts} c={self.close}>"
+        return (
+            f"<Candle {self.instrument_id} {self.interval} {self.ts} "
+            f"c={self.close} ingested={self.ingested_at}>"
+        )
 
 
 class FxRate(Base):

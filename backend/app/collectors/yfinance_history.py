@@ -23,7 +23,7 @@ runs — and reproducibility is the point of the whole design.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -92,7 +92,7 @@ class YFinanceHistoryCollector(BaseCollector):
 
             rows = self._to_rows(frame, instrument.instrument_id, calendar)
             read += len(rows)
-            saved += candle_repo.upsert_many(session, rows)
+            saved += candle_repo.save_revisions(session, rows)
 
         session.commit()
         return CollectionResult(
@@ -160,9 +160,12 @@ class FxRateCollector(BaseCollector):
         if frame.empty:
             raise UpstreamUnavailableError(f"no FX data returned for {ticker}")
 
-        # The rate for a given day is usable from that day onward. Unlike a
-        # filing, a rate is not a disclosure with an unknown publication time,
-        # so the next-session rule does not apply here.
+        # A daily close is not knowable until the day ends. Stamping it
+        # available at 00:00 of its own date would let a valuation use a rate
+        # that had not been set yet — the same look-ahead the three signal
+        # clocks exist to prevent, and it would be careless to guard it for
+        # equities and not for the currency they are converted through.
+        # So a day's close becomes available at the start of the next day.
         existing = {
             (r.rate_date)
             for r in session.query(FxRate)
@@ -183,7 +186,8 @@ class FxRateCollector(BaseCollector):
                     rate_date=day,
                     rate=Decimal(str(round(float(row["Close"]), 8))),
                     source="YFINANCE",
-                    available_at=datetime(day.year, day.month, day.day, tzinfo=UTC),
+                    available_at=datetime(day.year, day.month, day.day, tzinfo=UTC)
+                    + timedelta(days=1),
                 )
             )
             saved += 1

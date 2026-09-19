@@ -3,7 +3,8 @@
 The behaviour under test is what keeps a ten-source pipeline operable:
 
 * one source failing does not stop the other nine,
-* a source with no credentials is SKIPPED rather than FAILED, and
+* a source with no credentials is SKIPPED rather than FAILED,
+* a programming defect propagates instead of being filed as an outage, and
 * every outcome is written down, because an unrecorded failure is the kind
   that costs an afternoon three weeks later.
 
@@ -90,10 +91,21 @@ class BrokenCollector(BaseCollector):
 
 
 class ExplodingCollector(BaseCollector):
+    """A programming defect, not an outage."""
+
     name = "EXPLODING"
 
     def collect(self, session: Session) -> CollectionResult:
         raise RuntimeError("something nobody anticipated")
+
+
+class TransportFailureCollector(BaseCollector):
+    """A genuine transport failure the collector did not wrap."""
+
+    name = "TRANSPORT"
+
+    def collect(self, session: Session) -> CollectionResult:
+        raise ConnectionError("connection reset by peer")
 
 
 class PartialCollector(BaseCollector):
@@ -177,20 +189,39 @@ class TestFailureIsolation:
         assert "UpstreamUnavailableError" in run.error
         assert "503" in run.error
 
-    def test_unexpected_failure_is_also_contained(self, session: Session) -> None:
-        """The external world produces surprises; the boundary holds anyway."""
-        run = run_collector(ExplodingCollector(), session)
+    def test_unwrapped_transport_failure_is_contained(self, session: Session) -> None:
+        """Sockets and timeouts can only come from outside, so they are caught."""
+        run = run_collector(TransportFailureCollector(), session)
 
         assert run.status is CollectorStatus.FAILED
         assert run.error is not None
-        assert "RuntimeError" in run.error
+        assert "ConnectionError" in run.error
 
-    def test_one_failure_does_not_stop_the_others(self, session: Session) -> None:
+    def test_a_programming_defect_propagates(self, session: Session) -> None:
+        """Deliberately *not* contained.
+
+        Recording a bug as FAILED would make it indistinguishable from an API
+        outage, and the run log would stop meaning what it says. The run is
+        still written before the exception escapes, so the crash leaves
+        evidence behind.
+        """
+        with pytest.raises(RuntimeError, match="nobody anticipated"):
+            run_collector(ExplodingCollector(), session)
+
+        rows = (
+            session.execute(select(CollectorRun).where(CollectorRun.source == "EXPLODING"))
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].status is CollectorStatus.FAILED
+
+    def test_one_source_failing_does_not_stop_the_others(self, session: Session) -> None:
         """The property the whole pipeline depends on."""
         collectors = [
             WorkingCollector(),
             BrokenCollector(),
-            ExplodingCollector(),
+            TransportFailureCollector(),
             UnconfiguredCollector(),
             PartialCollector(),
         ]
@@ -202,12 +233,13 @@ class TestFailureIsolation:
         assert by_source["WORKING"] is CollectorStatus.SUCCESS
         assert by_source["PARTIAL"] is CollectorStatus.PARTIAL
         assert by_source["BROKEN"] is CollectorStatus.FAILED
-        assert by_source["EXPLODING"] is CollectorStatus.FAILED
+        assert by_source["TRANSPORT"] is CollectorStatus.FAILED
         assert by_source["UNCONFIGURED"] is CollectorStatus.SKIPPED
 
-    def test_run_collector_never_raises(self, session: Session) -> None:
-        """Callers schedule these; an escaping exception would kill the worker."""
+    def test_external_failure_never_escapes(self, session: Session) -> None:
+        """Scheduled jobs must survive an upstream being down."""
         try:
-            run_collector(ExplodingCollector(), session)
+            run_collector(BrokenCollector(), session)
+            run_collector(TransportFailureCollector(), session)
         except CollectorError:  # pragma: no cover
-            pytest.fail("collector failure escaped the isolation boundary")
+            pytest.fail("an external failure escaped the isolation boundary")

@@ -21,6 +21,13 @@ backfilled next month has a *past* filing date, sails through the point-in-time
 filter, and silently changes the result of a backtest that ran before it
 arrived. Reproduce mode filters on both.
 
+**Data is append-only, so corrections do not rewrite the past.** When a provider
+restates a bar, a new revision is stored beside the original rather than
+replacing it. Updating in place while holding `ingested_at` at its first-seen
+value would be worse than either alternative: the row's values would come from
+one date while its transaction time claimed another, and a snapshot taken
+before the correction would serve the correction anyway.
+
 **Filings are usable the next session, not the same day.** DART publishes
 `rcept_dt` as `YYYYMMDD` and SEC's `filed` is a date too. Neither can
 distinguish a disclosure that appeared at 06:00 from one that appeared at 14:00
@@ -119,6 +126,14 @@ app.engines is not allowed to import app.models:
 The reason it is enforced rather than trusted: the point-in-time filter lives in
 the repository layer. A `session.query(Candle)` inside an engine bypasses it and
 reintroduces look-ahead bias without failing a single test.
+
+### Known limitations
+
+- `yfinance` ticker mapping assumes KOSPI (`.KS`). KOSDAQ needs `.KQ`, which
+  means `instrument` will need a listing venue rather than just `KR`/`US`. Due
+  with the historical master in Phase 2.
+- The `portfolio` screen has no live account behind it until Toss credentials
+  exist; it says so rather than showing an invented balance.
 
 ### Layout
 
