@@ -8,6 +8,7 @@ Create Date: 2026-09-19 16:47:43.272133
 from collections.abc import Sequence
 
 from alembic import op
+import sqlalchemy as sa
 
 
 revision: str = "a675f09d5f60"
@@ -26,9 +27,38 @@ def upgrade() -> None:
     1,492 rows covering 746 distinct contexts, exactly doubled by a second run.
 
     NULLS NOT DISTINCT (Postgres 15+) fixes it. Existing duplicates are removed
-    first, keeping the lowest id of each group — they are byte-identical
-    re-collections, not restatements, so nothing of value is lost.
+    first, keeping the lowest id of each group.
+
+    The delete is guarded rather than assumed safe. Its matching condition is
+    the context and the filing, which does not by itself prove the rows carry
+    the same value — a group holding two different values would mean something
+    stranger than a re-collection, and silently dropping one would destroy
+    evidence. So the migration asserts no such group exists before deleting,
+    and fails loudly if one does.
     """
+    conflicting = (
+        op.get_bind()
+        .execute(
+            sa.text(
+                """
+            SELECT count(*) FROM (
+              SELECT 1 FROM fundamental
+              GROUP BY instrument_id, taxonomy, concept, unit, period_start,
+                       period_end, form, filed_at, accession
+              HAVING count(DISTINCT value) > 1
+            ) q
+            """
+            )
+        )
+        .scalar_one()
+    )
+    if conflicting:
+        raise RuntimeError(
+            f"{conflicting} context/filing groups hold more than one distinct "
+            "value. These are not plain re-collections, and deleting by context "
+            "alone would discard a real difference. Investigate before migrating."
+        )
+
     op.execute(
         """
         DELETE FROM fundamental f

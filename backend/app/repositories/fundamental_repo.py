@@ -7,24 +7,28 @@ The selection rule, stated once:
     2. Within it, keep only revisions that had been filed by `asof`.
     3. Choose one, according to the strategy's revision policy.
 
-Step 3 has two defensible answers and they are different strategies, so the
-caller picks rather than the repository assuming:
+**`period_start` is part of the context, not an optional refinement.** Apple's
+own filings contain 92 cases where it is the only thing separating two facts:
+a 10-Q dated 2026-07-31 reports net income of $29.8bn for the three months to
+2026-06-27 and $101.5bn for the nine months to the same date. Identical
+concept, unit, period_end, form and filing. Selecting without `period_start`
+picks one by row id, and a valuation built on the wrong one is out by 3.4x.
 
-    AS_KNOWN_THEN      the latest revision filed on or before asof — what a
-                       market participant would have been looking at.
-    AS_FIRST_REPORTED  the earliest filing of that period — what was originally
-                       announced, ignoring later restatements.
-
-Apple's FY2008 EPS makes the stakes concrete: 5.48 as first reported in 2009,
-6.94 after the 2010 retrospective restatement. Asked at 2010-01-01 both
-policies answer 5.48; asked at 2011-01-01 they answer 6.94 and 5.48
-respectively. Getting this wrong does not raise an error, it just produces a
-backtest that quietly knew the future.
+**A missing answer has two very different meanings.** Either the figure had not
+been filed yet, or our source does not reach back that far. SEC's XBRL
+companyfacts only begins around mid-2009 — Apple's earliest fact of any kind is
+filed 2009-07-22 — because XBRL tagging was phased in from June 2009 rather
+than applied retrospectively. Apple's FY2008 10-K was filed 2008-11-05 and the
+market knew its EPS from that date, but companyfacts holds no record of it.
+Reporting that as "not filed yet" would assert something false about what the
+market knew, so the two outcomes are returned distinctly and the caller is told
+where coverage begins.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -39,10 +43,75 @@ from app.models.fundamental import FiscalPeriod, FundamentalSource
 
 
 class RevisionPolicy(StrEnum):
-    """Which filing of a period to believe."""
+    """Which filing of a period to believe.
+
+    AS_KNOWN_THEN is what a market participant would have been looking at.
+
+    FIRST_OBSERVED_IN_SOURCE is named for what it can actually promise: the
+    earliest filing *this source carries*, which is the original announcement
+    only where source coverage reaches back that far. For SEC XBRL it does not
+    before mid-2009, so calling it "as first reported" would overstate it.
+    """
 
     AS_KNOWN_THEN = "as-known-then"
-    AS_FIRST_REPORTED = "as-first-reported"
+    FIRST_OBSERVED_IN_SOURCE = "first-observed-in-source"
+
+
+class FactOutcome(StrEnum):
+    """Why a lookup returned what it did."""
+
+    FOUND = "FOUND"
+    NOT_YET_FILED = "NOT_YET_FILED"
+    SOURCE_COVERAGE_UNAVAILABLE = "SOURCE_COVERAGE_UNAVAILABLE"
+
+
+@dataclass(frozen=True, slots=True)
+class FundamentalContext:
+    """The full identity of a reported series.
+
+    Every field participates. Two facts differing in any one of them are
+    different measurements and must never be treated as revisions of each other.
+    """
+
+    taxonomy: str
+    concept: str
+    unit: str
+    period_end: date
+    period_start: date | None = None
+    form: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FactLookup:
+    """The result of a point-in-time question, including why it is empty.
+
+    `coverage_start` is the earliest filing date this source holds for the
+    instrument. When `asof` precedes it, absence says nothing about what the
+    market knew — only that we cannot see that far back.
+    """
+
+    outcome: FactOutcome
+    fact: Fundamental | None = None
+    coverage_start: date | None = None
+
+    @property
+    def value(self) -> Decimal | None:
+        return self.fact.value if self.fact else None
+
+    @property
+    def usable(self) -> bool:
+        return self.outcome is FactOutcome.FOUND
+
+    def explain(self) -> str:
+        """A sentence the UI can show instead of an empty cell."""
+        if self.outcome is FactOutcome.FOUND and self.fact is not None:
+            return f"{self.fact.value} as filed {self.fact.filed_at} ({self.fact.form})"
+        if self.outcome is FactOutcome.NOT_YET_FILED:
+            return "not filed yet at this date"
+        return (
+            f"outside source coverage — this source begins {self.coverage_start}, "
+            "so absence here does not mean the market lacked the figure"
+        )
 
 
 class FundamentalRow(NamedTuple):
@@ -68,9 +137,9 @@ class FundamentalRow(NamedTuple):
 def save_facts(session: Session, rows: Sequence[FundamentalRow]) -> int:
     """Insert facts, ignoring ones already stored. Returns rows written.
 
-    Conflict means the exact same context *and* the same filing, so there is
-    nothing new to record — a re-collection, not a restatement. A restatement
-    arrives under a different accession and inserts cleanly beside the old row.
+    Conflict means the same context *and* the same filing, so there is nothing
+    new to record — a re-collection, not a restatement. A restatement arrives
+    under a different accession and inserts cleanly beside the old row.
     """
     if not rows:
         return 0
@@ -84,103 +153,174 @@ def save_facts(session: Session, rows: Sequence[FundamentalRow]) -> int:
     return len(inserted)
 
 
+def coverage_start(
+    session: Session, instrument_id: int, *, source: FundamentalSource | None = None
+) -> date | None:
+    """Earliest filing date this source holds for the instrument.
+
+    The boundary below which absence is uninformative. For SEC this lands
+    around mid-2009 regardless of how old the company is, because XBRL tagging
+    was phased in from June 2009 and not applied to earlier filings.
+    """
+    stmt = select(func.min(Fundamental.filed_at)).where(Fundamental.instrument_id == instrument_id)
+    if source is not None:
+        stmt = stmt.where(Fundamental.source == source)
+    return session.execute(stmt).scalar()
+
+
 def _context_filtered(
     instrument_id: int,
-    concept: str,
-    *,
-    taxonomy: str | None = None,
-    unit: str | None = None,
-    form: str | None = None,
+    context: FundamentalContext,
 ) -> Select[tuple[Fundamental]]:
+    """Restrict to exactly one reported series.
+
+    `period_start` is matched with IS NOT DISTINCT FROM so that NULL — which
+    marks an instantaneous fact such as a balance — matches NULL rather than
+    matching nothing.
+    """
     stmt = select(Fundamental).where(
         Fundamental.instrument_id == instrument_id,
-        Fundamental.concept == concept,
+        Fundamental.taxonomy == context.taxonomy,
+        Fundamental.concept == context.concept,
+        Fundamental.unit == context.unit,
+        Fundamental.period_end == context.period_end,
+        Fundamental.period_start.is_not_distinct_from(context.period_start),
     )
-    if taxonomy is not None:
-        stmt = stmt.where(Fundamental.taxonomy == taxonomy)
-    if unit is not None:
-        stmt = stmt.where(Fundamental.unit == unit)
-    if form is not None:
-        stmt = stmt.where(Fundamental.form == form)
+    if context.form is not None:
+        stmt = stmt.where(Fundamental.form == context.form)
     return stmt
+
+
+def _empty_result(
+    session: Session,
+    instrument_id: int,
+    asof: datetime,
+    source: FundamentalSource | None,
+) -> FactLookup:
+    """Distinguish "not filed yet" from "before this source starts"."""
+    begins = coverage_start(session, instrument_id, source=source)
+    if begins is not None and asof.date() < begins:
+        return FactLookup(FactOutcome.SOURCE_COVERAGE_UNAVAILABLE, coverage_start=begins)
+    return FactLookup(FactOutcome.NOT_YET_FILED, coverage_start=begins)
 
 
 def value_as_of(
     session: Session,
     instrument_id: int,
-    concept: str,
+    context: FundamentalContext,
     *,
     asof: datetime,
-    period_end: date | None = None,
-    taxonomy: str | None = None,
-    unit: str | None = None,
-    form: str | None = None,
     policy: RevisionPolicy = RevisionPolicy.AS_KNOWN_THEN,
     ingested_before: datetime | None = None,
-) -> Fundamental | None:
-    """The most recent fact for `concept` that was knowable at `asof`.
+    source: FundamentalSource | None = None,
+) -> FactLookup:
+    """The fact for `context` that was knowable at `asof`.
 
     Args:
         asof: the simulation instant. Facts become usable at `available_at`,
-            which is the session after the filing date — not the filing date
-            itself, since neither SEC nor DART publishes a time of day.
-        period_end: pin to one fiscal period. Omitted, the newest period whose
-            filing had arrived by `asof` is used, which is what a live scorer
-            wants.
-        policy: which revision of that period to believe.
+            the session after the filing date — neither SEC nor DART publishes
+            a time of day, so the filing date itself is not a safe boundary.
+        policy: which revision of the period to believe.
         ingested_before: additionally restrict to rows our database already
-            held at that instant, so a later backfill cannot change the answer
-            to a question asked earlier.
+            held then, so a later backfill cannot change an earlier answer.
 
-    Returns None when nothing had been filed yet, which is a real answer: at
-    the start of a backtest a company genuinely has no reported figures.
+    Returns a `FactLookup` rather than a bare value, because an empty result
+    means either "not filed yet" or "before this source begins", and conflating
+    them lets a coverage gap masquerade as market ignorance.
     """
-    stmt = _context_filtered(instrument_id, concept, taxonomy=taxonomy, unit=unit, form=form).where(
-        Fundamental.available_at <= asof
-    )
-
-    if period_end is not None:
-        stmt = stmt.where(Fundamental.period_end == period_end)
+    stmt = _context_filtered(instrument_id, context).where(Fundamental.available_at <= asof)
     if ingested_before is not None:
         stmt = stmt.where(Fundamental.ingested_at <= ingested_before)
-
-    if period_end is None:
-        # Newest period first, then apply the revision policy within it.
-        newest = (
-            session.execute(stmt.order_by(Fundamental.period_end.desc()).limit(1)).scalars().first()
-        )
-        if newest is None:
-            return None
-        stmt = stmt.where(Fundamental.period_end == newest.period_end)
+    if source is not None:
+        stmt = stmt.where(Fundamental.source == source)
 
     order = (
         Fundamental.filed_at.desc()
         if policy is RevisionPolicy.AS_KNOWN_THEN
         else Fundamental.filed_at.asc()
     )
-    return session.execute(stmt.order_by(order, Fundamental.id.desc()).limit(1)).scalars().first()
+    fact = session.execute(stmt.order_by(order, Fundamental.id.desc()).limit(1)).scalars().first()
+
+    if fact is not None:
+        return FactLookup(FactOutcome.FOUND, fact)
+    return _empty_result(session, instrument_id, asof, source)
+
+
+def latest_value_as_of(
+    session: Session,
+    instrument_id: int,
+    *,
+    concept: str,
+    unit: str,
+    asof: datetime,
+    taxonomy: str = "us-gaap",
+    months: int | None = None,
+    policy: RevisionPolicy = RevisionPolicy.AS_KNOWN_THEN,
+) -> FactLookup:
+    """Most recent period of `concept` that was knowable at `asof`.
+
+    What a live scorer wants: not a named period, but whichever one is latest.
+
+    Args:
+        months: required duration in months for period facts, so a quarterly
+            figure is never silently compared against a year-to-date one. Pass
+            None for instantaneous facts, which carry no start date.
+    """
+    stmt = select(Fundamental).where(
+        Fundamental.instrument_id == instrument_id,
+        Fundamental.taxonomy == taxonomy,
+        Fundamental.concept == concept,
+        Fundamental.unit == unit,
+        Fundamental.available_at <= asof,
+    )
+
+    if months is None:
+        stmt = stmt.where(Fundamental.period_start.is_(None))
+    else:
+        # Month lengths vary and fiscal calendars drift, so the window is
+        # generous. It still separates a 3-month figure from a 9-month one.
+        low, high = months * 28, months * 31 + 10
+        span = Fundamental.period_end - Fundamental.period_start
+        stmt = stmt.where(Fundamental.period_start.is_not(None), span.between(low, high))
+
+    newest = (
+        session.execute(stmt.order_by(Fundamental.period_end.desc()).limit(1)).scalars().first()
+    )
+
+    if newest is None:
+        return _empty_result(session, instrument_id, asof, None)
+
+    return value_as_of(
+        session,
+        instrument_id,
+        FundamentalContext(
+            taxonomy=taxonomy,
+            concept=concept,
+            unit=unit,
+            period_end=newest.period_end,
+            period_start=newest.period_start,
+        ),
+        asof=asof,
+        policy=policy,
+    )
 
 
 def revisions_of(
     session: Session,
     instrument_id: int,
-    concept: str,
-    period_end: date,
-    *,
-    taxonomy: str | None = None,
-    unit: str | None = None,
+    context: FundamentalContext,
 ) -> list[Fundamental]:
-    """Every filed revision of one period, oldest filing first.
+    """Every filed revision of one series, oldest filing first.
 
-    Exists so a restatement can be shown rather than merely handled. The
-    drawer can say "this figure was 5.48 when first reported and 6.94 after
-    the 2010 restatement" instead of presenting one number as though it were
-    the only one there had ever been.
+    Exists so a restatement can be shown rather than merely handled — "5.48
+    when first tagged, 6.94 after the 2010 amendment" is more honest than one
+    number presented as the only one there has ever been.
     """
-    stmt = _context_filtered(instrument_id, concept, taxonomy=taxonomy, unit=unit).where(
-        Fundamental.period_end == period_end
+    return list(
+        session.execute(_context_filtered(instrument_id, context).order_by(Fundamental.filed_at))
+        .scalars()
+        .all()
     )
-    return list(session.execute(stmt.order_by(Fundamental.filed_at)).scalars().all())
 
 
 def latest_filing_date(
@@ -188,10 +328,10 @@ def latest_filing_date(
 ) -> date | None:
     """Filing date of the newest fact stored for an instrument.
 
-    Used for freshness. Note that this answers "how old is the data", which for
-    fundamentals is the *wrong* question on its own — a quarterly report is old
-    by nature. Availability is decided by how recently the source was checked,
-    which `collector_run` answers.
+    Note this answers "how old is the data", which for fundamentals is the
+    wrong question on its own — a quarterly report is old by nature.
+    Availability is decided by how recently the source was checked, which
+    `collector_run` answers.
     """
     stmt = select(func.max(Fundamental.filed_at)).where(Fundamental.instrument_id == instrument_id)
     if source is not None:
@@ -200,7 +340,6 @@ def latest_filing_date(
 
 
 def concepts_for(session: Session, instrument_id: int) -> list[str]:
-    """Distinct concepts stored for an instrument."""
     stmt = (
         select(Fundamental.concept)
         .where(Fundamental.instrument_id == instrument_id)

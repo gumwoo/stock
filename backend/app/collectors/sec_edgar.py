@@ -69,9 +69,28 @@ WANTED_CONCEPTS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Only periodic reports. An 8-K restating a number is real but irregular, and
-# mixing report types into one series makes the comparison meaningless.
-WANTED_FORMS = frozenset({"10-K", "10-Q", "20-F", "40-F"})
+# Periodic reports **and their amendments**. Excluding the "/A" forms looks
+# tidy and is wrong: an amendment is often exactly where a restatement first
+# becomes public. Apple restated FY2008 basic EPS from 5.48 to 6.94 in a 10-K/A
+# filed 2010-01-25; dropping that form pushed the restatement's apparent
+# publication date out to the next annual 10-K on 2010-10-27, nine months late.
+# For a system whose whole claim is knowing what the market knew when, that is
+# the worst kind of error — quiet, and in the direction of confidence.
+#
+# 8-K is still excluded: it carries real numbers but irregularly, and mixing it
+# into a periodic series makes period-over-period comparison meaningless.
+WANTED_FORMS = frozenset(
+    {
+        "10-K",
+        "10-K/A",
+        "10-Q",
+        "10-Q/A",
+        "20-F",
+        "20-F/A",
+        "40-F",
+        "40-F/A",
+    }
+)
 
 
 def _fiscal_period(fp: str | None) -> FiscalPeriod:

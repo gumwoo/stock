@@ -1,17 +1,28 @@
 """Point-in-time reconstruction of financial facts.
 
-The claim this project makes about US fundamentals is that it can answer "what
-was this figure understood to be on date X", not merely "what is it now". These
-tests hold that claim to a real case.
+An earlier version of this file asserted a timeline that never happened. It
+read SEC's companyfacts, saw the earliest FY2008 EPS record dated 2009-10-27,
+and concluded that a backtest in early 2009 would have had no figure. That is
+false: Apple filed its FY2008 10-K on 2008-11-05 and the market knew EPS was
+5.48 from that date. What companyfacts actually shows is where *XBRL tagging*
+begins — phased in from June 2009, not applied retrospectively — and Apple's
+earliest fact of any kind is filed 2009-07-22.
 
-Apple's FY2008 basic EPS was reported as 5.48 in the 2009 10-K and restated to
-6.94 in the 2010 10-K, after Apple adopted new revenue-recognition rules
-retrospectively. A 27% difference in the same figure for the same year. A
-backtest running in mid-2010 that reads 6.94 is not slightly optimistic — it is
-using a number that did not exist yet, and every result downstream of it is
-fiction.
+Mistaking a source's coverage boundary for the market's ignorance is the exact
+error this project exists to avoid, so the distinction is now a return value
+rather than an absent row.
 
-The fixture data is the genuine SEC payload shape, with the two real filings.
+The second correction: the restatement was excluded by the collector's own form
+filter. Apple restated FY2008 EPS to 6.94 in a **10-K/A filed 2010-01-25**, and
+`WANTED_FORMS` listed only unamended forms, so the restatement appeared to
+arrive with the next annual 10-K in October — nine months late.
+
+The real history, as SEC records it:
+
+    2009-07-22   XBRL coverage for Apple begins
+    2009-10-27   10-K     FY2008 EPS tagged at 5.48
+    2010-01-25   10-K/A   restated to 6.94
+    2010-10-27   10-K     6.94 carried forward
 """
 
 from __future__ import annotations
@@ -29,18 +40,31 @@ from app.core.calendar import Market, MarketCalendar
 from app.models import Base, Instrument
 from app.models.fundamental import FiscalPeriod, FundamentalSource
 from app.repositories import fundamental_repo as repo
-from app.repositories.fundamental_repo import FundamentalRow, RevisionPolicy
+from app.repositories.fundamental_repo import (
+    FactOutcome,
+    FundamentalContext,
+    FundamentalRow,
+    RevisionPolicy,
+)
 
 pytestmark = pytest.mark.integration
 
 US = MarketCalendar(Market.US)
 
-FY2008_END = date(2008, 9, 27)
-FY2008_START = date(2007, 9, 30)
+FY2008 = FundamentalContext(
+    taxonomy="us-gaap",
+    concept="EarningsPerShareBasic",
+    unit="USD/shares",
+    period_end=date(2008, 9, 27),
+    period_start=date(2007, 9, 30),
+)
 
-# The two genuine filings, as SEC reports them.
-FIRST_REPORTED = (date(2009, 10, 27), Decimal("5.48"), "0001193125-09-214859")
-RESTATED = (date(2010, 10, 27), Decimal("6.94"), "0001193125-10-238044")
+# The three genuine filings that touch FY2008 basic EPS.
+FILINGS = [
+    (date(2009, 10, 27), "10-K", Decimal("5.48"), "0001193125-09-214859"),
+    (date(2010, 1, 25), "10-K/A", Decimal("6.94"), "0001193125-10-012091"),
+    (date(2010, 10, 27), "10-K", Decimal("6.94"), "0001193125-10-238044"),
+]
 
 
 @pytest.fixture(scope="module")
@@ -58,7 +82,6 @@ def engine() -> Iterator[object]:
 
 @pytest.fixture
 def apple(engine: object) -> Iterator[tuple[Session, int]]:
-    """An instrument carrying both filings of FY2008 EPS."""
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
         inst = Instrument(market=Market.US, name="PIT TEST CORP", us_cik="9999999998")
@@ -71,21 +94,21 @@ def apple(engine: object) -> Iterator[tuple[Session, int]]:
             [
                 FundamentalRow(
                     instrument_id=iid,
-                    taxonomy="us-gaap",
-                    concept="EarningsPerShareBasic",
-                    unit="USD/shares",
-                    period_start=FY2008_START,
-                    period_end=FY2008_END,
+                    taxonomy=FY2008.taxonomy,
+                    concept=FY2008.concept,
+                    unit=FY2008.unit,
+                    period_start=FY2008.period_start,
+                    period_end=FY2008.period_end,
                     fiscal_year=filed.year,
                     fiscal_period=FiscalPeriod.FY,
-                    form="10-K",
+                    form=form,
                     value=value,
                     filed_at=filed,
                     available_at=US.next_session_open(filed),
                     accession=accn,
                     source=FundamentalSource.SEC,
                 )
-                for filed, value, accn in (FIRST_REPORTED, RESTATED)
+                for filed, form, value, accn in FILINGS
             ],
         )
         s.commit()
@@ -97,183 +120,260 @@ def apple(engine: object) -> Iterator[tuple[Session, int]]:
         s.commit()
 
 
-def eps(
+def lookup(
     session: Session,
     iid: int,
-    year: int,
+    when: datetime,
     policy: RevisionPolicy = RevisionPolicy.AS_KNOWN_THEN,
-) -> Decimal | None:
-    fact = repo.value_as_of(
-        session,
-        iid,
-        "EarningsPerShareBasic",
-        asof=datetime(year, 1, 1, tzinfo=UTC),
-        period_end=FY2008_END,
-        unit="USD/shares",
-        policy=policy,
-    )
-    return fact.value if fact else None
+) -> repo.FactLookup:
+    return repo.value_as_of(session, iid, FY2008, asof=when, policy=policy)
 
 
-class TestAsKnownThen:
-    """What a market participant was actually looking at."""
+def at(y: int, m: int = 1, d: int = 1) -> datetime:
+    """Noon UTC — comfortably clear of any US session boundary for year-scale
+    assertions. Day-scale assertions use `at_open` instead, because noon UTC is
+    07:00 ET and the market has not opened yet."""
+    return datetime(y, m, d, 12, 0, tzinfo=UTC)
 
-    def test_nothing_before_the_first_filing(self, apple: tuple[Session, int]) -> None:
-        """FY2008 ended in September 2008, but the 10-K was filed in late 2009.
 
-        A backtest in early 2009 had no annual figure for that year, and saying
-        so is the correct answer — not falling back to a later filing.
+def at_open(d: date) -> datetime:
+    """The instant the US session on `d` opens."""
+    return US.session_open(d)
+
+
+class TestTheRealTimeline:
+    def test_before_coverage_is_not_reported_as_unfiled(self, apple: tuple[Session, int]) -> None:
+        """The correction that matters most.
+
+        Apple's FY2008 10-K was filed 2008-11-05 and the market knew 5.48 from
+        then. Our source simply does not reach that far back. Saying "not filed
+        yet" would assert something false about the market.
         """
         session, iid = apple
-        assert eps(session, iid, 2009) is None
 
-    def test_the_originally_reported_figure_after_the_first_filing(
+        result = lookup(session, iid, at(2009, 1, 1))
+
+        assert result.outcome is FactOutcome.SOURCE_COVERAGE_UNAVAILABLE
+        assert result.outcome is not FactOutcome.NOT_YET_FILED
+        assert result.coverage_start == date(2009, 10, 27)
+        assert "does not mean the market lacked the figure" in result.explain()
+
+    def test_the_originally_tagged_figure(self, apple: tuple[Session, int]) -> None:
+        session, iid = apple
+        result = lookup(session, iid, at(2010, 1, 1))
+
+        assert result.value == Decimal("5.48")
+        assert result.fact is not None
+        assert result.fact.form == "10-K"
+
+    def test_the_restatement_lands_with_the_amendment_in_january(
+        self, apple: tuple[Session, int]
+    ) -> None:
+        """Not with the following October's 10-K.
+
+        This is what the collector's form filter got wrong: excluding 10-K/A
+        delayed the apparent publication of the restatement by nine months.
+        """
+        session, iid = apple
+
+        result = lookup(session, iid, at_open(date(2010, 1, 26)))
+
+        assert result.value == Decimal("6.94")
+        assert result.fact is not None
+        assert result.fact.form == "10-K/A"
+        assert result.fact.filed_at == date(2010, 1, 25)
+
+    def test_the_day_before_the_amendment_still_shows_the_old_figure(
         self, apple: tuple[Session, int]
     ) -> None:
         session, iid = apple
-        assert eps(session, iid, 2010) == Decimal("5.48")
+        assert lookup(session, iid, at(2010, 1, 24)).value == Decimal("5.48")
 
-    def test_the_restated_figure_after_the_restatement(self, apple: tuple[Session, int]) -> None:
+    def test_later_dates_keep_the_restated_figure(self, apple: tuple[Session, int]) -> None:
         session, iid = apple
-        assert eps(session, iid, 2011) == Decimal("6.94")
+        assert lookup(session, iid, at(2011, 1, 1)).value == Decimal("6.94")
+        assert lookup(session, iid, at(2026, 1, 1)).value == Decimal("6.94")
 
-    def test_todays_view_is_the_restated_one(self, apple: tuple[Session, int]) -> None:
-        session, iid = apple
-        assert eps(session, iid, 2026) == Decimal("6.94")
 
-    def test_the_restatement_is_invisible_before_it_was_filed(
+class TestFirstObservedInSource:
+    """Named for what it can promise, which is less than "as first reported"."""
+
+    POLICY = RevisionPolicy.FIRST_OBSERVED_IN_SOURCE
+
+    def test_it_pins_to_the_earliest_filing_the_source_carries(
         self, apple: tuple[Session, int]
     ) -> None:
-        """The failure this whole table exists to prevent, stated directly."""
         session, iid = apple
 
-        before = eps(session, iid, 2010)
-        after = eps(session, iid, 2011)
+        for year in (2010, 2011, 2026):
+            assert lookup(session, iid, at(year), self.POLICY).value == Decimal("5.48")
 
-        assert before == Decimal("5.48")
-        assert after == Decimal("6.94")
-        assert before != after, "a 27% restatement must not leak backwards in time"
+    def test_it_is_not_the_same_as_the_original_announcement(
+        self, apple: tuple[Session, int]
+    ) -> None:
+        """Here they coincide in value but not in provenance.
 
-
-class TestAsFirstReported:
-    """What was originally announced, ignoring later restatements."""
-
-    def test_it_never_changes_once_filed(self, apple: tuple[Session, int]) -> None:
-        session, iid = apple
-        policy = RevisionPolicy.AS_FIRST_REPORTED
-
-        assert eps(session, iid, 2010, policy) == Decimal("5.48")
-        assert eps(session, iid, 2011, policy) == Decimal("5.48")
-        assert eps(session, iid, 2026, policy) == Decimal("5.48")
-
-    def test_it_still_respects_the_filing_date(self, apple: tuple[Session, int]) -> None:
-        """Not-yet-filed is not-yet-filed under either policy."""
-        session, iid = apple
-        assert eps(session, iid, 2009, RevisionPolicy.AS_FIRST_REPORTED) is None
-
-    def test_the_two_policies_genuinely_differ(self, apple: tuple[Session, int]) -> None:
-        """Which is why the caller chooses rather than the repository assuming."""
+        The earliest filing this source holds is the 2009 10-K, not the FY2008
+        10-K of 2008-11-05 where the figure was actually first announced. The
+        name reflects that limit rather than papering over it.
+        """
         session, iid = apple
 
-        known = eps(session, iid, 2011, RevisionPolicy.AS_KNOWN_THEN)
-        first = eps(session, iid, 2011, RevisionPolicy.AS_FIRST_REPORTED)
+        result = lookup(session, iid, at(2011), self.POLICY)
 
-        assert known == Decimal("6.94")
-        assert first == Decimal("5.48")
+        assert result.fact is not None
+        assert result.fact.filed_at == date(2009, 10, 27)
+        assert result.fact.filed_at > date(2008, 11, 5)
+
+    def test_the_two_policies_diverge_after_the_amendment(self, apple: tuple[Session, int]) -> None:
+        session, iid = apple
+
+        known = lookup(session, iid, at(2011), RevisionPolicy.AS_KNOWN_THEN)
+        first = lookup(session, iid, at(2011), self.POLICY)
+
+        assert known.value == Decimal("6.94")
+        assert first.value == Decimal("5.48")
 
 
 class TestAvailability:
-    def test_a_filing_is_not_usable_on_its_filing_date(self, apple: tuple[Session, int]) -> None:
+    def test_a_filing_is_not_usable_on_its_own_filing_date(
+        self, apple: tuple[Session, int]
+    ) -> None:
         """SEC gives a filing date with no time of day.
 
         It cannot distinguish a 06:00 dissemination from a 14:00 one, and under
         Regulation S-T Rule 13 anything transmitted after 17:30 ET is deemed
-        filed the next business day anyway. So the boundary is the next session.
+        filed the next business day anyway. So the boundary is the next
+        session's open — the amendment filed Monday is usable from Tuesday's
+        open, not from Tuesday midnight.
         """
         session, iid = apple
-        filed_at = FIRST_REPORTED[0]
+        filed_on = date(2010, 1, 25)  # Monday
 
-        on_the_day = repo.value_as_of(
-            session,
-            iid,
-            "EarningsPerShareBasic",
-            asof=datetime(filed_at.year, filed_at.month, filed_at.day, 12, 0, tzinfo=UTC),
-            period_end=FY2008_END,
-            unit="USD/shares",
+        during_filing_day = lookup(session, iid, at(2010, 1, 25))
+        next_day_premarket = lookup(session, iid, at(2010, 1, 26))  # 07:00 ET
+        next_day_open = lookup(session, iid, at_open(date(2010, 1, 26)))
+
+        assert during_filing_day.value == Decimal("5.48")
+        assert next_day_premarket.value == Decimal("5.48"), (
+            "pre-market is still before the availability boundary"
         )
-
-        assert on_the_day is None, "a filing must not be readable during its own filing date"
-
-    def test_it_becomes_usable_at_the_next_session_open(self, apple: tuple[Session, int]) -> None:
-        session, iid = apple
-        filed_at = FIRST_REPORTED[0]
-
-        fact = repo.value_as_of(
-            session,
-            iid,
-            "EarningsPerShareBasic",
-            asof=US.next_session_open(filed_at),
-            period_end=FY2008_END,
-            unit="USD/shares",
-        )
-
-        assert fact is not None
-        assert fact.value == Decimal("5.48")
+        assert next_day_open.value == Decimal("6.94")
+        assert next_day_open.fact is not None
+        assert next_day_open.fact.available_at == US.next_session_open(filed_on)
 
 
-class TestContextIsolation:
-    def test_a_different_unit_is_a_different_series(self, apple: tuple[Session, int]) -> None:
-        """Dropping `unit` would let an EPS and a share count collide.
+class TestPeriodStartIsPartOfIdentity:
+    """A quarterly figure and a year-to-date figure are not the same series.
 
-        SEC nests facts as facts[taxonomy][concept]["units"][unit], and the
-        same concept name genuinely appears under more than one unit.
-        """
-        session, iid = apple
+    Apple's filings contain 92 contexts where `period_start` is the only
+    difference: a 10-Q dated 2026-07-31 reports $29.8bn for three months and
+    $101.5bn for nine months, both ending 2026-06-27, same unit, same form,
+    same filing. Selecting without it picks one by row id — a 3.4x error in
+    whichever direction the database happens to order rows.
+    """
 
+    QUARTER_END = date(2026, 6, 27)
+    FILED = date(2026, 7, 31)
+
+    @staticmethod
+    def seed(session: Session, iid: int) -> None:
+        rows = [
+            (date(2026, 3, 29), Decimal("29789000000")),  # 3 months
+            (date(2025, 9, 28), Decimal("101464000000")),  # 9 months
+        ]
         repo.save_facts(
             session,
             [
                 FundamentalRow(
                     instrument_id=iid,
                     taxonomy="us-gaap",
-                    concept="EarningsPerShareBasic",
-                    unit="shares",  # nonsense unit, deliberately
-                    period_start=FY2008_START,
-                    period_end=FY2008_END,
-                    fiscal_year=2009,
-                    fiscal_period=FiscalPeriod.FY,
-                    form="10-K",
-                    value=Decimal("999"),
-                    filed_at=FIRST_REPORTED[0],
-                    available_at=US.next_session_open(FIRST_REPORTED[0]),
-                    accession="different-accn",
+                    concept="NetIncomeLoss",
+                    unit="USD",
+                    period_start=start,
+                    period_end=TestPeriodStartIsPartOfIdentity.QUARTER_END,
+                    fiscal_year=2026,
+                    fiscal_period=FiscalPeriod.Q3,
+                    form="10-Q",
+                    value=value,
+                    filed_at=TestPeriodStartIsPartOfIdentity.FILED,
+                    available_at=US.next_session_open(TestPeriodStartIsPartOfIdentity.FILED),
+                    accession="0000320193-26-000081",
                     source=FundamentalSource.SEC,
                 )
+                for start, value in rows
             ],
         )
         session.commit()
 
-        assert eps(session, iid, 2011) == Decimal("6.94")
-
-    def test_revisions_are_listed_oldest_filing_first(self, apple: tuple[Session, int]) -> None:
-        """So a restatement can be shown, not merely survived."""
-        session, iid = apple
-
-        history = repo.revisions_of(
-            session, iid, "EarningsPerShareBasic", FY2008_END, unit="USD/shares"
+    def context(self, start: date) -> FundamentalContext:
+        return FundamentalContext(
+            taxonomy="us-gaap",
+            concept="NetIncomeLoss",
+            unit="USD",
+            period_end=self.QUARTER_END,
+            period_start=start,
         )
 
-        assert [r.value for r in history] == [Decimal("5.48"), Decimal("6.94")]
-        assert [r.filed_at for r in history] == [FIRST_REPORTED[0], RESTATED[0]]
+    def test_both_periods_are_stored_separately(self, apple: tuple[Session, int]) -> None:
+        session, iid = apple
+        self.seed(session, iid)
+
+        quarter = repo.value_as_of(
+            session, iid, self.context(date(2026, 3, 29)), asof=at(2026, 9, 1)
+        )
+        ytd = repo.value_as_of(session, iid, self.context(date(2025, 9, 28)), asof=at(2026, 9, 1))
+
+        assert quarter.value == Decimal("29789000000")
+        assert ytd.value == Decimal("101464000000")
+
+    def test_they_never_substitute_for_one_another(self, apple: tuple[Session, int]) -> None:
+        """The failure mode: a 3.4x error that raises nothing."""
+        session, iid = apple
+        self.seed(session, iid)
+
+        quarter = repo.value_as_of(
+            session, iid, self.context(date(2026, 3, 29)), asof=at(2026, 9, 1)
+        )
+
+        assert quarter.value != Decimal("101464000000")
+        assert quarter.fact is not None
+        assert quarter.fact.period_start == date(2026, 3, 29)
+
+    def test_duration_selection_picks_the_right_window(self, apple: tuple[Session, int]) -> None:
+        """`latest_value_as_of` must not mix durations when the caller asks."""
+        session, iid = apple
+        self.seed(session, iid)
+
+        three = repo.latest_value_as_of(
+            session, iid, concept="NetIncomeLoss", unit="USD", asof=at(2026, 9, 1), months=3
+        )
+        nine = repo.latest_value_as_of(
+            session, iid, concept="NetIncomeLoss", unit="USD", asof=at(2026, 9, 1), months=9
+        )
+
+        assert three.value == Decimal("29789000000")
+        assert nine.value == Decimal("101464000000")
+
+    def test_revisions_are_scoped_to_one_duration(self, apple: tuple[Session, int]) -> None:
+        session, iid = apple
+        self.seed(session, iid)
+
+        history = repo.revisions_of(session, iid, self.context(date(2026, 3, 29)))
+
+        assert len(history) == 1
+        assert history[0].value == Decimal("29789000000")
 
 
 class TestIdempotence:
-    def test_recollecting_the_same_filing_writes_nothing(self, apple: tuple[Session, int]) -> None:
-        """Instantaneous facts have a NULL period_start.
+    def test_a_null_period_start_still_counts_as_a_duplicate(
+        self, apple: tuple[Session, int]
+    ) -> None:
+        """Postgres treats NULLs as distinct in UNIQUE unless told otherwise.
 
-        Postgres's default UNIQUE semantics treat every NULL as distinct, so
-        without NULLS NOT DISTINCT those rows duplicate on every run. This was
-        a real bug: 1,492 rows across 746 contexts, doubled by one re-run.
+        Instantaneous facts — balances, measured at a date rather than across a
+        span — all carry NULL here, so without NULLS NOT DISTINCT they
+        duplicated on every collection run.
         """
         session, iid = apple
 
@@ -282,21 +382,19 @@ class TestIdempotence:
             taxonomy="us-gaap",
             concept="Assets",
             unit="USD",
-            period_start=None,  # instantaneous
-            period_end=FY2008_END,
+            period_start=None,
+            period_end=date(2008, 9, 27),
             fiscal_year=2009,
             fiscal_period=FiscalPeriod.FY,
             form="10-K",
             value=Decimal("39572000000"),
-            filed_at=FIRST_REPORTED[0],
-            available_at=US.next_session_open(FIRST_REPORTED[0]),
-            accession=FIRST_REPORTED[2],
+            filed_at=date(2009, 10, 27),
+            available_at=US.next_session_open(date(2009, 10, 27)),
+            accession="0001193125-09-214859",
             source=FundamentalSource.SEC,
         )
 
         assert repo.save_facts(session, [balance]) == 1
         session.commit()
-        assert repo.save_facts(session, [balance]) == 0, (
-            "a NULL period_start must still count as a duplicate"
-        )
+        assert repo.save_facts(session, [balance]) == 0
         session.commit()
