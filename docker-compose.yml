@@ -1,0 +1,61 @@
+# Host port 5433 is deliberate: this machine already runs a local PostgreSQL 17
+# on 5432, so the containerised database uses 5433 to avoid the collision.
+services:
+  db:
+    image: postgres:16
+    container_name: stock-db
+    environment:
+      POSTGRES_USER: stock
+      POSTGRES_PASSWORD: stock
+      POSTGRES_DB: stock
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stock -d stock"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # API process. Serves HTTP only — it never runs scheduled jobs.
+  backend:
+    build:
+      context: ./backend
+    container_name: stock-backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://stock:stock@db:5432/stock
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/srv
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Worker process. Collectors + scoring + scheduler.
+  # Split from the API so that running multiple API workers cannot double-fire
+  # scheduled jobs. Job overlap is additionally guarded by a PG advisory lock.
+  worker:
+    build:
+      context: ./backend
+    container_name: stock-worker
+    command: python -m app.worker
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://stock:stock@db:5432/stock
+    volumes:
+      - ./backend:/srv
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: ["full"]
+
+volumes:
+  pgdata:

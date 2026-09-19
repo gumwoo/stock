@@ -1,0 +1,67 @@
+# =============================================================================
+#  Architecture contracts — enforced in CI, not just documented.
+#
+#  The rule that matters most: a factor engine or the backtest engine must never
+#  reach the database directly. If TechnicalEngine can write session.query(Candle)
+#  then point-in-time correctness is unenforceable, because the PIT filter lives
+#  in the repository layer. Breaking that boundary breaks the build.
+#
+#  Run:  lint-imports
+# =============================================================================
+[importlinter]
+root_package = app
+include_external_packages = True
+
+[importlinter:contract:engines-no-db]
+name = Factor engines must not touch the ORM, the DB session or collectors
+type = forbidden
+source_modules =
+    app.engines
+    app.scoring
+forbidden_modules =
+    sqlalchemy
+    app.models
+    app.db
+    app.collectors
+    app.brokers
+
+[importlinter:contract:backtest-engine-no-db]
+name = Backtest engine/metrics/walkforward go through pit_repository only
+type = forbidden
+source_modules =
+    app.backtest.engine
+    app.backtest.metrics
+    app.backtest.walkforward
+    app.backtest.execution
+forbidden_modules =
+    sqlalchemy
+    app.models
+    app.db
+    app.collectors
+
+[importlinter:contract:core-is-pure]
+name = app.core is pure — no framework, no IO
+type = forbidden
+source_modules =
+    app.core
+forbidden_modules =
+    sqlalchemy
+    fastapi
+    httpx
+    app.models
+    app.db
+    app.api
+    app.collectors
+
+[importlinter:contract:layers]
+name = Layered architecture
+type = layers
+layers =
+    app.api
+    app.scoring
+    app.engines
+    app.repositories
+    app.models
+    app.core
+ignore_imports =
+    app.api.* -> app.models
