@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.collectors.base import (
@@ -49,15 +49,33 @@ def engine() -> Iterator[object]:
     eng.dispose()
 
 
+# Only the sources these tests invent. An unscoped delete here destroyed the
+# real collection history every time the suite ran, which in turn made
+# fundamental freshness judge every source as never-checked — the machinery
+# looked broken when the data had simply been erased underneath it.
+_TEST_SOURCES = (
+    "WORKING",
+    "UNCONFIGURED",
+    "BROKEN",
+    "EXPLODING",
+    "TRANSPORT",
+    "PARTIAL",
+    "SELF_SKIPPING",
+)
+
+
+def _clear_test_runs(session: Session) -> None:
+    session.execute(delete(CollectorRun).where(CollectorRun.source.in_(_TEST_SOURCES)))
+    session.commit()
+
+
 @pytest.fixture
 def session(engine: object) -> Iterator[Session]:
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
-        s.execute(CollectorRun.__table__.delete())
-        s.commit()
+        _clear_test_runs(s)
         yield s
-        s.execute(CollectorRun.__table__.delete())
-        s.commit()
+        _clear_test_runs(s)
 
 
 # --- test doubles ---------------------------------------------------------
@@ -147,11 +165,20 @@ class TestRunRecording:
         assert "rate limited" in run.error
 
     def test_every_run_is_persisted(self, session: Session) -> None:
+        expected = {"WORKING", "BROKEN", "UNCONFIGURED"}
         for collector in (WorkingCollector(), BrokenCollector(), UnconfiguredCollector()):
             run_collector(collector, session)
 
-        rows = session.execute(select(CollectorRun)).scalars().all()
-        assert {r.source for r in rows} == {"WORKING", "BROKEN", "UNCONFIGURED"}
+        # Scoped to this test's own sources. Asserting these are the *only*
+        # rows would only hold while the fixture wiped the whole table, which
+        # is exactly the behaviour that destroyed real collection history.
+        rows = (
+            session.execute(select(CollectorRun).where(CollectorRun.source.in_(expected)))
+            .scalars()
+            .all()
+        )
+
+        assert {r.source for r in rows} == expected
 
 
 class TestSkippedIsNotFailed:

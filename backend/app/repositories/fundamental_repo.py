@@ -135,6 +135,14 @@ class FactLookup:
             return "no report covering this period had been filed by this date"
 
         if self.outcome is FactOutcome.SOURCE_COVERAGE_UNAVAILABLE:
+            if self.coverage_start is None:
+                # No facts at all for this instrument — every Korean listing,
+                # until the DART collector lands. Printing "begins None" would
+                # be worse than saying nothing.
+                return (
+                    "this source holds no data at all for this instrument, so its "
+                    "absence says nothing about what the market knew"
+                )
             return (
                 f"outside source coverage — this source begins {self.coverage_start}, "
                 "so absence here says nothing about what the market knew"

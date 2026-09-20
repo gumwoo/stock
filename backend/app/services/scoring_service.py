@@ -12,31 +12,72 @@ only ever sees a `PriceSeries` and an `asof`.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.collectors.base import CollectorStatusLookup
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
-from app.core.types import Engine, MissingFactorPolicy, ScoredSignal
+from app.core.types import (
+    Availability,
+    Engine,
+    Factor,
+    MissingFactorPolicy,
+    ScoredSignal,
+    SignalReason,
+)
+from app.engines.fundamental import FundamentalEngine
 from app.engines.technical import PriceSeries, TechnicalEngine, TechnicalParams
 from app.models import Instrument, Interval, Signal, SignalFactor
-from app.repositories import candle_repo, instrument_repo
-from app.scoring.availability import SessionFreshnessRule, evaluate_freshness
+from app.models.fundamental import FundamentalSource
+from app.repositories import candle_repo, fundamental_repo, instrument_repo
+from app.scoring.availability import (
+    SessionFreshnessRule,
+    SourceCheckFreshnessRule,
+    evaluate_freshness,
+    resolve_availability,
+)
 from app.scoring.combine import ExecutionTimingError, Thresholds, build_signal
+from app.services import fundamental_service
 
 logger = logging.getLogger(__name__)
 
-STRATEGY_VERSION = "v0.1-technical"
+STRATEGY_VERSION = "v0.2-technical-fundamental"
 
-# Phase 1 runs the technical factor alone, so it carries the full weight.
-# Fundamental, sentiment and portfolio join in later phases and the weights
-# move into strategy_config at that point.
-WEIGHTS: dict[Engine, float] = {Engine.TECHNICAL: 1.0}
+# The base judgement layer. Sentiment is deliberately absent: it is an
+# event overlay with a different half-life, not a weighted factor, so it
+# never enters this sum. Portfolio joins in Phase 5. Weights move into
+# strategy_config once there is more than one strategy to version.
+WEIGHTS: dict[Engine, float] = {
+    Engine.TECHNICAL: 0.6,
+    Engine.FUNDAMENTAL: 0.4,
+}
+
+# Only technical is required. Fundamentals are genuinely unavailable for
+# instruments SEC does not cover — every Korean listing, until DART is
+# wired — and abstaining on all of them would make the system useless
+# exactly where it is most needed.
 REQUIRED: frozenset[Engine] = frozenset({Engine.TECHNICAL})
 
+# How stale a fundamental source check may be before the factor sits out.
+# Judged on when the source was last reached, not on the age of the filing:
+# a quarterly report is old by nature, and the risk being guarded against is
+# missing a *new* one.
+FUNDAMENTAL_SOURCE_CHECK = timedelta(days=7)
+
 HISTORY_BARS = 250
+
+# Which value source speaks for which market. Korean instruments have no
+# SEC coverage at all, so their fundamental factor sits out until the DART
+# collector lands — and says so rather than scoring zero.
+_SOURCE_FOR: dict[Market, FundamentalSource] = {
+    Market.US: FundamentalSource.SEC,
+    Market.KR: FundamentalSource.DART,
+}
+_CURRENCY: dict[Market, str] = {Market.US: "USD", Market.KR: "KRW"}
 
 
 def score_instrument(
@@ -88,10 +129,31 @@ def score_instrument(
     )
 
     engine = TechnicalEngine(params)
-    factor, reasons = engine.evaluate(
+    technical, technical_reasons = engine.evaluate(
         series,
         requested_weight=WEIGHTS[Engine.TECHNICAL],
         provenance=provenance,
+    )
+
+    fundamental, fundamental_reasons = _score_fundamental(
+        session,
+        instrument,
+        asof=bars[-1].available_at,
+        price=float(bars[-1].close),
+        now=now,
+    )
+
+    policy = MissingFactorPolicy.ABSTAIN
+    factors = tuple(
+        _apply_freshness(f, policy=policy, required=f.engine in REQUIRED)
+        for f in (technical, fundamental)
+    )
+    # Evidence from a factor that has just been stood down would claim more
+    # than the score does.
+    reasons = tuple(
+        r
+        for r in technical_reasons + fundamental_reasons
+        if r.engine not in {f.engine for f in factors if f.effective_weight == 0.0}
     )
 
     # `data_asof` is when the inputs became knowable, not when the last bar
@@ -113,15 +175,93 @@ def score_instrument(
 
     return build_signal(
         instrument_id=instrument.instrument_id,
-        factors=(factor,),
+        factors=factors,
         reasons=reasons,
         data_asof=data_asof,
         decision_at=decision_at,
         calendar=calendar,
         strategy_version=STRATEGY_VERSION,
-        policy=MissingFactorPolicy.ABSTAIN,
+        policy=policy,
         required_factors=REQUIRED,
         thresholds=Thresholds(),
+    )
+
+
+def _apply_freshness(factor: Factor, *, policy: MissingFactorPolicy, required: bool) -> Factor:
+    """Let the freshness verdict actually reduce the factor's weight.
+
+    Engines report what they could compute; they do not judge whether the data
+    behind it is current enough to use. That decision belongs here, where the
+    strategy's policy lives.
+
+    Without this step the whole freshness chain was computed and then ignored —
+    a factor could be marked STALE and still contribute at full weight, which
+    made the provenance shown in the UI a decoration rather than a control.
+    """
+    if factor.availability is Availability.UNAVAILABLE:
+        return factor
+
+    verdict = resolve_availability(
+        factor.engine,
+        provenance=factor.provenance,
+        requested_weight=factor.requested_weight,
+        policy=policy,
+        is_required=required,
+    )
+    if verdict.availability is Availability.AVAILABLE:
+        return factor
+
+    return replace(
+        factor,
+        availability=verdict.availability,
+        effective_weight=verdict.effective_weight,
+        availability_reason=verdict.reason,
+    )
+
+
+def _score_fundamental(
+    session: Session,
+    instrument: Instrument,
+    *,
+    asof: datetime,
+    price: float,
+    now: datetime,
+) -> tuple[Factor, tuple[SignalReason, ...]]:
+    """Score reported financials as of the same instant as the price data.
+
+    Freshness is judged on when the source was last successfully checked, not
+    on how old the newest filing is. A company between quarters has nothing
+    newer to report, and calling that stale would drop the factor for three
+    months at a time. What matters is whether we would have noticed a new
+    filing.
+    """
+    checked_at = CollectorStatusLookup(session).last_success(_SOURCE_FOR[instrument.market])
+    newest_filing = fundamental_repo.latest_filing_date(session, instrument.instrument_id)
+
+    provenance = evaluate_freshness(
+        SourceCheckFreshnessRule(max_check_age=FUNDAMENTAL_SOURCE_CHECK),
+        now=now,
+        source_asof=(
+            datetime.combine(newest_filing, datetime.min.time(), tzinfo=UTC)
+            if newest_filing
+            else None
+        ),
+        source_checked_at=checked_at,
+    )
+
+    snapshot = fundamental_service.build_snapshot(
+        session,
+        instrument.instrument_id,
+        asof=asof,
+        price=price,
+        currency=_CURRENCY[instrument.market],
+        source=_SOURCE_FOR[instrument.market],
+    )
+
+    return FundamentalEngine().evaluate(
+        snapshot,
+        requested_weight=WEIGHTS[Engine.FUNDAMENTAL],
+        provenance=provenance,
     )
 
 

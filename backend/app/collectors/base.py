@@ -247,3 +247,31 @@ def run_collector(collector: Collector, session: Session) -> CollectorRun:
     session.add(run)
     session.commit()
     return run
+
+
+class CollectorStatusLookup:
+    """When a collector last succeeded.
+
+    The input to fundamental freshness. Asking "how old is the filing" would
+    answer the wrong question — a quarterly report is old by nature — so the
+    question asked instead is "when did we last successfully look".
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def last_success(self, source: object) -> datetime | None:
+        from sqlalchemy import select
+
+        name = getattr(source, "value", str(source))
+        stmt = (
+            select(CollectorRun.finished_at)
+            .where(
+                CollectorRun.source.like(f"{name}%"),
+                CollectorRun.status.in_([CollectorStatus.SUCCESS, CollectorStatus.PARTIAL]),
+                CollectorRun.finished_at.is_not(None),
+            )
+            .order_by(CollectorRun.finished_at.desc())
+            .limit(1)
+        )
+        return self._session.execute(stmt).scalars().first()

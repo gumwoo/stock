@@ -41,15 +41,38 @@ class ExecutionTimingError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Thresholds:
-    """Score boundaries. Part of the strategy version, not constants."""
+    """Score boundaries. Part of the strategy version, not constants.
+
+    Boundaries are stated on a full-weight scale and scaled to whatever weight
+    actually participated. Under the ZERO policy a missing factor shrinks the
+    total without shrinking the thresholds, and comparing the two directly is a
+    category error — the score is no longer measured against the same maximum.
+
+    It surfaced immediately and in the worst possible way. Samsung scored 54.6
+    on technicals, a thoroughly unremarkable reading, but with no Korean
+    fundamentals available its total came to 54.6 x 0.6 = 32.8, which fell
+    under a fixed caution threshold of 35. The system was about to tell a user
+    to be wary of a stock for no reason other than a gap in our own data.
+
+    Scaling fixes the comparison without renormalizing the weights: technical
+    still contributes at 0.6, not silently promoted to 1.0, so the strategy is
+    unchanged. Only the yardstick moves.
+    """
 
     buy_interest: float = 70.0
     caution: float = 35.0
 
-    def action_for(self, score: float) -> SignalAction:
-        if score >= self.buy_interest:
+    def action_for(self, score: float, effective_weight_total: float = 1.0) -> SignalAction:
+        if effective_weight_total <= 0:
+            # Nothing participated, so there is nothing to judge.
+            return SignalAction.ABSTAINED
+
+        buy = self.buy_interest * effective_weight_total
+        caution = self.caution * effective_weight_total
+
+        if score >= buy:
             return SignalAction.BUY_INTEREST
-        if score <= self.caution:
+        if score <= caution:
             return SignalAction.CAUTION
         return SignalAction.WATCH
 
@@ -118,6 +141,7 @@ def build_signal(
         )
 
     total = sum(f.contribution for f in factors)
+    weight_total = sum(f.effective_weight for f in factors)
 
     return ScoredSignal(
         instrument_id=instrument_id,
@@ -125,7 +149,7 @@ def build_signal(
         decision_at=decision_at,
         earliest_execution_at=earliest_execution_at,
         total_score=total,
-        action=thresholds.action_for(total),
+        action=thresholds.action_for(total, weight_total),
         factors=factors,
         reasons=reasons,
         strategy_version=strategy_version,
