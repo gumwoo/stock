@@ -96,7 +96,7 @@ Fill any subset into `.env` and restart — no code changes.
 | --- | --- | --- |
 | `TOSS_CLIENT_ID` / `_SECRET` | Live account sync, realtime quotes, KR+US orders data | Free; **your calling IP must be registered** or Toss returns 403 |
 | `SEC_USER_AGENT` | US fundamentals with true point-in-time reconstruction | Free, **no API key** — just `app-name your@email`, max 10 req/s |
-| `DART_API_KEY` | Korean fundamentals and filings | Free |
+| `DART_API_KEY` | Korean fundamentals and filings | Free; note it travels in the query string, so request-URL logging is suppressed by default |
 | `NAVER_CLIENT_ID` / `_SECRET` | Korean news + DataLab search trends | Free |
 | `THREADS_ACCESS_TOKEN` / `THREADS_USER_ID` | Threads posts | Free, 2,200 queries/24h, needs Meta app review |
 | `REDDIT_CLIENT_ID` / `_SECRET` | Reddit posts (main US retail sentiment source) | Free non-commercial, 100 QPM, manual approval |
@@ -181,7 +181,7 @@ configured: watchlist, daily bars and FX from yfinance, the technical factor
 engine, signal assembly with all three clocks enforced, and a dashboard whose
 drawer shows raw → normalized → weight → contribution for every metric.
 
-**Phase 2 in progress.**
+**Phase 2 complete.**
 
 | | |
 | --- | --- |
@@ -189,8 +189,8 @@ drawer shows raw → normalized → weight → contribution for every metric.
 | Filing register (proves what was published, not just what we tagged) | done |
 | Fundamental engine, anchored to one fiscal period | done |
 | Base layer scoring: technical 0.6 + fundamental 0.4 | done |
-| DART collector | next |
-| Korean fundamentals | blocked on DART |
+| DART collector | done |
+| Korean fundamentals | done |
 
 Then: Phase 3 backtest and walk-forward · Phase 4 event overlay, market regime
 and forward-test · Phase 5 alerts, portfolio optimisation and the remaining

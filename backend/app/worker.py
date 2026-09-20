@@ -23,6 +23,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 from app.collectors.base import CollectorError
 from app.config import get_settings
+from app.core import logging as logging_setup
 from app.db import advisory_lock, session_scope
 
 logger = logging.getLogger("app.worker")
@@ -74,10 +75,7 @@ def build_scheduler() -> BlockingScheduler:
 
 def main() -> int:
     settings = get_settings()
-    logging.basicConfig(
-        level=settings.log_level,
-        format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
-    )
+    logging_setup.configure(settings.log_level)
     diag = settings.diagnostics()
     logger.info("starting worker | env=%s | %s", settings.app_env, diag["summary"])
 

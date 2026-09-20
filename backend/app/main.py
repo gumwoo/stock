@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import health, signals
 from app.config import get_settings
+from app.core import logging as logging_setup
 
 logger = logging.getLogger("app")
 
@@ -33,10 +34,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     are inactive and why, instead of discovering it later via missing data.
     """
     settings = get_settings()
-    logging.basicConfig(
-        level=settings.log_level,
-        format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
-    )
+    logging_setup.configure(settings.log_level)
     diag = settings.diagnostics()
     logger.info("starting api | env=%s | %s", settings.app_env, diag["summary"])
     for item in diag["disabled"]:

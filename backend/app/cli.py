@@ -19,9 +19,11 @@ import logging
 import sys
 
 from app.collectors.base import run_collector
+from app.collectors.dart_fundamental import DartFundamentalCollector
 from app.collectors.sec_edgar import SecEdgarCollector
 from app.collectors.yfinance_history import FxRateCollector, YFinanceHistoryCollector
 from app.config import get_settings
+from app.core import logging as logging_setup
 from app.core.calendar import Market
 from app.core.clock import utc_now
 from app.db import session_scope
@@ -35,6 +37,7 @@ COLLECTORS = {
     "yfinance": YFinanceHistoryCollector,
     "fx": FxRateCollector,
     "sec": SecEdgarCollector,
+    "dart": DartFundamentalCollector,
 }
 
 
@@ -129,7 +132,7 @@ def cmd_runs() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level="INFO", format="%(levelname)-5s %(message)s")
+    logging_setup.configure()
 
     parser = argparse.ArgumentParser(prog="app.cli", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
