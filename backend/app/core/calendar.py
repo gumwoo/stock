@@ -146,6 +146,19 @@ class MarketCalendar:
             return moment + timedelta(minutes=minutes)
         return self.session_close(moment.date())
 
+    def is_open_at(self, ts: datetime) -> bool:
+        """True if the market is in session at this instant.
+
+        The close is excluded. A bar ending exactly at the close does not open
+        a further bar in that session, and treating it as if it did would
+        invent a trading opportunity that never existed.
+        """
+        moment = ensure_utc(ts, field="ts")
+        day = moment.date()
+        if not self.is_session(day):
+            return False
+        return self.session_open(day) <= moment < self.session_close(day)
+
     def next_tradable_open(self, after: datetime) -> datetime:
         """Earliest session open strictly after the instant `after`.
 

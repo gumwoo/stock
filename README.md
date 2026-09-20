@@ -142,6 +142,13 @@ reintroduces look-ahead bias without failing a single test.
 - `yfinance` ticker mapping assumes KOSPI (`.KS`). KOSDAQ needs `.KQ`, which
   means `instrument` will need a listing venue rather than just `KR`/`US`. Due
   with the historical master in Phase 2.
+- Korean fiscal periods are reconstructed from the filer's *current* fiscal
+  year-end month (`acc_mt` from `company.json`), applied to every year we
+  collect. A company that changed its closing month in the last few years will
+  therefore have its older periods reconstructed against the new calendar. The
+  fix needs a historical fiscal calendar, which DART does not expose directly;
+  due with the Korean universe expansion, alongside `max_gap_days` becoming a
+  fiscal-calendar policy rather than a fixed 430 days.
 - DART fundamentals request consolidated statements (`fs_div=CFS`) only. A
   company that files no consolidated statements therefore yields no facts at
   all, which the absence logic correctly reports as
