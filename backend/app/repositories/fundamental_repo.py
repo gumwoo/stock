@@ -433,61 +433,90 @@ def previous_annual_fact(
     policy: RevisionPolicy = RevisionPolicy.AS_KNOWN_THEN,
     ingested_before: datetime | None = None,
     source: FundamentalSource | None = None,
+    max_gap_days: int = 430,
 ) -> FactLookup:
     """The annual period immediately before `before_period_end`.
 
     Steps back one *fiscal period*, not one calendar year. Subtracting 365 days
     from `asof` and asking what was latest then looks equivalent and is not,
-    because it conflates two unrelated things: when a period ended, and when
-    its report happened to become readable.
-
-    Both ways of getting it wrong were observable in Apple's own data:
+    because it conflates when a period ended with when its report happened to
+    become readable. Both ways of getting that wrong were observable in Apple's
+    own data:
 
     * FY2024 became usable on 2024-11-04. Scoring on 2025-11-03 put
       `asof - 365` at 2024-11-03, one day short, so the lookup fell through to
-      FY2023 and reported a 728-day change as year-on-year growth — +8.6%
-      where the real figure was +6.4%. Both are perfectly plausible numbers.
+      FY2023 and reported a 728-day change as year-on-year growth — +8.6% where
+      the real figure was +6.4%. Both are perfectly plausible numbers.
 
-    * Asking as of a year ago also refuses to see any revision published
-      since. Apple restated FY2024 revenue in the FY2025 10-K filed
-      2025-10-31; a scorer running in November 2025 under AS_KNOWN_THEN should
-      use that, because the market had it.
+    * Asking as of a year ago also refuses to see any revision published since.
+      Apple restated FY2024 revenue in the FY2025 10-K filed 2025-10-31; a
+      scorer running in November 2025 under AS_KNOWN_THEN should use that,
+      because the market had it.
 
     So the period is chosen by fiscal calendar, and only then is the revision
     chosen by the *current* `asof`.
+
+    **Adjacency is checked, not assumed.** "The largest period_end below this
+    one" is not the same as "the year before". When a company's intervening
+    year is simply absent from the source, that phrasing silently reaches two
+    years back and produces the very comparison this function exists to
+    prevent. `max_gap_days` defaults to 430, which accommodates the 52/53-week
+    calendars many filers use while rejecting a skipped year.
+
+    Args:
+        max_gap_days: how far back `period_end` may sit and still count as the
+            preceding year.
     """
     low, high = months * 28, months * 31 + 10
     span = Fundamental.period_end - Fundamental.period_start
 
-    prior_end = session.execute(
-        select(func.max(Fundamental.period_end)).where(
-            Fundamental.instrument_id == instrument_id,
-            Fundamental.taxonomy == taxonomy,
-            Fundamental.concept == concept,
-            Fundamental.unit == unit,
-            Fundamental.period_end < before_period_end,
-            Fundamental.period_start.is_not(None),
-            span.between(low, high),
-            Fundamental.available_at <= asof,
-            *([Fundamental.ingested_at <= ingested_before] if ingested_before else []),
-            *([Fundamental.source == source] if source else []),
-        )
-    ).scalar()
+    # One query for the whole row. Deriving period_end and period_start
+    # separately invited two faults: the second query had no transaction-time
+    # or source filter, reopening a bypass closed elsewhere, and picking
+    # `max(period_start)` actively prefers the *shortest* period sharing that
+    # end date — a standalone Q4 would be returned as the prior year.
+    conditions = [
+        Fundamental.instrument_id == instrument_id,
+        Fundamental.taxonomy == taxonomy,
+        Fundamental.concept == concept,
+        Fundamental.unit == unit,
+        Fundamental.period_end < before_period_end,
+        Fundamental.period_start.is_not(None),
+        span.between(low, high),
+        Fundamental.available_at <= asof,
+    ]
+    if ingested_before is not None:
+        conditions.append(Fundamental.ingested_at <= ingested_before)
+    if source is not None:
+        conditions.append(Fundamental.source == source)
 
-    if prior_end is None:
+    previous = (
+        session.execute(
+            select(Fundamental)
+            .where(*conditions)
+            .order_by(Fundamental.period_end.desc(), Fundamental.filed_at.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+
+    if previous is None or previous.period_end is None:
         return _empty_result(session, instrument_id, asof, source, None, ingested_before)
 
-    prior_start = session.execute(
-        select(func.max(Fundamental.period_start)).where(
-            Fundamental.instrument_id == instrument_id,
-            Fundamental.taxonomy == taxonomy,
-            Fundamental.concept == concept,
-            Fundamental.unit == unit,
-            Fundamental.period_end == prior_end,
-            Fundamental.available_at <= asof,
+    gap = (before_period_end - previous.period_end).days
+    if gap > max_gap_days:
+        # A year is missing from the source. Returning what is there would
+        # label a multi-year change as year-on-year, which looks entirely
+        # normal and is the failure this guard exists for.
+        return FactLookup(
+            FactOutcome.NO_OBSERVATION_IN_SOURCE,
+            coverage_start=coverage_start(
+                session, instrument_id, source=source, ingested_before=ingested_before
+            ),
         )
-    ).scalar()
 
+    # The period is settled; now pick the revision of it that was knowable.
     return value_as_of(
         session,
         instrument_id,
@@ -495,8 +524,8 @@ def previous_annual_fact(
             taxonomy=taxonomy,
             concept=concept,
             unit=unit,
-            period_end=prior_end,
-            period_start=prior_start,
+            period_end=previous.period_end,
+            period_start=previous.period_start,
         ),
         asof=asof,
         policy=policy,
