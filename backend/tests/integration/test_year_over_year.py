@@ -1,0 +1,240 @@
+"""Year-on-year growth steps back a fiscal period, not 365 days.
+
+Subtracting a year from `asof` and asking what was latest then looks equivalent
+to asking for the previous fiscal year. It is not, because it conflates when a
+period ended with when its report happened to become readable, and both ways of
+being wrong were observable in Apple's real filings.
+
+**The period can slip.** Apple's FY2024 report became usable on 2024-11-04.
+Scoring on 2025-11-03 put `asof - 365` at 2024-11-03 — one day short — so the
+lookup fell through to FY2023 and reported a 728-day change as year-on-year
+growth: +8.6% where the real figure was +6.4%. Neither number looks wrong.
+
+**Restatements get hidden.** Asking as of a year ago also refuses to see any
+revision published since. Apple restated FY2024 revenue in the FY2025 10-K
+filed 2025-10-31, and under AS_KNOWN_THEN a scorer running in November 2025
+should use that figure, because the market had it.
+
+The dates below are Apple's actual filing dates.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, date, datetime
+from decimal import Decimal
+
+import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.config import get_settings
+from app.core.calendar import Market, MarketCalendar
+from app.models import Base, Instrument
+from app.models.fundamental import FiscalPeriod, FundamentalSource
+from app.repositories import fundamental_repo as repo
+from app.repositories.fundamental_repo import FundamentalRow, RevisionPolicy
+from app.services import fundamental_service as service
+
+pytestmark = pytest.mark.integration
+
+US = MarketCalendar(Market.US)
+CONCEPT = "RevenueFromContractWithCustomerExcludingAssessedTax"
+
+# (period_start, period_end, value, filed_at, accession)
+FILINGS = [
+    (date(2022, 10, 2), date(2023, 9, 30), "383285000000", date(2023, 11, 3), "fy2023"),
+    (date(2023, 10, 1), date(2024, 9, 28), "391035000000", date(2024, 11, 1), "fy2024"),
+    (date(2024, 9, 29), date(2025, 9, 27), "416161000000", date(2025, 10, 31), "fy2025"),
+    # FY2024 restated as a comparative in the FY2025 annual report.
+    (date(2023, 10, 1), date(2024, 9, 28), "391100000000", date(2025, 10, 31), "fy2024-restated"),
+]
+
+
+@pytest.fixture(scope="module")
+def engine() -> Iterator[object]:
+    eng = create_engine(get_settings().database_url, future=True)
+    try:
+        with eng.connect():
+            pass
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"database unavailable: {exc}")
+    Base.metadata.create_all(eng)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture
+def company(engine: object) -> Iterator[tuple[Session, int]]:
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
+    with factory() as s:
+        inst = Instrument(market=Market.US, name="YOY TEST CORP", us_cik="9999999994")
+        s.add(inst)
+        s.flush()
+        iid = inst.instrument_id
+
+        repo.save_facts(
+            s,
+            [
+                FundamentalRow(
+                    instrument_id=iid,
+                    taxonomy="us-gaap",
+                    concept=CONCEPT,
+                    unit="USD",
+                    period_start=start,
+                    period_end=end,
+                    fiscal_year=end.year,
+                    fiscal_period=FiscalPeriod.FY,
+                    form="10-K",
+                    value=Decimal(amount),
+                    filed_at=filed,
+                    available_at=US.next_session_open(filed),
+                    accession=accn,
+                    source=FundamentalSource.SEC,
+                )
+                for start, end, amount, filed, accn in FILINGS
+            ],
+        )
+        s.commit()
+
+        yield s, iid
+
+        s.execute(text("DELETE FROM fundamental WHERE instrument_id = :i"), {"i": iid})
+        s.execute(text("DELETE FROM instrument WHERE instrument_id = :i"), {"i": iid})
+        s.commit()
+
+
+def prior(session: Session, iid: int, when: datetime) -> repo.FactLookup:
+    return repo.previous_annual_fact(
+        session,
+        iid,
+        concept=CONCEPT,
+        unit="USD",
+        before_period_end=date(2025, 9, 27),
+        asof=when,
+        policy=RevisionPolicy.AS_KNOWN_THEN,
+    )
+
+
+class TestThePeriodDoesNotSlip:
+    def test_the_boundary_day_still_finds_the_prior_year(
+        self, company: tuple[Session, int]
+    ) -> None:
+        """The day a 365-day subtraction fell one short.
+
+        FY2024 became usable 2024-11-04. At asof 2025-11-03 the old approach
+        looked at 2024-11-03 and took FY2023 instead.
+        """
+        session, iid = company
+
+        result = prior(session, iid, datetime(2025, 11, 3, 15, 0, tzinfo=UTC))
+
+        assert result.fact is not None
+        assert result.fact.period_end == date(2024, 9, 28)
+        assert result.fact.period_end != date(2023, 9, 30)
+
+    def test_the_gap_is_one_year_not_two(self, company: tuple[Session, int]) -> None:
+        session, iid = company
+
+        result = prior(session, iid, datetime(2025, 11, 3, 15, 0, tzinfo=UTC))
+
+        assert result.fact is not None
+        gap = (date(2025, 9, 27) - result.fact.period_end).days
+        assert gap < 400, f"{gap} days is not a year-on-year comparison"
+
+    @pytest.mark.parametrize("day", [3, 4, 10, 30])
+    def test_it_is_stable_across_nearby_dates(self, company: tuple[Session, int], day: int) -> None:
+        """The answer must not depend on which day of November it is asked."""
+        session, iid = company
+
+        result = prior(session, iid, datetime(2025, 11, day, 15, 0, tzinfo=UTC))
+
+        assert result.fact is not None
+        assert result.fact.period_end == date(2024, 9, 28)
+
+
+class TestRestatementsAreVisible:
+    def test_the_revision_is_chosen_at_the_current_asof(self, company: tuple[Session, int]) -> None:
+        """FY2024 was restated in the FY2025 10-K; the market had that figure."""
+        session, iid = company
+
+        result = prior(session, iid, datetime(2025, 11, 10, 15, 0, tzinfo=UTC))
+
+        assert result.fact is not None
+        assert result.fact.filed_at == date(2025, 10, 31)
+        assert result.value == Decimal("391100000000")
+
+    def test_before_the_restatement_the_original_stands(self, company: tuple[Session, int]) -> None:
+        """Stepping by period must not leak the future revision backwards."""
+        session, iid = company
+
+        result = repo.previous_annual_fact(
+            session,
+            iid,
+            concept=CONCEPT,
+            unit="USD",
+            before_period_end=date(2025, 9, 27),
+            asof=datetime(2025, 6, 1, 15, 0, tzinfo=UTC),
+            policy=RevisionPolicy.AS_KNOWN_THEN,
+        )
+
+        assert result.fact is not None
+        assert result.fact.filed_at == date(2024, 11, 1)
+        assert result.value == Decimal("391035000000")
+
+    def test_first_observed_policy_keeps_the_original(self, company: tuple[Session, int]) -> None:
+        session, iid = company
+
+        result = repo.previous_annual_fact(
+            session,
+            iid,
+            concept=CONCEPT,
+            unit="USD",
+            before_period_end=date(2025, 9, 27),
+            asof=datetime(2025, 11, 10, 15, 0, tzinfo=UTC),
+            policy=RevisionPolicy.FIRST_OBSERVED_IN_SOURCE,
+        )
+
+        assert result.value == Decimal("391035000000")
+
+
+class TestThroughTheSnapshot:
+    def test_growth_is_year_on_year_on_the_boundary_day(self, company: tuple[Session, int]) -> None:
+        """End to end: the figure a user would actually see."""
+        session, iid = company
+
+        snapshot = service.build_snapshot(
+            session,
+            iid,
+            asof=datetime(2025, 11, 3, 15, 0, tzinfo=UTC),
+            price=250.0,
+            currency="USD",
+            source=FundamentalSource.SEC,
+        )
+
+        current = snapshot.revenue()
+        previous = snapshot.prior_revenue()
+
+        assert current is not None and previous is not None
+        growth = (current - previous) / previous * 100
+        # Against FY2023 this read +8.6%, a two-year change labelled annual.
+        assert growth == pytest.approx(6.4, abs=0.2)
+
+    def test_no_prior_year_is_reported_as_absent_not_zero(
+        self, company: tuple[Session, int]
+    ) -> None:
+        """At the start of coverage there is genuinely nothing to compare to."""
+        session, iid = company
+
+        result = repo.previous_annual_fact(
+            session,
+            iid,
+            concept=CONCEPT,
+            unit="USD",
+            before_period_end=date(2023, 9, 30),
+            asof=datetime(2023, 12, 1, 15, 0, tzinfo=UTC),
+            policy=RevisionPolicy.AS_KNOWN_THEN,
+        )
+
+        assert result.fact is None
+        assert result.value is None

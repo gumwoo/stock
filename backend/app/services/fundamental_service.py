@@ -27,7 +27,7 @@ be the easiest place in the system to reintroduce a leak.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
@@ -150,6 +150,46 @@ def _at_anchor(
     return _from_lookup(concept, result)
 
 
+def _previous_annual(
+    session: Session,
+    instrument_id: int,
+    concept: str,
+    *,
+    before_period_end: date,
+    asof: datetime,
+    policy: RevisionPolicy,
+    ingested_before: datetime | None,
+    source: FundamentalSource | None,
+) -> ReportedValue:
+    """The prior fiscal year, chosen by calendar and read at the current asof.
+
+    Stepping back one fiscal period rather than 365 days matters twice over.
+
+    The period must be the one immediately before the anchor. Apple's FY2024
+    became usable on 2024-11-04, so a score run on 2025-11-03 put `asof - 365`
+    one day short of it and fell through to FY2023 — reporting a 728-day change
+    as year-on-year growth, +8.6% where the truth was +6.4%. Neither figure
+    looks wrong on its own.
+
+    The revision must be the one knowable *now*. Asking as of a year ago also
+    hides every restatement published since; Apple restated FY2024 revenue in
+    the FY2025 10-K, and under AS_KNOWN_THEN a scorer running afterwards should
+    use it, because the market had it.
+    """
+    result = fundamental_repo.previous_annual_fact(
+        session,
+        instrument_id,
+        concept=concept,
+        unit=CONCEPT_UNITS[concept],
+        before_period_end=before_period_end,
+        asof=asof,
+        policy=policy,
+        ingested_before=ingested_before,
+        source=source,
+    )
+    return _from_lookup(concept, result)
+
+
 def _choose_anchor(
     session: Session,
     instrument_id: int,
@@ -244,13 +284,13 @@ def build_snapshot(
         for concept, months in REQUIRED_MONTHS.items()
     }
 
-    a_year_earlier = asof - timedelta(days=365)
     prior = {
-        concept: _latest(
+        concept: _previous_annual(
             session,
             instrument_id,
             concept,
-            asof=a_year_earlier,
+            before_period_end=anchor.period_end,
+            asof=asof,
             policy=policy,
             ingested_before=ingested_before,
             source=source,

@@ -420,6 +420,91 @@ def latest_value_as_of(
     )
 
 
+def previous_annual_fact(
+    session: Session,
+    instrument_id: int,
+    *,
+    concept: str,
+    unit: str,
+    before_period_end: date,
+    asof: datetime,
+    taxonomy: str = "us-gaap",
+    months: int = 12,
+    policy: RevisionPolicy = RevisionPolicy.AS_KNOWN_THEN,
+    ingested_before: datetime | None = None,
+    source: FundamentalSource | None = None,
+) -> FactLookup:
+    """The annual period immediately before `before_period_end`.
+
+    Steps back one *fiscal period*, not one calendar year. Subtracting 365 days
+    from `asof` and asking what was latest then looks equivalent and is not,
+    because it conflates two unrelated things: when a period ended, and when
+    its report happened to become readable.
+
+    Both ways of getting it wrong were observable in Apple's own data:
+
+    * FY2024 became usable on 2024-11-04. Scoring on 2025-11-03 put
+      `asof - 365` at 2024-11-03, one day short, so the lookup fell through to
+      FY2023 and reported a 728-day change as year-on-year growth — +8.6%
+      where the real figure was +6.4%. Both are perfectly plausible numbers.
+
+    * Asking as of a year ago also refuses to see any revision published
+      since. Apple restated FY2024 revenue in the FY2025 10-K filed
+      2025-10-31; a scorer running in November 2025 under AS_KNOWN_THEN should
+      use that, because the market had it.
+
+    So the period is chosen by fiscal calendar, and only then is the revision
+    chosen by the *current* `asof`.
+    """
+    low, high = months * 28, months * 31 + 10
+    span = Fundamental.period_end - Fundamental.period_start
+
+    prior_end = session.execute(
+        select(func.max(Fundamental.period_end)).where(
+            Fundamental.instrument_id == instrument_id,
+            Fundamental.taxonomy == taxonomy,
+            Fundamental.concept == concept,
+            Fundamental.unit == unit,
+            Fundamental.period_end < before_period_end,
+            Fundamental.period_start.is_not(None),
+            span.between(low, high),
+            Fundamental.available_at <= asof,
+            *([Fundamental.ingested_at <= ingested_before] if ingested_before else []),
+            *([Fundamental.source == source] if source else []),
+        )
+    ).scalar()
+
+    if prior_end is None:
+        return _empty_result(session, instrument_id, asof, source, None, ingested_before)
+
+    prior_start = session.execute(
+        select(func.max(Fundamental.period_start)).where(
+            Fundamental.instrument_id == instrument_id,
+            Fundamental.taxonomy == taxonomy,
+            Fundamental.concept == concept,
+            Fundamental.unit == unit,
+            Fundamental.period_end == prior_end,
+            Fundamental.available_at <= asof,
+        )
+    ).scalar()
+
+    return value_as_of(
+        session,
+        instrument_id,
+        FundamentalContext(
+            taxonomy=taxonomy,
+            concept=concept,
+            unit=unit,
+            period_end=prior_end,
+            period_start=prior_start,
+        ),
+        asof=asof,
+        policy=policy,
+        ingested_before=ingested_before,
+        source=source,
+    )
+
+
 def revisions_of(
     session: Session,
     instrument_id: int,
