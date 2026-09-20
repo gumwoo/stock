@@ -70,6 +70,7 @@ class ReportedValue:
     filed_at: date | None = None
     form: str | None = None
     period_end: date | None = None
+    period_start: date | None = None
 
     @property
     def present(self) -> bool:
@@ -89,6 +90,7 @@ class FundamentalSnapshot:
     currency: str
     values: Mapping[str, ReportedValue]
     prior_year: Mapping[str, ReportedValue] | None = None
+    anchor_period_end: date | None = None
 
     def get(self, concept: str) -> ReportedValue | None:
         return self.values.get(concept)
@@ -97,21 +99,50 @@ class FundamentalSnapshot:
         entry = self.values.get(concept)
         return entry.as_float() if entry else None
 
-    def revenue(self) -> float | None:
+    def aligned(self, *concepts: str) -> tuple[float, ...] | None:
+        """Values for `concepts`, only if they all describe one period.
+
+        Returns None when any is missing or when their `period_end` dates
+        disagree. A ratio across two periods is not an approximation — it
+        describes no period that existed, and it looks entirely normal, so
+        the only safe response is to decline to compute it.
+
+        The assembler already pins everything to one anchor, making this a
+        second line of defence. It is worth having: this is the last point
+        before a number reaches a user, and a future caller assembling a
+        snapshot by hand would otherwise reintroduce the fault silently.
+        """
+        entries = [self.values.get(c) for c in concepts]
+        if any(e is None or not e.present for e in entries):
+            return None
+
+        periods = {e.period_end for e in entries if e is not None}
+        if len(periods) > 1:
+            return None
+
+        return tuple(e.as_float() for e in entries if e is not None)  # type: ignore[misc]
+
+    def revenue_entry(self) -> ReportedValue | None:
         """Revenue under either of the two tags filers use.
 
         `Revenues` is the older tag; ASC 606 filers commonly use
         `RevenueFromContractWithCustomerExcludingAssessedTax` instead. Treating
-        only one as canonical loses whole companies.
+        only one as canonical loses whole companies, and preferring the wrong
+        one is silent — Apple's `Revenues` series stops in 2018, so a margin
+        built on it would divide current income by seven-year-old revenue.
         """
         for concept in (
             "RevenueFromContractWithCustomerExcludingAssessedTax",
             "Revenues",
         ):
-            value = self.number(concept)
-            if value is not None:
-                return value
+            entry = self.values.get(concept)
+            if entry is not None and entry.present:
+                return entry
         return None
+
+    def revenue(self) -> float | None:
+        entry = self.revenue_entry()
+        return entry.as_float() if entry else None
 
     def prior_revenue(self) -> float | None:
         if not self.prior_year:
@@ -153,6 +184,20 @@ class FundamentalParams:
     revenue_growth_low: float = -0.20
     revenue_growth_high: float = 0.40
 
+    # How much of the picture must be visible before a score is worth stating.
+    # Without a floor, one metric out of five carries the whole factor: a lone
+    # ROE of 100 would produce a fundamental score of 100 at full weight, which
+    # reads as a strong company when it actually means "we could compute one
+    # thing". That contradicts the rule the rest of the system follows, that
+    # absence is never quietly turned into a judgement.
+    min_metrics: int = 3
+    require_profitability: bool = True
+
+
+# Metrics that say whether the business earns anything. A score built only
+# from leverage and growth describes a company nobody has checked is profitable.
+PROFITABILITY_METRICS = frozenset({"ROE", "Operating margin"})
+
 
 class FundamentalEngine:
     """Scores reported financials. Implements the `FactorEngine` protocol."""
@@ -180,7 +225,17 @@ class FundamentalEngine:
         self._revenue_growth(snapshot, metrics, reasons)
 
         if not metrics:
+            # Nothing computed at all. `_unavailable` explains each absent
+            # input rather than stating a coverage shortfall, which would be
+            # a less useful answer than naming what is actually missing.
             return self._unavailable(snapshot, requested_weight, provenance), ()
+
+        shortfall = self._coverage_shortfall(metrics)
+        if shortfall is not None:
+            return (
+                self._unavailable(snapshot, requested_weight, provenance, override=shortfall),
+                (),
+            )
 
         score = sum(m.normalized for m in metrics) / len(metrics)
 
@@ -194,6 +249,30 @@ class FundamentalEngine:
             provenance=provenance,
         )
         return factor, tuple(reasons)
+
+    def _coverage_shortfall(self, metrics: list[Metric]) -> str | None:
+        """Why this factor should sit out, or None if it may be scored.
+
+        Callers must handle the empty case before reaching here; an empty set
+        has no shortfall to describe, only absent inputs to explain.
+        """
+        names = {m.name for m in metrics}
+
+        if len(metrics) < self.params.min_metrics:
+            return (
+                f"only {len(metrics)} of the ratios could be computed "
+                f"({', '.join(sorted(names))}); at least {self.params.min_metrics} "
+                "are needed before a score means anything"
+            )
+
+        if self.params.require_profitability and not (names & PROFITABILITY_METRICS):
+            return (
+                "no profitability measure available "
+                f"({' or '.join(sorted(PROFITABILITY_METRICS))}); leverage and "
+                "growth alone do not say whether the business earns"
+            )
+
+        return None
 
     # --- individual ratios ------------------------------------------------
 
@@ -232,9 +311,11 @@ class FundamentalEngine:
         metrics: list[Metric],
         reasons: list[SignalReason],
     ) -> None:
-        income = snapshot.number("NetIncomeLoss")
-        equity = snapshot.number("StockholdersEquity")
-        if income is None or equity is None or equity == 0:
+        pair = snapshot.aligned("NetIncomeLoss", "StockholdersEquity")
+        if pair is None:
+            return
+        income, equity = pair
+        if equity == 0:
             return
 
         if equity < 0:
@@ -264,9 +345,11 @@ class FundamentalEngine:
         metrics: list[Metric],
         reasons: list[SignalReason],
     ) -> None:
-        liabilities = snapshot.number("Liabilities")
-        assets = snapshot.number("Assets")
-        if liabilities is None or assets is None or assets <= 0:
+        pair = snapshot.aligned("Liabilities", "Assets")
+        if pair is None:
+            return
+        liabilities, assets = pair
+        if assets <= 0:
             return
 
         ratio = liabilities / assets
@@ -287,8 +370,20 @@ class FundamentalEngine:
         metrics: list[Metric],
         reasons: list[SignalReason],
     ) -> None:
-        operating = snapshot.number("OperatingIncomeLoss")
-        revenue = snapshot.revenue()
+        operating_entry = snapshot.values.get("OperatingIncomeLoss")
+        revenue_entry = snapshot.revenue_entry()
+        if (
+            operating_entry is None
+            or not operating_entry.present
+            or revenue_entry is None
+            or operating_entry.period_end != revenue_entry.period_end
+        ):
+            # The exact case Apple produces: operating income at FY2025 against
+            # a `Revenues` tag frozen at FY2018.
+            return
+
+        operating = operating_entry.as_float()
+        revenue = revenue_entry.as_float()
         if operating is None or revenue is None or revenue <= 0:
             return
 
@@ -432,6 +527,8 @@ class FundamentalEngine:
         snapshot: FundamentalSnapshot,
         requested_weight: float,
         provenance: DataProvenance,
+        *,
+        override: str | None = None,
     ) -> Factor:
         """No ratio could be computed — say precisely why.
 
@@ -441,6 +538,18 @@ class FundamentalEngine:
         collapsing them into "no data" would throw away the distinction the
         point-in-time work exists to preserve.
         """
+        if override is not None:
+            return Factor(
+                engine=Engine.FUNDAMENTAL,
+                score=0.0,
+                metrics=(),
+                requested_weight=requested_weight,
+                effective_weight=0.0,
+                availability=Availability.UNAVAILABLE,
+                provenance=provenance,
+                availability_reason=override,
+            )
+
         absent = [v for v in snapshot.values.values() if not v.present]
         if absent:
             # One representative explanation, plus a count. Listing ten

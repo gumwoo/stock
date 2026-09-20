@@ -1,9 +1,23 @@
 """Assembling a point-in-time fundamental snapshot.
 
 The seam between the repository's PIT machinery and the pure engine. Every
-lookup here goes through `fundamental_repo`, which means every value carries
-its filing provenance and every absence carries its reason — and the engine
-receives plain data that it could not have obtained any other way.
+lookup here goes through `fundamental_repo`, so every value carries its filing
+provenance and every absence carries its reason, and the engine receives plain
+data it could not have obtained any other way.
+
+**Everything is anchored to one fiscal period.** Resolving each concept
+independently looks harmless and is not: a ratio built from two different
+periods is not a wrong number, it is a number describing no period that ever
+existed, and nothing about it looks unusual. Apple's own filings produce this
+today — at a 2026 as-of date the `Revenues` tag still reports 2018-09-29,
+because Apple moved to `RevenueFromContractWithCustomerExcludingAssessedTax`
+when it adopted ASC 606, while every other concept reports 2025-09-27. An
+operating margin taken from those two would divide FY2025 income by FY2018
+revenue and read as a plausible percentage.
+
+So an anchor period is chosen first, and every input is then looked up *at that
+period*. A concept the anchor period never tagged is reported absent rather
+than silently filled from another year.
 
 `ingested_before` and `source` are threaded through every call. They are the
 two axes a backtest needs to pin, and a helper that quietly dropped them would
@@ -20,10 +34,7 @@ from sqlalchemy.orm import Session
 from app.engines.fundamental import REQUIRED_MONTHS, FundamentalSnapshot, ReportedValue
 from app.models.fundamental import FundamentalSource
 from app.repositories import fundamental_repo
-from app.repositories.fundamental_repo import (
-    FundamentalContext,
-    RevisionPolicy,
-)
+from app.repositories.fundamental_repo import FundamentalContext, RevisionPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +54,41 @@ CONCEPT_UNITS: dict[str, str] = {
     "CashAndCashEquivalentsAtCarryingValue": "USD",
 }
 
+# Preference order for choosing the anchor. Net income is tagged by essentially
+# every filer in every period, which makes it the most reliable spine; the
+# others are fallbacks for filers that do not.
+ANCHOR_CANDIDATES = (
+    "NetIncomeLoss",
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "Revenues",
+    "EarningsPerShareBasic",
+)
 
-def _lookup(
+
+def _absent(concept: str, reason: str) -> ReportedValue:
+    return ReportedValue(
+        concept=concept,
+        value=None,
+        outcome="NO_OBSERVATION_IN_SOURCE",
+        explanation=reason,
+    )
+
+
+def _from_lookup(concept: str, result: fundamental_repo.FactLookup) -> ReportedValue:
+    fact = result.fact
+    return ReportedValue(
+        concept=concept,
+        value=fact.value if fact else None,
+        outcome=result.outcome.value,
+        explanation=result.explain(),
+        filed_at=fact.filed_at if fact else None,
+        form=fact.form if fact else None,
+        period_end=fact.period_end if fact else None,
+        period_start=fact.period_start if fact else None,
+    )
+
+
+def _latest(
     session: Session,
     instrument_id: int,
     concept: str,
@@ -54,7 +98,7 @@ def _lookup(
     ingested_before: datetime | None,
     source: FundamentalSource | None,
 ) -> ReportedValue:
-    """One concept, resolved to what was knowable at `asof`."""
+    """Whatever period is most recent for this concept."""
     result = fundamental_repo.latest_value_as_of(
         session,
         instrument_id,
@@ -66,30 +110,22 @@ def _lookup(
         ingested_before=ingested_before,
         source=source,
     )
-    fact = result.fact
-    return ReportedValue(
-        concept=concept,
-        value=fact.value if fact else None,
-        outcome=result.outcome.value,
-        explanation=result.explain(),
-        filed_at=fact.filed_at if fact else None,
-        form=fact.form if fact else None,
-        period_end=fact.period_end if fact else None,
-    )
+    return _from_lookup(concept, result)
 
 
-def _at_period(
+def _at_anchor(
     session: Session,
     instrument_id: int,
     concept: str,
-    period_end: date,
     *,
+    period_start: date | None,
+    period_end: date,
     asof: datetime,
     policy: RevisionPolicy,
     ingested_before: datetime | None,
     source: FundamentalSource | None,
-) -> ReportedValue | None:
-    """An instantaneous fact pinned to one balance date."""
+) -> ReportedValue:
+    """This concept at exactly the anchor period, or a reasoned absence."""
     result = fundamental_repo.value_as_of(
         session,
         instrument_id,
@@ -98,7 +134,7 @@ def _at_period(
             concept=concept,
             unit=CONCEPT_UNITS[concept],
             period_end=period_end,
-            period_start=None,
+            period_start=period_start,
         ),
         asof=asof,
         policy=policy,
@@ -106,16 +142,37 @@ def _at_period(
         source=source,
     )
     if result.fact is None:
-        return None
-    return ReportedValue(
-        concept=concept,
-        value=result.fact.value,
-        outcome=result.outcome.value,
-        explanation=result.explain(),
-        filed_at=result.fact.filed_at,
-        form=result.fact.form,
-        period_end=result.fact.period_end,
-    )
+        return _absent(
+            concept,
+            f"not tagged for the fiscal period ending {period_end}; using another "
+            "period would produce a ratio describing no real period",
+        )
+    return _from_lookup(concept, result)
+
+
+def _choose_anchor(
+    session: Session,
+    instrument_id: int,
+    *,
+    asof: datetime,
+    policy: RevisionPolicy,
+    ingested_before: datetime | None,
+    source: FundamentalSource | None,
+) -> ReportedValue | None:
+    """The fiscal period every input will be pinned to."""
+    for concept in ANCHOR_CANDIDATES:
+        candidate = _latest(
+            session,
+            instrument_id,
+            concept,
+            asof=asof,
+            policy=policy,
+            ingested_before=ingested_before,
+            source=source,
+        )
+        if candidate.present and candidate.period_end is not None:
+            return candidate
+    return None
 
 
 def build_snapshot(
@@ -129,17 +186,7 @@ def build_snapshot(
     ingested_before: datetime | None = None,
     source: FundamentalSource | None = None,
 ) -> FundamentalSnapshot:
-    """Resolve every concept the engine might use, as of one instant.
-
-    **Balance items are pinned to the income statement's period.** A ratio that
-    divides a flow by a stock has to take both from the same date, or it is not
-    the ratio it claims to be. Left unpinned, Apple's ROE came out as FY2025
-    annual net income over a balance dated nine months later — a number that
-    corresponds to no actual period.
-
-    The alignment is best-effort: if that period's balance was never tagged,
-    the latest one is used and its own `period_end` records what happened, so
-    the mismatch is visible rather than hidden.
+    """Resolve every concept the engine might use, all at one fiscal period.
 
     The prior-year block is fetched by asking the same question a year earlier
     rather than by reaching for the previous period row. That matters: a
@@ -147,41 +194,59 @@ def build_snapshot(
     rate would compare a restated number against an original one and report a
     change that never happened.
     """
-    values = {
-        concept: _lookup(
-            session,
-            instrument_id,
-            concept,
-            asof=asof,
-            policy=policy,
-            ingested_before=ingested_before,
-            source=source,
-        )
-        for concept in CONCEPT_UNITS
-    }
+    anchor = _choose_anchor(
+        session,
+        instrument_id,
+        asof=asof,
+        policy=policy,
+        ingested_before=ingested_before,
+        source=source,
+    )
 
-    # Anchor on the annual income statement, then pull balances to match.
-    anchor = values.get("NetIncomeLoss")
-    if anchor is not None and anchor.period_end is not None:
-        for concept, months in REQUIRED_MONTHS.items():
-            if months is not None:
-                continue
-            aligned = _at_period(
+    if anchor is None or anchor.period_end is None:
+        # Nothing to anchor to. Report each concept's own absence, which
+        # carries the repository's reason for why it is missing.
+        values = {
+            concept: _latest(
                 session,
                 instrument_id,
                 concept,
-                anchor.period_end,
                 asof=asof,
                 policy=policy,
                 ingested_before=ingested_before,
                 source=source,
             )
-            if aligned is not None:
-                values[concept] = aligned
+            for concept in CONCEPT_UNITS
+        }
+        return FundamentalSnapshot(
+            instrument_id=instrument_id,
+            asof=asof,
+            price=price,
+            currency=currency,
+            values=values,
+            anchor_period_end=None,
+        )
+
+    # Duration facts share the anchor's span; instantaneous ones are measured
+    # at its end date and carry no start at all.
+    values = {
+        concept: _at_anchor(
+            session,
+            instrument_id,
+            concept,
+            period_start=anchor.period_start if months is not None else None,
+            period_end=anchor.period_end,
+            asof=asof,
+            policy=policy,
+            ingested_before=ingested_before,
+            source=source,
+        )
+        for concept, months in REQUIRED_MONTHS.items()
+    }
 
     a_year_earlier = asof - timedelta(days=365)
     prior = {
-        concept: _lookup(
+        concept: _latest(
             session,
             instrument_id,
             concept,
@@ -203,4 +268,5 @@ def build_snapshot(
         currency=currency,
         values=values,
         prior_year=prior,
+        anchor_period_end=anchor.period_end,
     )

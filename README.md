@@ -181,9 +181,24 @@ configured: watchlist, daily bars and FX from yfinance, the technical factor
 engine, signal assembly with all three clocks enforced, and a dashboard whose
 drawer shows raw → normalized → weight → contribution for every metric.
 
-Next: Phase 2 fundamentals (SEC EDGAR point-in-time reconstruction + DART) ·
-Phase 3 backtest and walk-forward · Phase 4 sentiment and forward-test ·
-Phase 5 alerts, portfolio optimisation and the remaining screens.
+**Phase 2 in progress.**
+
+| | |
+| --- | --- |
+| SEC EDGAR point-in-time reconstruction | done |
+| Filing register (proves what was published, not just what we tagged) | done |
+| Fundamental engine, anchored to one fiscal period | done |
+| Base layer scoring: technical 0.6 + fundamental 0.4 | done |
+| DART collector | next |
+| Korean fundamentals | blocked on DART |
+
+Then: Phase 3 backtest and walk-forward · Phase 4 event overlay, market regime
+and forward-test · Phase 5 alerts, portfolio optimisation and the remaining
+screens.
+
+Note that sentiment is no longer a weighted factor. It became an event overlay
+with its own half-life, sitting above the base score rather than inside it —
+see the design note on the three layers.
 
 ---
 
