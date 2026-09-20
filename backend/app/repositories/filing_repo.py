@@ -15,6 +15,7 @@ different provenance has not been reproduced.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import date, datetime
 from typing import NamedTuple
@@ -46,13 +47,38 @@ def save_filings(session: Session, rows: Sequence[FilingRow]) -> int:
     return len(session.execute(stmt.returning(Filing.id)).scalars().all())
 
 
+# Which report kinds count as covering a fiscal period, per source. Both lists
+# mean the same thing in their own filing regime: the periodic reports a
+# company is required to publish. They cannot be merged, because a register
+# holding both would otherwise let a Korean report satisfy a US period.
+FORM_FAMILIES: dict[FundamentalSource, tuple[str, ...]] = {
+    FundamentalSource.SEC: ("10-K", "10-Q", "20-F", "40-F"),
+    FundamentalSource.DART: ("사업보고서", "반기보고서", "분기보고서"),
+    # yfinance reports no filings at all, so it can never evidence absence.
+    FundamentalSource.YFINANCE: (),
+}
+
+_AMENDMENT_PREFIX = re.compile(r"^\s*\[[^\]]*\]\s*")
+_PERIOD_SUFFIX = re.compile(r"\s*\([^)]*\)\s*$")
+
+
 def form_family(form: str) -> str:
-    """Strip the amendment suffix: 10-K/A belongs to the 10-K family.
+    """Reduce a published report name to the kind of report it is.
+
+    Both regimes decorate the name, and in both cases the decoration says
+    something about *this* filing rather than about what kind of report it is:
+
+        10-K/A              an amendment to a 10-K
+        [기재정정]사업보고서 (2025.12)   a corrected 사업보고서 for FY2025
 
     An amendment is a correction to a report, not a separate kind of report, so
-    for "did a report covering this period exist" they count as one.
+    for "did a report covering this period exist" they count as one. The
+    parenthesised period is stripped for the same reason — it is already
+    carried, as a date, in `period_of_report`, and leaving it in the family
+    would make every fiscal period its own report kind.
     """
-    return form.split("/", 1)[0]
+    stripped = _PERIOD_SUFFIX.sub("", _AMENDMENT_PREFIX.sub("", form))
+    return stripped.split("/", 1)[0].strip()
 
 
 def covering_report_exists(
@@ -61,7 +87,8 @@ def covering_report_exists(
     *,
     period_end: date,
     asof: datetime,
-    families: Sequence[str] = ("10-K", "10-Q", "20-F", "40-F"),
+    source: FundamentalSource | None = None,
+    families: Sequence[str] | None = None,
     ingested_before: datetime | None = None,
 ) -> Filing | None:
     """The earliest report covering `period_end` that was available by `asof`.
@@ -71,10 +98,34 @@ def covering_report_exists(
     day and a report either covers it or does not.
 
     Args:
+        source: whose filing regime to read this register in, which also
+            restricts the search to that source's filings. Which names count
+            as a periodic report is a fact about the regulator, not about
+            reports in general, so a fixed list of SEC form types would
+            silently find nothing in a Korean register — and finding nothing
+            here is what licenses the strongest absence claim we make.
+            Omitting it reads the register under every known regime.
+        families: overrides the source's list, for callers testing a narrower
+            question than "was any periodic report filed".
         ingested_before: restrict to filings the register already held then.
             A filing backfilled afterwards carries an old `filed_at` and
             would otherwise change how a reproduced run classifies absence.
     """
+    if families is None:
+        families = (
+            FORM_FAMILIES[source]
+            if source is not None
+            # No source named means no regime named, so any regime's periodic
+            # report counts. This cannot cross-witness in practice — an
+            # instrument files in one regime — and the alternative, refusing
+            # to read the register at all, would quietly disarm the one check
+            # that keeps `NOT_YET_FILED` from being a guess.
+            else tuple(name for group in FORM_FAMILIES.values() for name in group)
+        )
+    if not families:
+        # This source files nothing we can read, so it cannot witness absence.
+        return None
+
     stmt = (
         select(Filing)
         .where(
@@ -84,6 +135,8 @@ def covering_report_exists(
         )
         .order_by(Filing.filed_at)
     )
+    if source is not None:
+        stmt = stmt.where(Filing.source == source)
     if ingested_before is not None:
         stmt = stmt.where(Filing.ingested_at <= ingested_before)
 

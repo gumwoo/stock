@@ -27,6 +27,7 @@ from app.collectors.dart_fundamental import (
     _parse_amount,
     filed_date_from_receipt,
     fiscal_period_bounds,
+    report_period_end,
 )
 
 
@@ -132,3 +133,134 @@ class TestAccountMapping:
     def test_every_instantaneous_concept_is_mapped(self) -> None:
         for concept in INSTANTANEOUS:
             assert concept in ACCOUNT_MAP.values()
+
+
+class TestReportPeriods:
+    """DART states a report's period only inside its own name.
+
+    `list.json` has no period field, so a register built without parsing the
+    name matches no fiscal period ever — and a failed match is what the
+    absence logic reads as proof the company has not filed.
+    """
+
+    @pytest.mark.parametrize(
+        ("report_nm", "expected"),
+        [
+            ("사업보고서 (2025.12)", date(2025, 12, 31)),
+            ("반기보고서 (2026.06)", date(2026, 6, 30)),
+            ("분기보고서 (2024.03)", date(2024, 3, 31)),
+            ("사업보고서 (2024.02)", date(2024, 2, 29)),
+        ],
+    )
+    def test_the_period_is_the_last_day_of_the_stated_month(
+        self, report_nm: str, expected: date
+    ) -> None:
+        assert report_period_end(report_nm) == expected
+
+    def test_a_correction_still_states_its_period(self) -> None:
+        assert report_period_end("[기재정정]분기보고서 (2024.03)") == date(2024, 3, 31)
+
+    @pytest.mark.parametrize("report_nm", ["감사보고서제출", "사업보고서", "사업보고서 (2025.13)"])
+    def test_a_name_without_a_usable_period_yields_nothing(self, report_nm: str) -> None:
+        """Null is honest here: such a filing simply never matches a period."""
+        assert report_period_end(report_nm) is None
+
+
+class TestFormFamilies:
+    """A periodic report is called 10-K in one regime and 사업보고서 in another."""
+
+    def test_korean_report_kinds_are_recognised(self) -> None:
+        from app.models.fundamental import FundamentalSource
+        from app.repositories.filing_repo import FORM_FAMILIES, form_family
+
+        korean = FORM_FAMILIES[FundamentalSource.DART]
+        for name in ("사업보고서 (2025.12)", "반기보고서 (2026.06)", "분기보고서 (2024.03)"):
+            assert form_family(name) in korean
+
+    def test_a_correction_belongs_to_the_family_it_corrects(self) -> None:
+        """As 10-K/A does: an amendment is not a different kind of report."""
+        from app.repositories.filing_repo import form_family
+
+        assert form_family("[기재정정]사업보고서 (2025.12)") == "사업보고서"
+        assert form_family("10-K/A") == "10-K"
+
+    def test_the_period_never_leaks_into_the_family(self) -> None:
+        """Otherwise every fiscal period becomes its own kind of report."""
+        from app.repositories.filing_repo import form_family
+
+        assert form_family("사업보고서 (2025.12)") == form_family("사업보고서 (2024.12)")
+
+    def test_a_source_without_filings_has_an_empty_family_list(self) -> None:
+        from app.models.fundamental import FundamentalSource
+        from app.repositories.filing_repo import FORM_FAMILIES
+
+        assert FORM_FAMILIES[FundamentalSource.YFINANCE] == ()
+
+
+class TestFilingPagination:
+    """`list.json` caps a page at 100 and reports how many pages exist.
+
+    Reading only the first page does not merely lose filings — the ones it
+    drops are the oldest, so the register appears to begin later than it does
+    and declines to speak about periods it could have witnessed. Samsung's
+    periodic disclosures since 1999 came back as exactly 100 rows, which is
+    what that truncation looks like from the outside.
+    """
+
+    def _collector_over(self, pages: list[list[dict[str, str]]]) -> object:
+        from app.collectors.dart_fundamental import DartFundamentalCollector
+
+        collector = DartFundamentalCollector()
+        requested: list[str] = []
+
+        def fake_get(client: object, path: str, **params: str) -> dict[str, object]:
+            requested.append(params.get("page_no", "1"))
+            index = int(params.get("page_no", "1")) - 1
+            return {"status": "000", "list": pages[index], "total_page": len(pages)}
+
+        collector._get = fake_get  # type: ignore[assignment,method-assign]
+        collector.requested = requested  # type: ignore[attr-defined]
+        return collector
+
+    @staticmethod
+    def _page(start: int, count: int) -> list[dict[str, str]]:
+        return [
+            {
+                "rcept_no": f"2020{i % 12 + 1:02d}10{i:06d}",
+                "report_nm": f"분기보고서 (2020.{i % 12 + 1:02d})",
+            }
+            for i in range(start, start + count)
+        ]
+
+    def test_every_page_is_read(self) -> None:
+        from app.core.calendar import Market, MarketCalendar
+
+        pages = [self._page(0, 100), self._page(100, 14)]
+        collector = self._collector_over(pages)
+        rows = collector._collect_filings(  # type: ignore[attr-defined]
+            None, "00126380", 1, MarketCalendar(Market.KR)
+        )
+
+        assert len(rows) == 114
+        assert collector.requested == ["1", "2"]  # type: ignore[attr-defined]
+
+    def test_a_single_page_does_not_ask_for_another(self) -> None:
+        from app.core.calendar import Market, MarketCalendar
+
+        collector = self._collector_over([self._page(0, 7)])
+        rows = collector._collect_filings(  # type: ignore[attr-defined]
+            None, "00126380", 1, MarketCalendar(Market.KR)
+        )
+
+        assert len(rows) == 7
+        assert collector.requested == ["1"]  # type: ignore[attr-defined]
+
+    def test_paged_filings_carry_their_period(self) -> None:
+        from app.core.calendar import Market, MarketCalendar
+
+        collector = self._collector_over([self._page(0, 3)])
+        rows = collector._collect_filings(  # type: ignore[attr-defined]
+            None, "00126380", 1, MarketCalendar(Market.KR)
+        )
+
+        assert all(r.period_of_report is not None for r in rows)

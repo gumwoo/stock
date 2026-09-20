@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -116,6 +117,34 @@ def fiscal_period_bounds(business_year: int, fiscal_end_month: int) -> tuple[dat
     period_start = date(start_year, start_month, 1)
 
     return period_start, period_end
+
+
+# `사업보고서 (2025.12)`, `[기재정정]반기보고서 (2026.06)`. The period is stated
+# only inside the report's name, to month granularity.
+_REPORT_PERIOD = re.compile(r"\((\d{4})\.(\d{2})\)")
+
+
+def report_period_end(report_nm: str) -> date | None:
+    """The fiscal period a periodic report covers, from its published name.
+
+    DART states this nowhere else. `list.json` has no period field at all, so
+    without parsing the name every filing lands in the register with a null
+    period and matches no fiscal period ever — which does not merely lose
+    information, it inverts the meaning of the register. A missing match is
+    what licenses `NOT_YET_FILED`, so a register that can never match turns
+    "the report exists but our value source did not tag this account" into
+    "the company has not filed yet".
+
+    Returns the last day of the stated month, which is where every Korean
+    periodic report ends, or None when the name carries no period.
+    """
+    match = _REPORT_PERIOD.search(report_nm)
+    if match is None:
+        return None
+    year, month = int(match.group(1)), int(match.group(2))
+    if not 1 <= month <= 12:
+        return None
+    return date(year, month, calendar.monthrange(year, month)[1])
 
 
 def filed_date_from_receipt(rcept_no: str) -> date | None:
@@ -254,34 +283,58 @@ class DartFundamentalCollector(BaseCollector):
         instrument_id: int,
         calendar: MarketCalendar,
     ) -> list[FilingRow]:
-        """Periodic disclosures, so absence can be told from non-publication."""
-        payload = self._get(
-            client,
-            "list.json",
-            corp_code=corp_code,
-            bgn_de="19990101",
-            end_de=utc_now().date().strftime("%Y%m%d"),
-            pblntf_ty="A",  # 정기공시
-            page_count="100",
-        )
+        """Periodic disclosures, so absence can be told from non-publication.
 
+        Paged to the end. `list.json` caps a page at 100 and reports how many
+        pages there are, and a register that stops at the first page is not
+        merely incomplete — the filings it drops are the oldest ones, so the
+        register appears to begin later than it does and declines to speak
+        about periods it could have witnessed.
+        """
         rows: list[FilingRow] = []
-        for item in payload.get("list") or []:
-            rcept_no = str(item.get("rcept_no") or "")
-            filed_at = filed_date_from_receipt(rcept_no)
-            if filed_at is None:
-                continue
-            rows.append(
-                FilingRow(
-                    instrument_id=instrument_id,
-                    form=str(item.get("report_nm") or "").strip(),
-                    filed_at=filed_at,
-                    period_of_report=None,
-                    available_at=calendar.next_session_open(filed_at),
-                    accession=rcept_no,
-                    source=FundamentalSource.DART,
-                )
+        page_no = 1
+
+        while True:
+            payload = self._get(
+                client,
+                "list.json",
+                corp_code=corp_code,
+                bgn_de="19990101",
+                end_de=utc_now().date().strftime("%Y%m%d"),
+                pblntf_ty="A",  # 정기공시
+                page_count="100",
+                page_no=str(page_no),
             )
+            items = payload.get("list") or []
+            if not items:
+                break
+
+            for item in items:
+                rcept_no = str(item.get("rcept_no") or "")
+                filed_at = filed_date_from_receipt(rcept_no)
+                if filed_at is None:
+                    continue
+                report_nm = str(item.get("report_nm") or "").strip()
+                rows.append(
+                    FilingRow(
+                        instrument_id=instrument_id,
+                        form=report_nm,
+                        filed_at=filed_at,
+                        period_of_report=report_period_end(report_nm),
+                        available_at=calendar.next_session_open(filed_at),
+                        accession=rcept_no,
+                        source=FundamentalSource.DART,
+                    )
+                )
+
+            try:
+                total_pages = int(payload.get("total_page") or 1)
+            except (TypeError, ValueError):
+                break
+            if page_no >= total_pages:
+                break
+            page_no += 1
+
         return rows
 
     def _to_rows(

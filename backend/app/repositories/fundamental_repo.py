@@ -276,7 +276,7 @@ def _empty_result(
         return FactLookup(FactOutcome.NO_OBSERVATION_IN_SOURCE, coverage_start=begins)
 
     register_begins = filing_repo.register_start(
-        session, instrument_id, ingested_before=ingested_before
+        session, instrument_id, source=source, ingested_before=ingested_before
     )
     if register_begins is None or asof.date() < register_begins:
         # The register cannot speak to this date either, so no claim is made.
@@ -287,6 +287,7 @@ def _empty_result(
         instrument_id,
         period_end=period_end,
         asof=asof,
+        source=source,
         ingested_before=ingested_before,
     )
     if covering is not None:
