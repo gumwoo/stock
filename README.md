@@ -1,85 +1,71 @@
 # stock
 
-Point-in-time correct stock analysis, portfolio tracking and signal generation
-for Korean (KRX) and US markets.
+한국(KRX)과 미국 시장을 대상으로 하는 **시점 정합(point-in-time) 주식 분석·포트폴리오
+추적·신호 생성** 시스템.
 
-This is an **analysis tool**. It produces signals and the evidence behind them.
-It does not place orders, and it is not investment advice.
-
----
-
-## What this is trying to get right
-
-Most hobby backtesters produce impressive numbers by accident. The numbers are
-impressive because the backtest quietly saw the future. This project treats that
-as the main engineering problem rather than an afterthought.
-
-**Two time axes, not one.** Every source row records both `available_at` (when
-a market participant could have known it) and `ingested_at` (when our database
-actually got it). Filtering on the first alone is not enough: a filing
-backfilled next month has a *past* filing date, sails through the point-in-time
-filter, and silently changes the result of a backtest that ran before it
-arrived. Reproduce mode filters on both.
-
-**Data is append-only, so corrections do not rewrite the past.** When a provider
-restates a bar, a new revision is stored beside the original rather than
-replacing it. Updating in place while holding `ingested_at` at its first-seen
-value would be worse than either alternative: the row's values would come from
-one date while its transaction time claimed another, and a snapshot taken
-before the correction would serve the correction anyway.
-
-**Filings are usable the next session, not the same day.** DART publishes
-`rcept_dt` as `YYYYMMDD` and SEC's `filed` is a date too. Neither can
-distinguish a disclosure that appeared at 06:00 from one that appeared at 14:00
-— and under Regulation S-T Rule 13, anything transmitted after 17:30 ET is
-deemed filed the *next* business day anyway. Since the data granularity cannot
-separate these cases, the boundary is the next session's open.
-
-**US fundamentals are reconstructed from SEC XBRL, not scraped from a snapshot.**
-Each XBRL fact carries its own `filed` date and accession number, and the same
-(concept, period) appears repeatedly as later filings restate it. That is what
-makes "the value as known on date X" recoverable. yfinance only exposes the
-latest revision, so it is a fallback for gaps, never the primary source.
-
-**A bar is not knowable until it closes.** A daily bar carries a close, a high,
-a low and a volume, none of which exist while the session is still running. So
-`ts` (bar open) and `available_at` (bar complete) are separate columns, and
-simulations filter on the second. Filtering on the first would hand a decision
-made at 10:00 that day's closing price.
-
-**A decision cannot fill at the price that produced it.** A signal computed from
-a session's close is finalised *after* that close, so the earliest honest fill
-is the next session's open. Three separate timestamps — `data_asof`,
-`decision_at`, `earliest_execution_at` — keep that explicit.
-
-**Collector failure is not the same as data being unusable.** A DART collector
-that failed this morning says nothing about a quarterly filing collected last
-week. Availability is decided through a chain: collector health → data freshness
-→ factor availability → missing-factor policy. Freshness itself is judged
-differently per factor — technical against trading sessions, news against
-wall-clock age, fundamentals against how recently the source was successfully
-checked.
-
-**Scores are decomposed, not asserted.** An RSI-based 80 and an ROE-based 80 are
-not the same quantity, so raw metrics are normalized to a 0-100 position before
-weighting. Every factor stores its raw value, normalized position, requested
-weight, effective weight and resulting contribution — so "why was this 59.7?" is
-answerable from stored rows alone.
-
-That normalization is currently a fixed scale, not a cross-sectional one.
-Ranking an instrument against its peers needs peers, and there are two
-instruments here; `percentile_rank` exists and nothing calls it. `bounded` and
-`peak_at` map a value onto a stated range instead — a fixed opinion rather than
-a comparison, kept as separate functions so the difference is visible at the
-call site rather than hidden behind a fallback. Which one a strategy uses
-becomes a real choice once the universe is large enough to rank within.
+이것은 **분석 도구**다. 신호와 그 근거를 만들어 보여줄 뿐, 주문을 내지 않으며 투자 자문도
+아니다.
 
 ---
 
-## Quick start
+## 이 프로젝트가 제대로 하려는 것
 
-Nothing needs an API key to start. The dashboard runs with zero credentials
-configured; each collector that lacks its key sits out and says so.
+취미로 만든 백테스터는 인상적인 숫자를 곧잘 만들어낸다. 인상적인 이유는 대개 백테스트가
+조용히 미래를 봤기 때문이다. 이 프로젝트는 그 문제를 나중에 손볼 것이 아니라 **주된 공학
+문제**로 다룬다.
+
+**시간축은 하나가 아니라 둘이다.** 모든 원천 행은 `available_at`(시장 참여자가 언제 알 수
+있었나)과 `ingested_at`(우리 DB가 언제 실제로 확보했나)을 함께 기록한다. 앞의 것만으로는
+부족하다. 다음 달에 백필된 공시는 *과거* 제출일을 달고 있어 시점 필터를 그대로 통과하고,
+그 공시가 도착하기 전에 돌렸던 백테스트의 결과를 조용히 바꿔놓는다. 재현 모드는 둘 다
+건다.
+
+**데이터는 append-only라서 정정이 과거를 다시 쓰지 않는다.** 제공자가 봉을 정정하면 원본을
+덮는 대신 새 리비전을 옆에 쌓는다. 제자리에서 수정하면서 `ingested_at`을 최초 확보 시각으로
+두는 것은 두 대안보다 나쁘다 — 값은 한 날짜에서 오는데 트랜잭션 시각은 다른 날짜를 주장하게
+되고, 정정 전에 찍은 스냅샷이 정정된 값을 내주게 된다.
+
+**공시는 당일이 아니라 다음 세션부터 쓸 수 있다.** DART는 `rcept_dt`를 `YYYYMMDD`로만 주고
+SEC의 `filed`도 날짜다. 둘 다 06:00에 뜬 공시와 14:00에 뜬 공시를 구분하지 못한다 — 게다가
+Regulation S-T Rule 13에 따르면 17:30 ET 이후 전송분은 *다음* 영업일에 제출된 것으로
+간주된다. 데이터 입도가 이 경우들을 가르지 못하므로, 경계는 다음 세션의 개장이다.
+
+**미국 재무는 스냅샷을 긁어오지 않고 SEC XBRL에서 재구성한다.** XBRL 팩트 하나하나가 자기
+`filed` 날짜와 접수번호를 달고 있고, 같은 (개념, 기간)이 나중 공시의 재작성으로 여러 번
+등장한다. 그것이 "X일에 알려져 있던 값"을 복원 가능하게 만든다. yfinance는 최신 리비전만
+노출하므로 빈 곳을 메우는 폴백일 뿐 1차 소스가 아니다.
+
+**봉은 닫히기 전까지 알 수 없다.** 일봉은 종가·고가·저가·거래량을 담는데, 세션이 도는 동안엔
+그중 무엇도 존재하지 않는다. 그래서 `ts`(봉 시작)와 `available_at`(봉 완성)은 별도 컬럼이고
+시뮬레이션은 뒤엣것으로 거른다. 앞엣것으로 거르면 10:00에 내린 판단에 그날 종가를 쥐여주게
+된다.
+
+**판단은 그 판단을 만든 가격에 체결될 수 없다.** 세션 종가로 계산한 신호는 그 종가 *이후*에
+확정되므로, 가장 이른 정직한 체결은 다음 세션 시가다. `data_asof`, `decision_at`,
+`earliest_execution_at` 세 시각이 그 사실을 명시적으로 유지한다.
+
+**수집 실패와 데이터를 못 쓰는 것은 다르다.** 오늘 아침 DART 수집기가 실패한 것은 지난주에
+받아둔 분기 공시에 대해 아무 말도 하지 않는다. 가용성은 사슬을 거쳐 판정된다 — 수집기 상태 →
+데이터 신선도 → 팩터 가용성 → 결측 팩터 정책. 신선도 자체도 팩터마다 다르게 판정한다.
+기술적 지표는 거래 세션 기준, 뉴스는 벽시계 기준, 재무는 소스를 마지막으로 정상 확인한
+시점 기준이다.
+
+**점수는 주장하지 않고 분해한다.** RSI 기반 80과 ROE 기반 80은 같은 양이 아니므로, 원지표는
+가중 전에 0-100 위치로 정규화된다. 모든 팩터가 raw 값, 정규화 위치, 요청 가중치, 유효
+가중치, 결과 기여도를 저장한다 — "이게 왜 59.7이었나"에 저장된 행만으로 답할 수 있도록.
+
+그 정규화는 현재 **횡단면이 아니라 고정 척도**다. 동종 대비 순위를 매기려면 비교 대상이
+필요한데, `percentile_rank`는 작성돼 있고 부르는 곳이 없다. 대신 `bounded`와 `peak_at`이
+값을 명시된 범위에 대응시킨다 — 비교가 아니라 고정된 의견이며, 차이가 폴백 뒤에 숨지 않고
+호출부에서 보이도록 별도 함수로 둔다. 유니버스가 순위를 매길 만큼 커지면 그때 어느 쪽을 쓸지가
+실제 선택이 된다.
+
+---
+
+## 빠른 시작
+
+시작하는 데 API 키는 하나도 필요 없다. 자격증명이 전혀 없어도 대시보드가 뜨고, 키가 없는
+수집기는 각자 쉬면서 그 사실을 말한다.
 
 ```bash
 cp .env.example .env
@@ -90,50 +76,60 @@ python -m venv .venv && ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
 ./.venv/Scripts/uvicorn.exe app.main:app --reload
 ```
 
-Then open <http://localhost:8000/health/config> to see what is switched on and
-which environment variable enables each thing that is not.
+그다음 <http://localhost:8000/health/config> 를 열면 무엇이 켜져 있고, 꺼진 것들은 각각 어떤
+환경변수로 켜지는지 보인다.
 
-> The containerised database listens on **5433**, not 5432, because this machine
-> already runs a local PostgreSQL 17 on the default port.
+> 컨테이너 DB는 5432가 아니라 **5433**에서 듣는다. 이 머신에 이미 로컬 PostgreSQL 17이
+> 기본 포트를 쓰고 있어서다.
 
-### Credentials, when you want them
+### 자격증명, 필요해질 때
 
-Fill any subset into `.env` and restart — no code changes.
+`.env`에 일부만 채우고 재시작하면 된다 — 코드 수정 없음.
 
-| Variable | Enables | Cost |
+| 변수 | 켜지는 것 | 비용 |
 | --- | --- | --- |
-| `TOSS_CLIENT_ID` / `_SECRET` | Live account sync, realtime quotes, KR+US orders data | Free; **your calling IP must be registered** or Toss returns 403 |
-| `SEC_USER_AGENT` | US fundamentals with true point-in-time reconstruction | Free, **no API key** — just `app-name your@email`, max 10 req/s |
-| `DART_API_KEY` | Korean fundamentals and filings | Free; note it travels in the query string, so request-URL logging is suppressed by default |
-| `NAVER_CLIENT_ID` / `_SECRET` | Korean news + DataLab search trends | Free |
-| `THREADS_ACCESS_TOKEN` / `THREADS_USER_ID` | Threads posts | Free, 2,200 queries/24h, needs Meta app review |
-| `REDDIT_CLIENT_ID` / `_SECRET` | Reddit posts (main US retail sentiment source) | Free non-commercial, 100 QPM, manual approval |
-| `ANTHROPIC_API_KEY` | LLM sentiment scoring | Paid; falls back to a rule-based scorer otherwise |
-| `SMTP_*` or `ALERT_WEBHOOK_URL` | Alert delivery | Free; logs only without it |
+| `TOSS_CLIENT_ID` / `_SECRET` | 실계좌 동기화, 실시간 시세, KR+US 주문 정보 | 무료. **호출 IP 등록 필수**, 아니면 403 |
+| `SEC_USER_AGENT` | 진짜 시점 복원이 되는 미국 재무 | 무료, **API 키 불필요** — `app-name your@email` 형식, 최대 10 req/s |
+| `DART_API_KEY` | 한국 재무와 공시 | 무료. 쿼리스트링으로 전달되므로 요청 URL 로깅을 기본 억제한다 |
+| `NAVER_CLIENT_ID` / `_SECRET` | 한국 뉴스 + DataLab 검색어 트렌드 | 무료 |
+| `THREADS_ACCESS_TOKEN` / `THREADS_USER_ID` | Threads 게시물 | 무료, 24시간 2,200쿼리, Meta 앱 심사 필요 |
+| `REDDIT_CLIENT_ID` / `_SECRET` | Reddit 게시물 (미국 개인투자자 심리의 주 소스) | 비상업 무료, 100 QPM, 수동 승인 |
+| `ANTHROPIC_API_KEY` | LLM 감성 채점 | 유료. 없으면 룰 기반 스코어러로 폴백 |
+| `SMTP_*` 또는 `ALERT_WEBHOOK_URL` | 알림 발송 | 무료. 없으면 로그로만 |
 
-X (Twitter) is deliberately absent: since its February 2026 move to pay-per-use,
-post reads bill per request and full-archive search is enterprise-only.
+X(트위터)는 의도적으로 빠져 있다. 2026년 2월 종량제 전환 이후 게시물 읽기가 요청당 과금되고
+전체 아카이브 검색은 엔터프라이즈 전용이 됐다.
 
 ---
 
-## Development
+## 개발
 
 ```bash
 cd backend && ./check.sh
 ```
 
-Runs, in order: `ruff format --check`, `ruff check`, `mypy`, `lint-imports`,
-`pytest`. All five must pass.
+순서대로 `ruff format --check`, `ruff check`, `mypy`, `lint-imports`, `pytest`를 돌린다.
+다섯 개 전부 통과해야 한다.
 
-The same five run in GitHub Actions on every push and pull request, against a
-real Postgres service, alongside a frontend typecheck and build — so the claim
-above is checked rather than asserted.
+같은 다섯 개가 push와 PR마다 GitHub Actions에서 실제 Postgres 서비스를 붙여 돌아가고,
+프론트엔드 타입체크와 빌드도 함께 돈다 — 위 주장이 주장이 아니라 검사이도록.
 
-### The architecture contract is executable
+로컬에서 `pytest`는 **빠른 절반**(단위 테스트)만 돈다. 통합 테스트는 실제 Postgres에 수백
+개의 시뮬레이션 세션을 걸기 때문에 전체가 13분쯤 걸리고, 그건 매 변경마다 치를 값이 아니다.
 
-Factor engines and the backtest engine are forbidden from importing SQLAlchemy,
-`app.models` or `app.collectors`. This is not a code-review convention — it is
-checked by `import-linter` and breaks the build:
+```bash
+pytest                  # 빠른 스위트. 수초
+pytest -m integration   # 느린 절반. 기다릴 값이 있을 때
+pytest -m ""            # 전부
+```
+
+CI는 `pytest -q -m ""`를 **명시적으로** 돈다. 개발자의 단축키를 물려받은 게이트는 절반짜리
+스위트에서 성공을 보고하면서 전체 통과와 똑같이 보인다.
+
+### 아키텍처 계약은 실행 가능하다
+
+팩터 엔진과 백테스트 엔진은 SQLAlchemy, `app.models`, `app.collectors`를 import할 수 없다.
+이건 코드리뷰 관행이 아니라 `import-linter`가 검사하고 빌드를 깨는 규칙이다.
 
 ```
 Factor engines must not touch the ORM, the DB session or collectors BROKEN
@@ -141,115 +137,140 @@ app.engines is not allowed to import app.models:
 -   app.engines.technical -> app.models (l.12)
 ```
 
-The reason it is enforced rather than trusted: the point-in-time filter lives in
-the repository layer. A `session.query(Candle)` inside an engine bypasses it and
-reintroduces look-ahead bias without failing a single test.
+믿지 않고 강제하는 이유: 시점 필터가 저장소 계층에 산다. 엔진 안의 `session.query(Candle)`
+한 줄이 그걸 우회하고, **테스트 하나 깨뜨리지 않으면서** look-ahead 편향을 다시 들여온다.
 
-### Backtests
+### 백테스트
 
 ```bash
-python -m app.cli collect --source yfinance --period 10y          # prices
-python -m app.cli collect --source dart --period 10y              # and filings, same reach
-python -m app.cli backtest run --symbol 005930 --strategy score   # the system's own rule
-python -m app.cli backtest run --symbol 005930     # default: a moving-average harness
-python -m app.cli backtest show --run 1            # what it recorded
-python -m app.cli backtest holdout --run 1         # the final measurement, once
-python -m app.cli backtest reproduce --run 1       # run it again and compare
+python -m app.cli collect --source yfinance --period 10y          # 가격
+python -m app.cli collect --source dart --period 10y              # 공시도 같은 기간으로
+python -m app.cli backtest run --symbol 005930 --strategy score   # 시스템 자신의 규칙
+python -m app.cli backtest run --symbol 005930     # 기본값: 이동평균 하네스
+python -m app.cli backtest show --run 1            # 무엇을 기록했나
+python -m app.cli backtest holdout --run 1         # 최종 측정, 단 한 번
+python -m app.cli backtest reproduce --run 1       # 다시 돌려 대조
 ```
 
-`run` deliberately stops short of the holdout. A holdout reported on every run
-gets fitted by eye, which is harder to notice than fitting it in code and no
-less real, so taking it is a separate command. `--with-holdout` exists for the
-case where the choices are already made, and for fitted runs, whose fitter is
-code and cannot be rebuilt from a stored row afterwards.
+`run`은 의도적으로 홀드아웃 직전에서 멈춘다. 매 런마다 보고되는 홀드아웃은 눈으로 맞춰지게
+되고, 그건 코드로 맞추는 것보다 알아차리기 어렵되 실체는 다르지 않다. 그래서 홀드아웃을
+가져가는 것은 별도 명령이다. `--with-holdout`은 선택이 이미 끝난 경우와, 피터가 코드라서
+저장된 행으로 사후 복원할 수 없는 fitted 런을 위해 있다.
 
-`reproduce` exits non-zero when anything differs, so it works in a check.
+`reproduce`는 무엇이든 다르면 0이 아닌 코드로 끝나므로 검사에 바로 쓸 수 있다.
 
-The Backtest screen shows the same runs with in-sample and out-of-sample in
-adjacent columns, and **Run info** opens every coordinate a reproduction would
-need — strategy, fingerprints, commit, data snapshot, costs and split.
+Backtest 화면은 같은 런들을 in-sample과 out-of-sample을 나란히 놓아 보여주고, **Run 정보**는
+재현에 필요한 좌표를 전부 연다 — 전략, 지문, 커밋, 데이터 스냅샷, 비용, 분할.
 
-- With only the technical factor participating, the current policy cannot
-  reach BUY_INTEREST. The threshold scales to the participating weight — 70 at
-  full weight becomes 42 at technical's 0.6 — which needs a technical score of
-  70, and the engine tops out near 62 on the strongest trend that can be
-  constructed. An instrument with no filings can therefore hold or exit but
-  never enter. The thresholds are deliberate and BUY_INTEREST is meant to be
-  rare, but in practice the rule is gated on having financials at all. Pinned
-  as a test so a change to a weight or threshold fails loudly rather than
-  silently altering what the system can say.
-- A run is refused when the period reaches back before the filings do, which
-  is why `--period` applies to both collectors. The first ten-year Samsung run
-  was made on ten years of prices and five years of DART filings, because the
-  collector's default reaches back five. For six and a half of those years the
-  fundamental factor stood down and the rule could hold or exit but never
-  enter, and it returned +608% as though that were a verdict on the strategy.
-  Nothing failed and nothing warned; the number simply looked plausible.
+- 기술적 팩터만 참여하면 현재 정책은 BUY_INTEREST에 닿을 수 없다. 임계치가 참여 가중치에
+  맞춰 스케일되어 전체 가중 70이 기술적 0.6에서는 42가 되는데, 그러려면 기술적 점수가 70이
+  필요하고, 엔진은 만들 수 있는 가장 강한 추세에서도 62 근처가 한계다. 따라서 공시가 없는
+  종목은 보유하거나 청산할 수는 있어도 진입할 수 없다. 임계치는 의도된 것이고 BUY_INTEREST는
+  드물어야 맞지만, 실제로 이 규칙은 **재무가 있는지에 게이팅돼 있다.** 가중치나 임계치를
+  건드리면 조용히 바뀌는 게 아니라 크게 실패하도록 테스트로 박아뒀다.
+- 기간이 공시보다 앞서 뻗으면 런을 거부한다. `--period`가 두 수집기에 모두 적용되는 이유가
+  그것이다. 첫 삼성 10년 런은 가격 10년과 DART 공시 5년으로 돌았다 — 수집기 기본값이 5년을
+  거슬러서다. 그 10년 중 6년 반 동안 재무 팩터가 물러나 있어서 규칙은 보유하거나 청산할
+  수만 있었고, 그런 채로 +608%를 전략에 대한 판정인 양 내놨다. 아무것도 실패하지 않았고
+  아무 경고도 없었다. 숫자는 그저 그럴듯해 보였다.
+- 저장된 행이 **어떤 reading으로 수집됐는지**가 기록되고, 현재 reading보다 오래된 행이 하나라도
+  있으면 재무를 읽는 런은 거부된다. 커버리지 검사로는 막을 수 없는 종류의 사고를 위해서다.
+  자세한 것은 아래 한계 항목에.
 
-#### What it measures, on the two instruments collected
+#### 무엇을 측정하는가 — 18종목
 
-Ten years to 2026-09-18, both instruments covered by anchorable financials for
-the whole span. 5bp commission, 5bp slippage, next-open fills.
+2016-09-21 ~ 2026-09-18, 수수료 5bp, 슬리피지 5bp, 다음 시가 체결. `rule`은 시스템 자신의
+규칙(70/35), `hold`는 같은 하네스에서 돌린 단순 보유.
 
-| | | total return | MDD | Sharpe | trades |
-|---|---|---:|---:|---:|---:|
-| 삼성전자 | score 70/35 | +502.43% | -42.09% | 0.78 | 2 |
-| | buy-and-hold | +714.38% | -45.16% | 0.79 | 0 |
-| Apple | score 70/35 | +184.17% | -33.62% | 0.54 | 3 |
-| | buy-and-hold | +1073.22% | -38.70% | 0.99 | 0 |
+| 종목 | rule | hold | 차이 | 거래 | 재무 전반 | 재무 후반 |
+|---|---:|---:|---:|---:|---:|---:|
+| LG화학 | +8.9% | +8.9% | 0.0% | 2 | 41.4 | 41.7 |
+| NAVER | -19.3% | +13.8% | -33.0% | 3 | 68.1 | 63.4 |
+| 현대모비스 | +2.1% | +33.3% | -31.3% | 3 | 49.6 | 49.4 |
+| POSCO홀딩스 | **+59.2%** | +40.5% | **+18.7%** | 1 | 40.6 | 39.6 |
+| P&G | +31.6% | +66.1% | -34.5% | 6 | 50.1 | 51.4 |
+| SK텔레콤 | +3.5% | +83.0% | -79.5% | 2 | 38.8 | 37.8 |
+| Coca-Cola | +80.1% | +106.0% | -25.9% | 3 | 61.7 | 70.8 |
+| Chevron | +1.8% | +107.8% | -106.0% | 2 | 22.2 | 54.1 |
+| Intel | -50.9% | +188.1% | -239.0% | 7 | 79.1 | 7.8 |
+| JPMorgan | -6.3% | +421.1% | -427.4% | 1 | 41.4 | 44.9 |
+| 삼성전자 | +502.4% | +714.4% | -212.0% | 2 | 55.9 | 59.8 |
+| Microsoft | +246.8% | +749.6% | -502.7% | 0 | 50.6 | 65.7 |
+| Apple | +184.2% | +1073.2% | -889.1% | 3 | 62.3 | 54.3 |
+| SK하이닉스 | +2462.9% | +4561.1% | -2098.1% | 2 | 68.0 | 66.8 |
+| NVIDIA | +9982.2% | +13514.0% | -3531.9% | 0 | 78.8 | 78.8 |
 
-**The rule trails buying and holding on both, on every measure but a slightly
-shallower drawdown.** It makes two trades in a decade on Samsung and three on
-Apple, and spends roughly 28% of the period out of a market that rose
-throughout — which is most of the explanation. The score sits between the two
-thresholds for 90% of sessions on Samsung and 97% on Apple, so the rule rarely
-has a view at all; it mostly holds whatever it happens to hold. Two instruments
-over one bull decade is not a verdict on the strategy, but it is what the
-harness measures.
+현대자동차와 신한지주는 거부됐다. 정정 공시 때문에 시점 복원 가능한 재무가 각각 2022년과
+2024년부터라서다(아래 한계 항목).
 
-This figure was wrong three times before it was right, and each wrong version
-looked exactly as plausible as this one:
+**많이 오른 종목일수록 더 크게 뒤처진다.** 순위 상관 −0.921. Pearson은 −0.963이지만 수익률이
+8.9%에서 13,514%까지 걸쳐 있어 NVIDIA 하나가 끌고 가므로, 규모에 휘둘리지 않는 순위 상관이
+읽을 값이다. 관계는 단조적이고 실재한다.
 
-| | | why |
+**다만 그 원인은 밸류 성향이 아니다.** Apple만 보고 세웠던 가설 — 주가가 오르면 PER·PBR이
+나빠져 재무 점수가 떨어지고 규칙이 매수를 멈춘다 — 은 15종목에서 성립하지 않는다.
+상승폭과 재무 점수 변화의 순위 상관은 **+0.050**, 사실상 0이다. 결정적인 반례 두 개:
+NVIDIA는 13,514% 오르는 동안 재무 점수가 78.8에서 78.8로 그대로였고, Chevron은 107.8%
+오르는 동안 22.2에서 54.1로 **올랐다**. Apple의 −8.0은 Apple의 사정이었다.
+
+포착률(rule/hold)도 상승폭과 무관하다(순위 상관 +0.029). 1.46(POSCO홀딩스)에서
+−1.40(NAVER)까지 흩어져 있어서, "일정 비율만 먹는다"도 아니다. 그래서 −0.921이 말하는 것은
+"규칙이 성장주에 약하다"가 아니라 **많이 오른 주식에서는 조금만 놓쳐도 절대 격차가 크게
+벌어진다**는 산수에 가깝다.
+
+**세 종목에서는 돈을 잃는다.** Intel −50.9%(보유 +188.1%), NAVER −19.3%(보유 +13.8%),
+JPMorgan −6.3%(보유 +421.1%). 보유가 버는 동안 규칙이 잃는 것은 단순한 미참여가 아니라
+타이밍이 틀렸다는 뜻이다.
+
+**엔진 자체는 반응한다.** Intel의 재무 점수는 79.1에서 7.8로 71.3점 떨어졌고, 그건 실제
+실적 붕괴를 정확히 따라간 것이다. Chevron은 +31.9 올랐다. 둔감한 것은 팩터가 아니라 점수를
+포지션으로 바꾸는 규칙이다.
+
+단정하지 않는다. 15종목·한 번의 상승장 10년은 전략에 대한 판정이 아니다. 홀드아웃을 떼어낸
+바로 그 종목들을 보고 가중치를 다시 맞추는 것이 홀드아웃을 눈으로 맞추는 방식이므로, 이
+숫자들을 근거로 바꾼 것은 없다.
+
+#### 삼성 수치는 맞기 전에 네 번 틀렸다
+
+네 번 다 이번 것만큼 그럴듯해 보였다.
+
+| | | 왜 |
 |---|---|---|
-| +608% | ten years of prices, five of filings | the DART collector's default reach |
-| +475% | filings reached back, carrying nothing usable | coverage counted any concept, not the ones the scorer anchors on |
-| +460% | measured over 2020-03 onward instead | the anchorable record genuinely began there — given the collector we had |
-| **+502%** | | the collector was the problem: DART renamed the IFRS namespace from `ifrs` to `ifrs-full` in 2018, we mapped only the newer spelling, and eight of nine concepts were dropped for every year before 2019 |
+| +608% | 가격 10년, 공시 5년 | DART 수집기 기본 도달 범위 |
+| +475% | 공시는 닿았으나 쓸 것이 없었음 | 커버리지가 아무 개념이나 셌고, 스코어러가 anchor하는 개념을 세지 않았음 |
+| +460% | 2020-03부터로 좁혀 측정 | 당시 수집기 기준으로는 anchor 가능한 기록이 진짜 거기서 시작했음 |
+| **+502%** | | 원인은 수집기였음. DART가 2018년 IFRS 네임스페이스를 `ifrs`에서 `ifrs-full`로 바꿨는데 새 철자만 매핑해서, 2019년 이전 모든 해에 9개 개념 중 8개가 버려짐 |
 
-None of the four failed, warned, or looked unusual. That is the argument for
-the coverage checks, and for the collector now counting how many concepts each
-year yielded instead of trusting that a successful request means a useful one.
+넷 중 무엇도 실패하지 않았고, 경고하지 않았고, 이상해 보이지 않았다. 커버리지 검사들이
+있는 이유이고, 수집기가 이제 성공한 요청을 쓸모 있는 요청으로 믿는 대신 **연도별로 몇 개
+개념을 인식했는지 세는** 이유다.
 
-#### Why it trades twice in a decade
+#### 왜 10년에 두세 번밖에 거래하지 않는가
 
-Measured per session over the same ten years, on the corrected data.
+같은 10년을 세션 단위로 측정한 것.
 
-| | min | p10 | median | p90 | max |
+| | 최소 | p10 | 중앙값 | p90 | 최대 |
 |---|---:|---:|---:|---:|---:|
 | 삼성 technical | 16.1 | 37.2 | 56.6 | 71.9 | 88.3 |
 | 삼성 fundamental | 26.3 | 44.9 | 58.5 | 67.2 | 68.7 |
-| 삼성 total | 26.0 | 44.3 | 56.4 | 66.4 | 75.5 |
+| 삼성 종합 | 26.0 | 44.3 | 56.4 | 66.4 | 75.5 |
 | Apple technical | 12.9 | 38.1 | 60.3 | 70.4 | 84.9 |
 | Apple fundamental | 44.7 | 47.3 | 58.9 | 64.8 | 71.3 |
-| Apple total | 33.2 | 45.5 | 58.8 | 66.0 | 75.5 |
+| Apple 종합 | 33.2 | 45.5 | 58.8 | 66.0 | 75.5 |
 
-BUY_INTEREST fires on 72 of Samsung's 2455 sessions and 62 of Apple's 2512 —
-2.9% and 2.5%. CAUTION on 56 and 4. The rest, 95% of the decade, is WATCH.
+BUY_INTEREST는 삼성 2455세션 중 72번(2.9%), Apple 2512세션 중 62번(2.5%) 뜬다. CAUTION은
+56번과 4번. 나머지 95%는 WATCH다.
 
-**Combining the two factors narrows the judgement rather than widening it.**
-Samsung's technical p10-p90 spans 34.7 points and the combined score's spans
-22.1. Not because the fundamental sits still — its yearly medians run 32.7 to
-67.1 on Samsung and 44.8 to 66.6 on Apple — but because the two are weakly
-related, and averaging weakly related series reduces variance. That is the
-arithmetic of diversification, applied to a decision rather than a portfolio.
-The consequence is that both thresholds land in technical's own tails: against
-a typical fundamental near 58, a combined 70 needs technical above 77 and a
-combined 35 needs it below 20.
+**두 팩터를 합치면 판단이 넓어지는 게 아니라 좁아진다.** 삼성 기술적 점수의 p10-p90은 34.7점
+폭인데 종합 점수는 22.1점이다. 재무가 가만히 있어서가 아니다 — 연도별 중앙값이 삼성에서
+32.7~67.1, Apple에서 44.8~66.6으로 움직인다 — **둘의 상관이 낮아서**다. 상관 낮은 계열을
+평균하면 분산이 줄어드는, 분산투자의 산수를 포트폴리오가 아니라 판단에 적용한 셈이다.
+그 결과 두 임계치가 모두 기술적 점수의 꼬리에 놓인다. 재무가 58 근처인 전형적인 상황에서
+종합 70은 기술적 77 이상을, 종합 35는 20 이하를 요구한다.
 
-**And the signals are not spread across the decade.**
+**그리고 신호는 10년에 고루 퍼져 있지 않다.**
 
-| year | 삼성 BUY | 삼성 CAUTION | 삼성 fund median | Apple BUY | Apple CAUTION | Apple fund median |
+| 연도 | 삼성 BUY | 삼성 CAUTION | 삼성 재무 중앙값 | Apple BUY | Apple CAUTION | Apple 재무 중앙값 |
 |---|---:|---:|---:|---:|---:|---:|
 | 2017 | 0 | 0 | 50.5 | 3 | 0 | 63.5 |
 | 2018 | 4 | 1 | 66.1 | 4 | 2 | 62.3 |
@@ -262,186 +283,158 @@ combined 35 needs it below 20.
 | 2025 | **31** | 0 | 61.4 | 0 | 1 | 51.2 |
 | 2026 | 9 | 4 | 46.3 | 0 | 0 | 50.3 |
 
-43% of Samsung's buy signals are in 2025 and 91% of its caution signals are in
-2024, the year FY2023's collapsed earnings reached the filings. 73% of Apple's
-are in 2019-2021, and **it has produced none at all since 2023**.
+삼성 매수 신호의 43%가 2025년 한 해에, 경고 신호의 91%가 2024년 한 해에 몰려 있다. 2024년은
+FY2023의 무너진 실적이 공시에 반영된 해다. Apple은 73%가 2019~2021년에 있고 **2023년 이후로는
+하나도 없다.**
 
-The Apple column is the interesting one. Its technical median barely moves
-across the decade — 58 to 65, every year. What moved is the fundamental score,
-from 66.6 in 2022 to around 50 from 2024 on. The fundamental engine reads P/E
-and P/B, so a rising price makes the valuation worse: **the rule stopped buying
-Apple during exactly the stretch when Apple kept rising.** That is most of the
-+184% against +1073%, and it is the value tilt in the engine behaving as built
-rather than a defect.
+#### Walk-forward, 학습 250 / 평가 125 / 홀드아웃 125
 
-#### Walk-forward, 250 train / 125 evaluate / 125 holdout
+전략이 fitted가 아니라 fixed이므로 in-sample과 out-of-sample은 같은 규칙을 돌린 것이고,
+둘의 격차는 과적합의 증거가 아니다 — `WalkForwardReport.fitted`가 false이고, 그 주장이 실수로
+만들어지지 못하게 하려고 그 플래그가 있다. 창들이 보여주는 것은 **시기 간 일관성**이다.
 
-The strategy is fixed rather than fitted, so the in-sample and out-of-sample
-figures ran the same rule and the gap between them is not evidence of
-overfitting — `WalkForwardReport.fitted` is false and exists so that claim
-cannot be made by accident. What the windows do show is consistency across
-periods.
-
-| | OOS windows | flat in cash | positive | negative | best |
+| | OOS 창 | 현금만 | 플러스 | 마이너스 | 최고 |
 |---|---:|---:|---:|---:|---:|
 | 삼성전자 | 16 | 7 (44%) | 5 | 4 | +55.19% |
 | Apple | 17 | 6 (35%) | 8 | 3 | +29.73% |
 
-The median out-of-sample return is exactly 0.00% for both, because the
-commonest outcome is that the rule never enters at all. Samsung's best window,
-2025-05 to 2025-11, returns more than every other window of either instrument
-combined. Apple's **last five consecutive windows are all flat cash** — it has
-held no position since September 2023.
+OOS 수익률의 중앙값은 두 종목 모두 정확히 0.00%다. 가장 흔한 결과가 아예 진입하지 않는
+것이기 때문이다. 삼성의 최고 창인 2025-05~2025-11 하나가 양 종목의 나머지 창을 전부 합친
+것보다 많이 번다. Apple은 **마지막 다섯 창이 연속으로 현금**이고, 2023년 9월 이후 포지션을
+잡은 적이 없다.
 
-Closed trades are near zero everywhere because a window that enters and does
-not exit records an open position rather than a completed round-trip; the
-equity is real, the trade count is not the thing to read.
+청산 거래 수가 어디서나 0에 가까운 것은, 진입 후 청산 없이 끝난 창이 완결된 왕복이 아니라
+열린 포지션으로 기록되기 때문이다. 평가액은 실제이고, 읽을 값은 거래 수가 아니다.
 
-Stated as measurements. Retuning weights against the two instruments the
-holdout was carved from is how a holdout gets fitted by eye, so nothing is
-changed on the strength of them.
+### 알려진 한계
 
-### Known limitations
+- `yfinance` 티커 매핑이 KOSPI(`.KS`)를 가정한다. KOSDAQ은 `.KQ`가 필요하고, 그러면
+  `instrument`에 `KR`/`US`만이 아니라 상장 시장이 있어야 한다. 한국 유니버스 확장과 함께.
+- 한국 회계기간을 공시자의 *현재* 결산월(`company.json`의 `acc_mt`)로 재구성해서, 수집하는
+  모든 해에 그대로 적용한다. 최근 몇 년 사이 결산월을 바꾼 회사는 옛 기간이 새 달력으로
+  재구성된다. 제대로 고치려면 과거 회계달력이 필요한데 DART가 직접 주지 않는다. 한국
+  유니버스 확장과 함께, `max_gap_days`가 고정 430일이 아니라 회계달력 정책이 되는 작업과
+  같이.
+- `exchange_calendars`(4.13.2)는 KRX가 열렸다고 하는데 봉이 없는 세션이 삼성 2년 이력에
+  세 번 있다: 2025-09-19, 2026-06-03, 2026-07-17. 관측된 것은 불일치이고 원인은 확정되지
+  않았다. 둘은 그럴듯한 설명이 있고(지방선거가 있는 해의 6월 첫 수요일, 제헌절) 그렇다면
+  우리 수집이 아니라 달력의 휴일 데이터에 구멍이 있는 것이지만, 셋째는 설명이 없다.
+  추론으로 만든 오버레이는 추측을 거래소 사실로 굳힌다. 그래서 백테스트는 그런 세션을
+  기본적으로 거부하고 이름을 말한다. `require_complete_sessions=False`는 받아들이되 각각을
+  마지막으로 찍힌 가격으로 표시한다. 제대로 해결하려면 더 새 달력 릴리스나 KRX 자체 휴일
+  기록이 필요하고, 한국 유니버스 확장과 함께다.
+- **의미 정정은 삭제가 아니라 relabel이어야 하는데, 한 번 그러지 못했다.** 마이그레이션
+  `c3e8a51d7f04`이 한국 순이익·자본 행을 삭제했다. 지배주주 이름 아래 비지배 포함 총액이
+  들어 있었기 때문이다. 값은 틀렸지만 삭제는 여전히 틀린 연산이었다. 커버리지 게이트는 그
+  상태를 거부하지 못한다 — 스코어러가 anchor할 수 있는지만 묻는데 매출과 EPS는 건드리지
+  않았으므로 anchor된다 — 그래서 재수집 전에 돌린 런은 같은 전략 이름으로 다른 숫자를 낸다.
+  삼성에서 +502.43%가 +597.76%가 됐다. 이미 저장된 런은 재현이 잡아낸다. `ingested_at`은
+  늦게 도착한 행을 숨길 수 있어도 사라진 행에 대해서는 아무것도 할 수 없기 때문이다. 하지만
+  **새 런은 아무것도 잡지 못한다.** 게이트는 기록이 없는 부재를 거부할 수 없다. 앞으로의
+  정정은 relabel해서, 행이 자기가 실제로 담은 것을 계속 말하고 이전 런이 본 것이 디스크에
+  남게 한다. `tests/integration/test_semantic_correction.py`에 고정돼 있다.
+- **그래서 데이터셋에 reading 번호를 붙였다.** 삭제된 행은 흔적이 없지만, 옛 reading으로
+  수집된 채 살아남은 행은 자기에 대해 증언한다. 각 팩트가 수집 당시의 reading을 기록하고,
+  재무를 읽는 런은 현재보다 오래된 행이 하나라도 있으면 거부되며 푸는 명령까지 알려준다.
+  DART는 2(순이익·자본이 비지배 포함 총액에서 지배주주 귀속 태그로 옮긴 시점), SEC는 1이다.
+  재수집이 이걸 푸는 유일한 방법이고, **값이 같게 재도출될 때만** 도장이 갱신된다. 같은
+  맥락·같은 공시에서 다른 숫자가 나오면 그건 진짜 불일치라서 행은 옛 도장을 유지하고
+  게이트는 계속 거부한다.
+- **DART는 제출 당시 버전이 아니라 보고서의 현재 버전을 돌려준다.** `fnlttSinglAcntAll`은
+  최신 정정본이 말하는 것을 답하고, 거기 실린 접수번호는 정정본의 것이다. 그러니 그 날짜가
+  우리가 정직하게 "이때부터 알 수 있었다"고 말할 수 있는 날짜다. 정정한 적 없는 회사에서는
+  이게 보이지 않는다. 삼성 이력은 연 1건씩, 각각 3개 연도를 담고 도착한다. 정정한 회사에서는
+  이력 전체가 정정일 하나로 무너진다. 현대자동차는 2013~2020 사업연도를 2022-02-17 한 건으로
+  재작성했고 신한지주는 2024-05-02에 같은 일을 했다. 그 둘에 대해 **2016년에 시장이 무엇을
+  봤는지 우리는 진짜로 모른다.** 원래 숫자는 이 엔드포인트로 복원되지 않는다. 백테스트
+  커버리지 게이트가 그 기간을 거부하는 것은 결함이 아니라 정확한 동작이고, 한국 9종목 중
+  7개가 2016년부터 사용 가능하고 2개는 불가능하다는 뜻이다. 제출 당시 수치를 되살리려면
+  요약 엔드포인트 대신 공시 등록부의 원본 XBRL 첨부를 파싱해야 한다.
+- DART 재무는 연결재무제표(`fs_div=CFS`)만 요청한다. 연결을 제출하지 않는 회사는 팩트가
+  하나도 안 나오고, 부재 로직이 그걸 `NO_OBSERVATION_IN_SOURCE`로 정확히 보고한다 —
+  등록부에는 보고서가 있는데 우리 값 소스가 거기서 아무것도 갖고 있지 않은 상태. 지원하려면
+  `OFS` 폴백이 필요하고, 유니버스가 더 커질 때 할 일이다.
+- `portfolio` 화면은 토스 자격증명이 생기기 전까지 뒤에 실계좌가 없다. 지어낸 잔고를 보여주는
+  대신 그렇다고 말한다.
+- 종목 상세 화면이 다크모드를 강제하고 나갈 때 속성을 지운다. 사용자가 고르는 테마가 생기면
+  이전 값을 저장했다가 복원해야 한다.
+- 차트 색은 마운트 시점에 CSS 변수에서 한 번 읽는다. 차트가 열린 채 테마나 상승/하락 색
+  관례를 바꾸면 리마운트 전까지 다시 칠해지지 않는다. 설정 화면과 함께.
 
-- `yfinance` ticker mapping assumes KOSPI (`.KS`). KOSDAQ needs `.KQ`, which
-  means `instrument` will need a listing venue rather than just `KR`/`US`. Due
-  with the historical master in Phase 2.
-- Korean fiscal periods are reconstructed from the filer's *current* fiscal
-  year-end month (`acc_mt` from `company.json`), applied to every year we
-  collect. A company that changed its closing month in the last few years will
-  therefore have its older periods reconstructed against the new calendar. The
-  fix needs a historical fiscal calendar, which DART does not expose directly;
-  due with the Korean universe expansion, alongside `max_gap_days` becoming a
-  fiscal-calendar policy rather than a fixed 430 days.
-- Three sessions in Samsung's two-year history have no bar although
-  `exchange_calendars` (4.13.2) says KRX traded: 2025-09-19, 2026-06-03 and
-  2026-07-17. What is observed is the disagreement; the cause is not
-  established. Two have plausible explanations — the first Wednesday of June
-  in a local-election year, and 제헌절 — which would make them holes in the
-  calendar's holiday data rather than in our collection, but the third has
-  none, and an overlay built from inference would encode guesses as exchange
-  facts. Backtests therefore refuse such sessions by default and name them;
-  `require_complete_sessions=False` accepts them, marking each at the last
-  price that printed. Resolving it properly needs a newer calendar release or
-  KRX's own holiday record, which is due with the Korean universe expansion.
-- **A semantic correction should relabel rather than delete, and one did not.**
-  Migration `c3e8a51d7f04` removed the Korean net income and equity rows
-  because they held the including-NCI totals under parent-only names. The
-  values were wrong; deleting them was still the wrong operation. The coverage
-  gate does not refuse the resulting state — it asks whether the scorer can
-  anchor, and revenue and EPS were untouched — so a run made before
-  recollecting produces a different number under the same strategy name:
-  +502.43% became +597.76% on Samsung. Reproduction catches it for a run
-  already stored, because `ingested_at` can hide rows that arrived late and can
-  do nothing about rows that stopped existing, but nothing catches a fresh run.
-  A gate cannot refuse an absence it has no record of. Future corrections
-  relabel, so the row keeps saying what it holds and what an earlier run saw
-  stays on disk. Pinned in `tests/integration/test_semantic_correction.py`.
-- **DART returns the current version of a report, not the version as filed.**
-  `fnlttSinglAcntAll` answers with whatever the latest correction says, and the
-  receipt number it carries is the correction's — so that is the date we can
-  honestly call the figure knowable from. Where a company has never corrected,
-  this is invisible: Samsung's history arrives as one filing per year, each
-  carrying three. Where a company has, the whole history collapses onto the
-  correction. 현대자동차 restated business years 2013 through 2020 in a single
-  filing on 2022-02-17, and 신한지주 did the same on 2024-05-02, so for those
-  two we genuinely do not know what the market saw in 2016 — the original
-  numbers are not retrievable from this endpoint. The backtest's coverage gate
-  refuses those periods, which is correct rather than a defect, and it means
-  seven of the nine Korean instruments are usable from 2016 and two are not.
-  Recovering the as-filed figures would mean parsing the original XBRL
-  attachments from the filing register instead of using the summary endpoint.
-- DART fundamentals request consolidated statements (`fs_div=CFS`) only. A
-  company that files no consolidated statements therefore yields no facts at
-  all, which the absence logic correctly reports as
-  `NO_OBSERVATION_IN_SOURCE` — the register shows the report, our value source
-  holds nothing from it. Supporting them needs an `OFS` fallback, due when the
-  universe grows beyond the two instruments in use now.
-- The `portfolio` screen has no live account behind it until Toss credentials
-  exist; it says so rather than showing an invented balance.
-- The instrument detail screen forces dark mode and clears the attribute on
-  exit. Once a user-selectable theme exists this must save and restore the
-  previous value instead.
-- Chart colours are read from CSS variables once at mount, so changing the
-  theme or the up/down convention while a chart is open will not recolour it
-  until remount. Due with the settings screen.
-
-### Layout
+### 구조
 
 ```
 backend/app/
-  core/          pure domain — clock, trading calendar, value types. No IO.
+  core/          순수 도메인 — 시계, 거래 달력, 값 타입. IO 없음
   models/        SQLAlchemy ORM
-  repositories/  the only layer allowed to query
-  brokers/       Toss REST + WebSocket (read-only; no order placement)
-  collectors/    external data ingestion, each isolated from the others
-  engines/       technical / fundamental / sentiment / portfolio factors
-  scoring/       normalize -> weight -> combine, plus availability policy
-  backtest/      pit_repository, execution invariants, metrics, walk-forward
-  forwardtest/   sentiment validation against realised forward returns
-  api/           FastAPI routes
-  worker.py      scheduler process, separate from the API
+  repositories/  질의가 허용된 유일한 계층
+  brokers/       토스 REST + WebSocket (읽기 전용. 주문 실행 없음)
+  collectors/    외부 데이터 수집, 서로 격리
+  engines/       기술적 / 재무 / 심리 / 포트폴리오 팩터
+  scoring/       정규화 → 가중 → 합산, 그리고 가용성 정책
+  backtest/      pit_repository, 체결 불변식, 지표, walk-forward
+  forwardtest/   실현 수익률 대비 심리 팩터 검증
+  api/           FastAPI 라우트
+  worker.py      스케줄러 프로세스, API와 분리
 ```
 
-The API process and the worker process are separate on purpose: APScheduler
-embedded in a web app fires once per uvicorn worker, so two workers means every
-collector runs twice. Jobs additionally take a Postgres advisory lock.
+API 프로세스와 워커 프로세스를 분리한 것은 의도다. 웹앱에 APScheduler를 넣으면 uvicorn 워커
+하나당 한 번씩 발화해서, 워커가 둘이면 모든 수집기가 두 번 돈다. 잡은 추가로 Postgres
+advisory lock을 잡는다.
 
 ---
 
-## Status
+## 진행 상황
 
-**Phase 1 complete** — a vertical slice runs end to end with no credentials
-configured: watchlist, daily bars and FX from yfinance, the technical factor
-engine, signal assembly with all three clocks enforced, and a dashboard whose
-drawer shows raw → normalized → weight → contribution for every metric.
+**Phase 1 완료** — 자격증명 없이도 세로 한 줄이 끝까지 돈다. 관심종목, yfinance에서 받은
+일봉과 환율, 기술적 팩터 엔진, 세 시각이 모두 강제된 신호 조립, 그리고 모든 지표에 대해
+raw → 정규화 → 가중치 → 기여도를 drawer에서 보여주는 대시보드.
 
-**Phase 2 complete.**
-
-| | |
-| --- | --- |
-| SEC EDGAR point-in-time reconstruction | done |
-| Filing register (proves what was published, not just what we tagged) | done |
-| Fundamental engine, anchored to one fiscal period | done |
-| Base layer scoring: technical 0.6 + fundamental 0.4 | done |
-| DART collector | done |
-| Korean fundamentals | done |
-
-**Phase 3 complete** — point-in-time repository, execution clock, event-driven
-engine, costs, metrics, walk-forward with a holdout taken once, full
-reproduction from a stored row, the CLI and the Backtest screen.
+**Phase 2 완료.**
 
 | | |
 | --- | --- |
-| `available_at` + `ingested_at` enforced at one door | done |
-| `decision_at` → `execution_at` invariant, `SAME_CLOSE` inexpressible | done |
-| Walk-forward with IN/OUT_OF_SAMPLE and a single holdout per run | done |
-| Run identity: strategy + commit + data snapshot | done |
-| Reproduction comparing all twelve stored measurements | done |
-| Fundamental coverage: start, interior gaps, right-hand tail, anchor concepts | done |
-| CLI (`backtest run / show / holdout / reproduce`) and the Backtest screen | done |
+| SEC EDGAR 시점 복원 | 완료 |
+| 공시 등록부 (우리가 태깅한 것이 아니라 공표된 것을 증명) | 완료 |
+| 하나의 회계기간에 고정된 재무 엔진 | 완료 |
+| 기본층 점수: 기술적 0.6 + 재무 0.4 | 완료 |
+| DART 수집기 | 완료 |
+| 한국 재무 | 완료 |
 
-**Point-in-time universe reconstruction is deliberately not done.** The design
-called for a historical instrument master including delisted names, so a
-backtest could be run over the index as it stood rather than as it survived.
-Korea publishes no free such master, and the work only buys the right to claim
-a result generalises across a universe. This is a personal analysis tool
-reporting on named instruments, so it does not make that claim, and saying so
-is different from quietly omitting it. Survivorship bias is therefore total
-here and stated rather than corrected.
+**Phase 3 완료** — 시점 저장소, 체결 시계, 이벤트 기반 엔진, 비용, 지표, 홀드아웃을 한 번만
+가져가는 walk-forward, 저장된 행으로부터의 완전한 재현, CLI와 Backtest 화면.
 
-Then: Phase 3.5 more instruments, which is what would make `percentile_rank`
-mean something · Phase 4 event overlay, market regime and forward-test · Phase
-5 alerts, portfolio optimisation and the remaining screens.
+| | |
+| --- | --- |
+| `available_at` + `ingested_at`을 한 문에서 강제 | 완료 |
+| `decision_at` → `execution_at` 불변식, `SAME_CLOSE`는 표현 불가 | 완료 |
+| IN/OUT_OF_SAMPLE과 런당 홀드아웃 1개를 갖는 walk-forward | 완료 |
+| 런 신원: 전략 + 커밋 + 데이터 스냅샷 | 완료 |
+| 저장된 12개 측정값을 전부 대조하는 재현 | 완료 |
+| 재무 커버리지: 시작점, 중간 구멍, 오른쪽 끝, anchor 개념 | 완료 |
+| CLI(`backtest run / show / holdout / reproduce`)와 Backtest 화면 | 완료 |
 
-Note that sentiment is no longer a weighted factor. It became an event overlay
-with its own half-life, sitting above the base score rather than inside it —
-see the design note on the three layers.
+**Phase 3.5 진행 중** — 18종목으로 확장. 목적은 종목 수가 아니라 검증이었고, 첫날에 두 개의
+종목이었다면 보이지 않았을 결함 셋을 꺼냈다: Postgres 65535 파라미터 한도, IFRS 지배주주/총액
+혼용, `--period max`가 Apple 1980년 상장에서 터뜨린 달력 범위 초과. 밸류 성향 가설은
+15종목에서 반증됐다(위). 남은 것은 `percentile_rank`를 실제로 쓰는 횡단면 정규화다.
+
+**시점 유니버스 재구성은 의도적으로 하지 않는다.** 설계는 상장폐지 종목을 포함한 과거
+종목 마스터를 요구했다. 지수를 살아남은 모습이 아니라 당시 모습대로 돌릴 수 있도록. 한국은
+그런 마스터를 무료로 공개하는 곳이 없고, 그 작업이 사주는 것은 **결과가 유니버스 전반에
+일반화된다고 주장할 권리**뿐이다. 이것은 지목된 종목들에 대해 보고하는 개인 분석 도구이므로
+그 주장을 하지 않는다. 그리고 그렇게 말하는 것은 조용히 빠뜨리는 것과 다르다. 따라서 여기서
+생존편향은 완전하며, 교정하지 않고 명시한다.
+
+이후: Phase 4 이벤트 오버레이, 시장 국면, forward-test · Phase 5 알림, 포트폴리오 최적화,
+남은 화면들.
+
+심리는 더 이상 가중 팩터가 아니다. 자기 반감기를 갖는 이벤트 오버레이가 되어 기본 점수
+안이 아니라 위에 앉는다 — 세 층에 대한 설계 노트 참고.
 
 ---
 
-## Disclaimer
+## 면책
 
-Rule-based analysis only. No orders are placed by this system. All trading
-decisions and their outcomes belong to the user. Backtest results are historical
-and guarantee nothing about future returns.
+규칙 기반 분석일 뿐이다. 이 시스템은 주문을 내지 않는다. 모든 매매 판단과 그 결과는
+사용자에게 귀속된다. 백테스트 결과는 과거 데이터에 대한 것이며 미래 수익을 보장하지 않는다.

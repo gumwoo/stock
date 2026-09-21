@@ -370,8 +370,9 @@ class TestRecollectingClearsIt:
 
     `ON CONFLICT DO NOTHING` matched every row, inserted none and left the old
     stamps in place, so a recollection could not bring a dataset forward and
-    the refusal was permanent. Re-deriving a value and getting the same answer
-    is exactly the evidence the row is sound under the new reading.
+    the refusal was permanent. `semantic_version` is part of the unique key
+    now, so re-reading a filing appends beside the old row instead — the same
+    way a restatement does, and carrying its own `ingested_at`.
     """
 
     def test_rows_are_restamped_when_the_value_agrees(
@@ -407,17 +408,32 @@ class TestRecollectingClearsIt:
         with pytest.raises(svc.BacktestWindowError, match="collected under reading"):
             run(s, inst)
 
-    def test_nothing_is_counted_as_newly_written(
+    def test_the_older_rows_are_still_there(
         self, instrument: tuple[Session, Instrument], reading_moved: int
     ) -> None:
-        """A re-stamp is not a collection. Reporting it as one would inflate
-        every recollection's saved count."""
+        """Nothing is overwritten, so what an earlier run saw stays readable."""
         s, inst = instrument
         age_the_dataset(s, inst.instrument_id, reading_moved)
 
-        assert fundamental_repo.save_facts(s, _facts(inst.instrument_id, 2021)) == 0
+        fundamental_repo.save_facts(s, _facts(inst.instrument_id, 2021))
+        s.flush()
 
-    def test_a_row_whose_value_disagrees_keeps_the_old_stamp(
+        versions = (
+            s.execute(
+                text(
+                    "SELECT DISTINCT semantic_version FROM fundamental "
+                    "WHERE instrument_id = :i AND period_end = DATE '2021-12-31' "
+                    "ORDER BY semantic_version"
+                ),
+                {"i": inst.instrument_id},
+            )
+            .scalars()
+            .all()
+        )
+
+        assert list(versions) == [reading_moved, SEMANTIC_VERSIONS[FundamentalSource.SEC]]
+
+    def test_a_row_whose_value_disagrees_appends_rather_than_overwrites(
         self, instrument: tuple[Session, Instrument], reading_moved: int
     ) -> None:
         """The guard on the re-stamp. Same context, same filing, a different
@@ -463,3 +479,72 @@ class TestRecollectingClearsIt:
             {"i": inst.instrument_id},
         ).scalar()
         assert stored == original
+
+
+class TestAReReadingDoesNotReachBackwards:
+    """이번 수정의 핵심. 재검증은 그것이 일어난 시점부터만 사실이다.
+
+    첫 구현은 값이 같으면 기존 행의 `semantic_version`을 제자리에서 갱신했다. 행은
+    자기 `ingested_at`을 그대로 유지하므로, 2024년에 적재된 행이 2026년에 정해진
+    reading을 주장하게 되고 2025년 스냅샷으로 재생하면 그 행이 v2로 보였다. 값이
+    같더라도 "이 행이 v2 의미로 검증됐다"는 것은 2026년에 생긴 정보다.
+
+    `semantic_version`이 유니크 키에 들어가면서 재검증은 자기 `ingested_at`을 단 새
+    행이 되고, 시간축은 다시 말 그대로 시간축이 된다.
+    """
+
+    def test_an_older_snapshot_still_sees_the_older_reading(
+        self, instrument: tuple[Session, Instrument], reading_moved: int
+    ) -> None:
+        s, inst = instrument
+        age_the_dataset(s, inst.instrument_id, reading_moved)
+        s.commit()
+        before = svc.snapshot_now(s)
+        # `now()`는 트랜잭션 시작 시각이다. 스냅샷을 받은 트랜잭션을 닫지 않으면
+        # 이어지는 삽입이 같은 시각을 `ingested_at`으로 받아 스냅샷 안에 들어온다.
+        s.commit()
+
+        for year in (2018, 2019, 2020, 2021):
+            fundamental_repo.save_facts(s, _facts(inst.instrument_id, year))
+        s.commit()
+
+        assert (
+            fundamental_repo.oldest_semantic_version(
+                s, inst.instrument_id, source=FundamentalSource.SEC, ingested_before=before
+            )
+            == reading_moved
+        )
+        assert (
+            fundamental_repo.oldest_semantic_version(
+                s, inst.instrument_id, source=FundamentalSource.SEC
+            )
+            == SEMANTIC_VERSIONS[FundamentalSource.SEC]
+        )
+
+    def test_a_run_replaying_that_snapshot_is_still_refused(
+        self, instrument: tuple[Session, Instrument], reading_moved: int
+    ) -> None:
+        """재현이 과거를 과거대로 보는지가 이 컬럼이 존재하는 이유다."""
+        s, inst = instrument
+        age_the_dataset(s, inst.instrument_id, reading_moved)
+        s.commit()
+        before = svc.snapshot_now(s)
+        # `now()`는 트랜잭션 시작 시각이다. 스냅샷을 받은 트랜잭션을 닫지 않으면
+        # 이어지는 삽입이 같은 시각을 `ingested_at`으로 받아 스냅샷 안에 들어온다.
+        s.commit()
+
+        for year in (2018, 2019, 2020, 2021):
+            fundamental_repo.save_facts(s, _facts(inst.instrument_id, year))
+        s.commit()
+
+        # 지금 기준으로는 통과한다.
+        assert run(s, inst) is not None
+
+        # 그때 기준으로는 그때의 데이터셋이 보여야 한다.
+        with pytest.raises(svc.BacktestWindowError, match="collected under reading"):
+            svc.execute(
+                s,
+                strategies.build(technical_fundamental(currency="USD")),
+                request_for(inst.instrument_id),
+                data_snapshot_at=before,
+            )

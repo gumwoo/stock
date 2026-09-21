@@ -36,7 +36,6 @@ from itertools import pairwise
 from typing import NamedTuple
 
 from sqlalchemy import Select, func, select
-from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -207,31 +206,18 @@ def save_facts(session: Session, rows: Sequence[FundamentalRow]) -> int:
     written = 0
     for batch in bulk.batched(rows, columns=len(FundamentalRow._fields)):
         stmt = pg_insert(Fundamental).values([r._asdict() for r in batch])
-        # A conflict means we already hold this context from this filing. Under
-        # DO NOTHING the row kept whatever `semantic_version` it was first
-        # written with, so a dataset collected before the reading changed could
-        # never be brought forward: recollecting matched every row, inserted
-        # none, and left the old stamp in place with the backtest still
-        # refusing. Re-deriving a value and getting the same answer is exactly
-        # the evidence that the row is good under the new reading, so it is
-        # stamped.
-        #
-        # Guarded on the value being unchanged. If the new reading produces a
-        # different number for the same context and filing, that is a genuine
-        # disagreement: the row keeps the old stamp, the gate keeps refusing,
-        # and somebody looks. Overwriting the value instead would edit history
-        # a stored run may have used.
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_fundamental_context_filing",
-            set_={"semantic_version": stmt.excluded.semantic_version},
-            where=Fundamental.value == stmt.excluded.value,
-        )
-        # `xmax = 0` is true only for a row this statement inserted, which is
-        # the one way to tell an insert from a re-stamp in the same RETURNING.
-        result = session.execute(
-            stmt.returning(Fundamental.id, sa_text("(xmax = 0) AS inserted"))
-        ).all()
-        written += sum(1 for _, inserted in result if inserted)
+        # `semantic_version` is part of the unique key, so re-reading a filing
+        # under a new mapping does not conflict — it appends, exactly as a
+        # restatement does, and carries its own `ingested_at`. An in-place
+        # update was tried first and leaked: the row would keep the 2024
+        # `ingested_at` it was written with while claiming a reading that did
+        # not exist until 2026, so a snapshot taken in 2025 would see a
+        # validation from its own future.
+        stmt = stmt.on_conflict_do_nothing(constraint="uq_fundamental_context_filing")
+        # RETURNING rather than rowcount: with ON CONFLICT DO NOTHING the
+        # driver reports -1 for a multi-values insert, so the only reliable
+        # count is the ids actually produced.
+        written += len(session.execute(stmt.returning(Fundamental.id)).scalars().all())
     return written
 
 
@@ -277,20 +263,47 @@ def oldest_semantic_version(
     source: FundamentalSource,
     ingested_before: datetime | None = None,
 ) -> int | None:
-    """The oldest reading any stored row for this instrument was written under.
+    """The reading the least-recently-reread fact was last confirmed under.
 
     The question coverage cannot answer. A deletion leaves no trace — nothing
-    records that a concept was ever expected — but a row surviving from an
-    earlier reading does say so about itself, and that is enough to refuse a
-    dataset that has not been recollected since the reading changed.
+    records that a concept was ever expected — but a stored fact does say which
+    reading produced it, and a fact never re-read since the mapping moved says
+    the dataset has not been brought forward.
+
+    **Per fact, then the minimum.** Re-reading appends rather than overwrites,
+    so an old row survives beside its newer re-reading and a plain `MIN` over
+    every row would answer 1 forever. What matters is the newest reading each
+    fact has been confirmed under; the dataset is current when the least
+    current of those is.
+
+    **Bounded by `ingested_before`, and that is the whole point.** A
+    re-reading performed in 2026 is information that did not exist in 2025, so
+    a run replaying a 2025 snapshot must still see the dataset as it stood:
+    stale, and refused. An in-place version update could not express that,
+    because the row kept its original `ingested_at` while claiming the later
+    reading.
     """
-    stmt = select(func.min(Fundamental.semantic_version)).where(
-        Fundamental.instrument_id == instrument_id,
-        Fundamental.source == source,
+    per_fact = (
+        select(func.max(Fundamental.semantic_version).label("version"))
+        .where(
+            Fundamental.instrument_id == instrument_id,
+            Fundamental.source == source,
+        )
+        .group_by(
+            Fundamental.taxonomy,
+            Fundamental.concept,
+            Fundamental.unit,
+            Fundamental.period_start,
+            Fundamental.period_end,
+            Fundamental.form,
+            Fundamental.filed_at,
+            Fundamental.accession,
+        )
     )
     if ingested_before is not None:
-        stmt = stmt.where(Fundamental.ingested_at <= ingested_before)
-    return session.execute(stmt).scalar()
+        per_fact = per_fact.where(Fundamental.ingested_at <= ingested_before)
+    inner = per_fact.subquery()
+    return session.execute(select(func.min(inner.c.version))).scalar()
 
 
 def annual_period_ends(

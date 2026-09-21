@@ -182,7 +182,9 @@ class Fundamental(Base):
         server_default="1",
         doc="Which reading of this source's filings produced the row. See "
         "SEMANTIC_VERSIONS: a row written under an older one may hold a "
-        "different quantity under the same concept name.",
+        "different quantity under the same concept name. Part of the unique "
+        "key, so re-reading appends rather than overwrites and the "
+        "transaction-time axis keeps meaning what it says.",
     )
     frame: Mapped[str | None] = mapped_column(
         String(32), nullable=True, doc="SEC calendar frame, e.g. CY2008Q4I"
@@ -207,6 +209,14 @@ class Fundamental(Base):
             "form",
             "filed_at",
             "accession",
+            # Re-reading a filing under a new mapping produces a new row, the
+            # same way a restatement does. Updating the version in place looked
+            # cheaper and was a leak: `ingested_at` would still say 2024 while
+            # the row claimed a reading that only existed from 2026, so a
+            # snapshot taken in 2025 would see a validation from its own
+            # future. The version is part of what the row is, so it belongs in
+            # what makes the row unique.
+            "semantic_version",
             name="uq_fundamental_context_filing",
             postgresql_nulls_not_distinct=True,
         ),
