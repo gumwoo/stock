@@ -15,7 +15,6 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy import select
@@ -23,7 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.backtest.strategies import StrategyDefinition
-from app.core.types import Interval, SampleType
+from app.core.types import SampleType
 from app.models.backtest import BacktestRun, BacktestWindow
 
 
@@ -48,10 +47,14 @@ class CodeVersion:
 
 @dataclass(frozen=True, slots=True)
 class RunProvenance:
-    """The non-strategy coordinates of a run."""
+    """When and where a run happened, as opposed to which experiment it was.
+
+    `data_snapshot_at` is not here. It is part of the experiment's identity,
+    so it travels with the fields a later holdout is checked against rather
+    than with the code version.
+    """
 
     code: CodeVersion
-    data_snapshot_at: datetime
     started_at: datetime
 
 
@@ -99,59 +102,23 @@ def resolve_commit(repo_root: Path | None = None) -> CodeVersion:
 def save_run(
     session: Session,
     *,
-    instrument_id: int,
-    definition: StrategyDefinition,
-    fitter_version: str | None,
     provenance: RunProvenance,
-    interval: Interval,
-    period_start: object,
-    period_end: object,
-    starting_cash: Decimal,
-    commission_bps: Decimal,
-    slippage_bps: Decimal,
-    min_commission: Decimal,
-    execution_model: str,
-    bar_minutes: int | None,
-    train_sessions: int,
-    eval_sessions: int,
-    anchored: bool,
-    holdout_start: object,
-    holdout_end: object,
-    require_complete_sessions: bool,
+    **fields: object,
 ) -> BacktestRun:
-    """Insert the run header. Costs are the values that were applied.
+    """Insert the run header.
 
-    Nothing here defaults: a column recording "the default cost model" becomes
-    a different claim the day the default moves, and every stored run silently
-    reinterprets itself.
+    `fields` is whatever defines the experiment, passed through from the one
+    place in the service that names those columns, so storing a run and
+    checking a later holdout against it cannot describe different sets of
+    them. Nothing here defaults: a row recording "the default cost model"
+    becomes a different claim the day the default moves, and every stored run
+    silently reinterprets itself.
     """
     run = BacktestRun(
-        instrument_id=instrument_id,
-        strategy_kind=definition.kind,
-        strategy_version=definition.version,
-        # MappingProxyType does not serialise; JSONB needs a plain dict.
-        strategy_params=dict(definition.params),
-        strategy_fingerprint=definition.fingerprint,
-        fitter_version=fitter_version,
         git_commit_sha=provenance.code.sha,
         git_dirty=provenance.code.dirty,
-        data_snapshot_at=provenance.data_snapshot_at,
-        interval=interval,
-        period_start=period_start,
-        period_end=period_end,
-        starting_cash=starting_cash,
-        commission_bps=commission_bps,
-        slippage_bps=slippage_bps,
-        min_commission=min_commission,
-        execution_model=execution_model,
-        bar_minutes=bar_minutes,
-        train_sessions=train_sessions,
-        eval_sessions=eval_sessions,
-        anchored=anchored,
-        holdout_start=holdout_start,
-        holdout_end=holdout_end,
-        require_complete_sessions=require_complete_sessions,
         started_at=provenance.started_at,
+        **fields,
     )
     session.add(run)
     session.flush()

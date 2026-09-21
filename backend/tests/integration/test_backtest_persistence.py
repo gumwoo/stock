@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
 from app.core.types import Interval, SampleType
 from app.models import Base, Instrument
+from app.models.backtest import BacktestRun
 from app.repositories import backtest_repo, candle_repo
 from app.repositories.backtest_repo import CodeVersion
 from app.repositories.candle_repo import CandleRow
@@ -448,7 +449,7 @@ class TestTheHoldoutBelongsToItsRun:
             holdout_sessions=HOLDOUT,
         )
 
-        with pytest.raises(svc.HoldoutError, match="train sessions"):
+        with pytest.raises(svc.HoldoutError, match="train_sessions"):
             svc.evaluate_and_persist_holdout(s, run, different)  # type: ignore[arg-type]
 
 
@@ -466,3 +467,111 @@ class TestProvenanceCannotBeSkipped:
         """'unknown' in that column looks like a value and destroys the axis."""
         with pytest.raises(backtest_repo.ProvenanceError, match="cannot resolve"):
             backtest_repo.resolve_commit(tmp_path)  # type: ignore[arg-type]
+
+
+class TestTheIdentityCheckIsComplete:
+    """What defines a run is one list, used to store it and to check it.
+
+    The earlier check named the fields to compare by hand and missed six.
+    Same instrument, period, snapshot and split were enough to pass it, so a
+    MA 10/30 run at 5bp accepted a holdout that had actually run buy-and-hold
+    at zero cost:
+
+        stored run #159: moving_average_cross@ma-10-30@v1 {short:10, long:30}
+                         commission=5bp execution=NEXT_OPEN
+        accepted holdout: buy_and_hold@buy-and-hold@v1  return -0.210
+
+    Listing them again would postpone the same failure, so storage and
+    verification now derive from `experiment_fields`.
+    """
+
+    def test_every_stored_column_is_part_of_the_identity_or_provenance(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """A column added later is compared from the moment it is stored.
+
+        This is the test that keeps the fix from decaying: add a field to the
+        run header and it must be classified, not forgotten.
+        """
+        s, iid = instrument
+        report, _ = run_and_store(s, iid)
+
+        stored = {c.name for c in BacktestRun.__table__.columns}
+        provenance = {"id", "git_commit_sha", "git_dirty", "started_at", "ingested_at"}
+        compared = set(svc.experiment_fields(report))  # type: ignore[arg-type]
+
+        assert stored - provenance - compared == set()
+
+    def test_a_different_strategy_is_refused(self, instrument: tuple[Session, int]) -> None:
+        """The live failure, with everything else held equal."""
+        s, iid = instrument
+        report, run = run_and_store(s, iid)
+
+        other = svc.walk_forward(
+            s,
+            StrategySpec(definition=buy_and_hold()),
+            request_for(iid),
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
+            holdout_sessions=HOLDOUT,
+            data_snapshot_at=report.data_snapshot_at,  # type: ignore[attr-defined]
+        )
+
+        with pytest.raises(svc.HoldoutError, match="strategy_kind"):
+            svc.evaluate_and_persist_holdout(s, run, other)  # type: ignore[arg-type]
+
+    def test_different_costs_are_refused(self, instrument: tuple[Session, int]) -> None:
+        """A holdout paid for at a different rate is not this run's."""
+        s, iid = instrument
+        report, run = run_and_store(s, iid)
+
+        cheaper = svc.walk_forward(
+            s,
+            StrategySpec(definition=moving_average_cross(short=10, long=30)),
+            RunRequest(
+                instrument_id=iid,
+                start=HISTORY[0],
+                end=HISTORY[-1],
+                starting_cash=Decimal("100000"),
+                costs=CostModel(Decimal("0"), Decimal("0")),
+            ),
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
+            holdout_sessions=HOLDOUT,
+            data_snapshot_at=report.data_snapshot_at,  # type: ignore[attr-defined]
+        )
+
+        with pytest.raises(svc.HoldoutError, match="commission_bps"):
+            svc.evaluate_and_persist_holdout(s, run, cheaper)  # type: ignore[arg-type]
+
+    def test_a_different_missing_session_policy_is_refused(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """It decides whether stale-marked days were accepted, so it decides
+        what the numbers mean."""
+        s, iid = instrument
+        report, run = run_and_store(s, iid)
+
+        lenient = svc.walk_forward(
+            s,
+            StrategySpec(definition=moving_average_cross(short=10, long=30)),
+            request_for(iid),
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
+            holdout_sessions=HOLDOUT,
+            data_snapshot_at=report.data_snapshot_at,  # type: ignore[attr-defined]
+            require_complete_sessions=False,
+        )
+
+        with pytest.raises(svc.HoldoutError, match="require_complete_sessions"):
+            svc.evaluate_and_persist_holdout(s, run, lenient)  # type: ignore[arg-type]
+
+    def test_the_matching_report_is_still_accepted(self, instrument: tuple[Session, int]) -> None:
+        """Otherwise the checks above pass by refusing everything."""
+        s, iid = instrument
+        report, run = run_and_store(s, iid)
+
+        stored = svc.evaluate_and_persist_holdout(s, run, report)  # type: ignore[arg-type]
+        s.commit()
+
+        assert stored.sample_type is SampleType.HOLDOUT

@@ -495,6 +495,55 @@ def evaluate_holdout(
     )
 
 
+def experiment_fields(report: WalkForwardReport) -> dict[str, object]:
+    """Every stored coordinate that makes a run the experiment it is.
+
+    Used both to write a run and to check that a later holdout belongs to it,
+    so the two cannot drift. The previous version listed the fields to compare
+    by hand and missed six of them, which let a MA 10/30 run at 5bp have its
+    holdout recorded as buy-and-hold at zero cost:
+
+        stored run #159: moving_average_cross@ma-10-30@v1 {short:10, long:30}
+                         commission=5bp execution=NEXT_OPEN
+        accepted holdout: buy_and_hold@buy-and-hold@v1  return -0.210
+
+    Deriving both from one function means a column added later is compared
+    from the moment it is stored, rather than the next time someone remembers.
+
+    Code and timing are deliberately absent: `git_commit_sha`, `git_dirty`,
+    `started_at` and `ingested_at` describe when and where a run happened, not
+    which experiment it was.
+    """
+    request = report.request
+    costs = request.costs if request.costs is not None else CostModel()
+    definition = report.spec.definition or _fitted_placeholder(report)
+
+    return {
+        "instrument_id": request.instrument_id,
+        "strategy_kind": definition.kind,
+        "strategy_version": definition.version,
+        "strategy_params": dict(definition.params),
+        "strategy_fingerprint": definition.fingerprint,
+        "fitter_version": report.spec.fitter_version,
+        "data_snapshot_at": report.data_snapshot_at,
+        "interval": request.interval,
+        "period_start": request.start,
+        "period_end": request.end,
+        "starting_cash": request.starting_cash,
+        "commission_bps": costs.commission_bps,
+        "slippage_bps": costs.slippage_bps,
+        "min_commission": costs.min_commission,
+        "execution_model": request.execution_model.value,
+        "bar_minutes": request.bar_minutes,
+        "train_sessions": report.train_sessions,
+        "eval_sessions": report.eval_sessions,
+        "anchored": report.anchored,
+        "holdout_start": report.holdout_start,
+        "holdout_end": report.holdout_end,
+        "require_complete_sessions": report.require_complete_sessions,
+    }
+
+
 def persist(
     session: Session,
     report: WalkForwardReport,
@@ -512,34 +561,13 @@ def persist(
     the separate measurement taken afterwards — and writing a row for it at
     this point would mean the run had one before anyone decided to look.
     """
-    costs = report.request.costs if report.request.costs is not None else CostModel()
-    definition = report.spec.definition or _fitted_placeholder(report)
-
     run = backtest_repo.save_run(
         session,
-        instrument_id=report.request.instrument_id,
-        definition=definition,
-        fitter_version=report.spec.fitter_version,
         provenance=backtest_repo.RunProvenance(
             code=code or backtest_repo.resolve_commit(),
-            data_snapshot_at=report.data_snapshot_at,
             started_at=started_at or utc_now(),
         ),
-        interval=report.request.interval,
-        period_start=report.request.start,
-        period_end=report.request.end,
-        starting_cash=report.request.starting_cash,
-        commission_bps=costs.commission_bps,
-        slippage_bps=costs.slippage_bps,
-        min_commission=costs.min_commission,
-        execution_model=report.request.execution_model.value,
-        bar_minutes=report.request.bar_minutes,
-        train_sessions=report.train_sessions,
-        eval_sessions=report.eval_sessions,
-        anchored=report.anchored,
-        holdout_start=report.holdout_start,
-        holdout_end=report.holdout_end,
-        require_complete_sessions=report.require_complete_sessions,
+        **experiment_fields(report),
     )
 
     for window in report.windows:
@@ -574,32 +602,22 @@ def evaluate_and_persist_holdout(
 
 
 def _assert_same_experiment(run: BacktestRun, report: WalkForwardReport) -> None:
-    """Every coordinate that makes a run the run it is."""
-    request = report.request
+    """Refuse a report that is not the experiment stored as this run.
+
+    Compares every field `experiment_fields` produces, so the check cannot
+    fall behind what is stored.
+    """
     mismatches = [
-        name
-        for name, stored, live in (
-            ("instrument", run.instrument_id, request.instrument_id),
-            ("period start", run.period_start, request.start),
-            ("period end", run.period_end, request.end),
-            ("interval", run.interval, request.interval),
-            ("data snapshot", run.data_snapshot_at, report.data_snapshot_at),
-            ("train sessions", run.train_sessions, report.train_sessions),
-            ("eval sessions", run.eval_sessions, report.eval_sessions),
-            ("anchored", run.anchored, report.anchored),
-            ("holdout start", run.holdout_start, report.holdout_start),
-            ("holdout end", run.holdout_end, report.holdout_end),
-            ("fitter version", run.fitter_version, report.spec.fitter_version),
-            ("starting cash", run.starting_cash, request.starting_cash),
-        )
-        if stored != live
+        f"{name} (stored {getattr(run, name)!r}, given {live!r})"
+        for name, live in experiment_fields(report).items()
+        if getattr(run, name) != live
     ]
     if mismatches:
         raise HoldoutError(
             f"this report is not the run stored as #{run.id}: "
-            + ", ".join(mismatches)
-            + " differ. A holdout concludes one experiment; attaching another's "
-            "would put a number on the run that nothing in the row explains"
+            + "; ".join(mismatches)
+            + ". A holdout concludes one experiment; attaching another's would "
+            "put a number on the run that nothing in the row explains"
         )
 
 
