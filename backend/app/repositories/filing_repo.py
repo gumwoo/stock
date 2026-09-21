@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Filing
 from app.models.fundamental import FundamentalSource
+from app.repositories import bulk
 
 
 class FilingRow(NamedTuple):
@@ -39,12 +40,21 @@ class FilingRow(NamedTuple):
 
 
 def save_filings(session: Session, rows: Sequence[FilingRow]) -> int:
-    """Insert filings, ignoring ones already recorded."""
+    """Insert filings, ignoring ones already recorded.
+
+    Chunked: a Korean register over fifteen years runs past the parameter
+    ceiling one statement can bind, and the failure arrives from the server
+    rather than from anything we could check first. See `bulk`.
+    """
     if not rows:
         return 0
-    stmt = pg_insert(Filing).values([r._asdict() for r in rows])
-    stmt = stmt.on_conflict_do_nothing(constraint="uq_filing_instrument_accession")
-    return len(session.execute(stmt.returning(Filing.id)).scalars().all())
+
+    written = 0
+    for batch in bulk.batched(rows, columns=len(FilingRow._fields)):
+        stmt = pg_insert(Filing).values([r._asdict() for r in batch])
+        stmt = stmt.on_conflict_do_nothing(constraint="uq_filing_instrument_accession")
+        written += len(session.execute(stmt.returning(Filing.id)).scalars().all())
+    return written
 
 
 # Which report kinds count as covering a fiscal period, per source. Both lists

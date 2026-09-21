@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql import Subquery
 
 from app.models import Candle, Interval
+from app.repositories import bulk
 
 # Columns that define a bar's content. A change in any of them is a genuine
 # restatement and earns a new revision; `source` and `ingested_at` do not.
@@ -117,7 +118,10 @@ def save_revisions(session: Session, rows: Sequence[CandleRow]) -> int:
     if not to_insert:
         return 0
 
-    session.execute(pg_insert(Candle).values(list(to_insert)))
+    # Ten years of daily bars for one instrument is well under the ceiling; a
+    # backfill across the whole watchlist in one call is not. See `bulk`.
+    for batch in bulk.batched(to_insert, columns=len(CandleRow.__annotations__)):
+        session.execute(pg_insert(Candle).values(list(batch)))
     return len(to_insert)
 
 

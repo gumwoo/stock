@@ -41,7 +41,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Filing, Fundamental
 from app.models.fundamental import FiscalPeriod, FundamentalSource
-from app.repositories import filing_repo
+from app.repositories import bulk, filing_repo
 
 
 class RevisionPolicy(StrEnum):
@@ -191,13 +191,15 @@ def save_facts(session: Session, rows: Sequence[FundamentalRow]) -> int:
     if not rows:
         return 0
 
-    stmt = pg_insert(Fundamental).values([r._asdict() for r in rows])
-    stmt = stmt.on_conflict_do_nothing(constraint="uq_fundamental_context_filing")
-    # RETURNING rather than rowcount: with ON CONFLICT DO NOTHING the driver
-    # reports -1 for a multi-values insert, so the only reliable count is the
-    # ids actually produced.
-    inserted = session.execute(stmt.returning(Fundamental.id)).scalars().all()
-    return len(inserted)
+    written = 0
+    for batch in bulk.batched(rows, columns=len(FundamentalRow._fields)):
+        stmt = pg_insert(Fundamental).values([r._asdict() for r in batch])
+        stmt = stmt.on_conflict_do_nothing(constraint="uq_fundamental_context_filing")
+        # RETURNING rather than rowcount: with ON CONFLICT DO NOTHING the
+        # driver reports -1 for a multi-values insert, so the only reliable
+        # count is the ids actually produced.
+        written += len(session.execute(stmt.returning(Fundamental.id)).scalars().all())
+    return written
 
 
 # How far apart two consecutive annual `period_end` dates may sit and still be
