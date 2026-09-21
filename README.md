@@ -221,6 +221,45 @@ None of the four failed, warned, or looked unusual. That is the argument for
 the coverage checks, and for the collector now counting how many concepts each
 year yielded instead of trusting that a successful request means a useful one.
 
+#### Why it trades twice in a decade
+
+Measured per session over the same ten years, on the corrected data.
+
+| | min | p10 | median | p90 | max |
+|---|---:|---:|---:|---:|---:|
+| 삼성 technical | 16.1 | 37.2 | 56.6 | 71.9 | 88.3 |
+| 삼성 fundamental | 26.3 | 44.9 | 58.5 | 67.2 | 68.7 |
+| 삼성 total | 26.0 | 44.3 | 56.4 | 66.4 | 75.5 |
+| Apple technical | 12.9 | 38.1 | 60.3 | 70.4 | 84.9 |
+| Apple fundamental | 44.7 | 47.3 | 58.9 | 64.8 | 71.3 |
+| Apple total | 33.2 | 45.5 | 58.8 | 66.0 | 75.5 |
+
+**The fundamental factor carries 40% of the weight and almost none of the
+variance.** Its median sits at 58.5 on both instruments and it spans 22 points
+where technical spans 75. Blending them does not widen the judgement, it
+narrows it: Samsung's technical p10-p90 is 34.7 points wide and the combined
+score's is 22.1.
+
+What that does to the thresholds is arithmetic. With the fundamental parked
+near 58.5, reaching a combined 70 needs a technical score of 77.7, and falling
+to 35 needs 19.3 — the top few percent and the very bottom of technical's own
+range. So BUY_INTEREST fires on 5.3% of Samsung's sessions and 4.7% of
+Apple's, CAUTION on 2.3% and 0.2%, and the rule holds whatever it holds for
+the other 92-95%. Apple's four CAUTION sessions in ten years are not caution
+being rare; they are its fundamental floor of 44.7 making the combined score
+almost unable to reach 35.
+
+The flatness is not only annual data moving slowly. The engine averages six
+metrics, and technical's six all derive from price so they move together,
+while ROE, P/E, P/B and margin do not — averaging weakly-related normalized
+values pulls towards the middle, and adding metrics flattens it further. The
+fixed-scale normalization compounds it: ranking would spread an ordinary
+company across the range, while a fixed scale puts it near 50 by construction.
+
+Stated as a measurement, not a diagnosis. Whether 0.6/0.4 over a near-constant
+factor is the intended design is a question for the strategy, and changing it
+by looking at these two instruments is how a holdout gets fitted by eye.
+
 ### Known limitations
 
 - `yfinance` ticker mapping assumes KOSPI (`.KS`). KOSDAQ needs `.KQ`, which
