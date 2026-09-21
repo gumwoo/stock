@@ -300,9 +300,32 @@ drawer shows raw → normalized → weight → contribution for every metric.
 | DART collector | done |
 | Korean fundamentals | done |
 
-Then: Phase 3 backtest and walk-forward · Phase 4 event overlay, market regime
-and forward-test · Phase 5 alerts, portfolio optimisation and the remaining
-screens.
+**Phase 3 complete** — point-in-time repository, execution clock, event-driven
+engine, costs, metrics, walk-forward with a holdout taken once, full
+reproduction from a stored row, the CLI and the Backtest screen.
+
+| | |
+| --- | --- |
+| `available_at` + `ingested_at` enforced at one door | done |
+| `decision_at` → `execution_at` invariant, `SAME_CLOSE` inexpressible | done |
+| Walk-forward with IN/OUT_OF_SAMPLE and a single holdout per run | done |
+| Run identity: strategy + commit + data snapshot | done |
+| Reproduction comparing all twelve stored measurements | done |
+| Fundamental coverage: start, interior gaps, right-hand tail, anchor concepts | done |
+| CLI (`backtest run / show / holdout / reproduce`) and the Backtest screen | done |
+
+**Point-in-time universe reconstruction is deliberately not done.** The design
+called for a historical instrument master including delisted names, so a
+backtest could be run over the index as it stood rather than as it survived.
+Korea publishes no free such master, and the work only buys the right to claim
+a result generalises across a universe. This is a personal analysis tool
+reporting on named instruments, so it does not make that claim, and saying so
+is different from quietly omitting it. Survivorship bias is therefore total
+here and stated rather than corrected.
+
+Then: Phase 3.5 more instruments, which is what would make `percentile_rank`
+mean something · Phase 4 event overlay, market regime and forward-test · Phase
+5 alerts, portfolio optimisation and the remaining screens.
 
 Note that sentiment is no longer a weighted factor. It became an event overlay
 with its own half-life, sitting above the base score rather than inside it —
