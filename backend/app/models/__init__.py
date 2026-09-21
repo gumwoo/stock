@@ -5,7 +5,8 @@ Alembic autogenerate reflects against. A model that is not imported here is
 invisible to migrations.
 """
 
-from app.core.types import Interval
+from app.core.types import Interval, SampleType
+from app.models.backtest import BacktestRun, BacktestWindow
 from app.models.base import Base
 from app.models.collector import CollectorRun, CollectorStatus
 from app.models.filing import Filing
@@ -30,6 +31,8 @@ from app.models.portfolio import (
 from app.models.signal import Signal, SignalFactor, StrategyConfig
 
 __all__ = [
+    "BacktestRun",
+    "BacktestWindow",
     "Base",
     "Candle",
     "CollectorRun",
@@ -45,6 +48,7 @@ __all__ = [
     "Instrument",
     "Interval",
     "PortfolioSnapshot",
+    "SampleType",
     "Signal",
     "SignalFactor",
     "StrategyConfig",

@@ -83,6 +83,30 @@ class ReasonStatus(StrEnum):
     OPPOSES = "OPPOSES"
 
 
+class SampleType(StrEnum):
+    """Which side of the evidence a measurement sits on.
+
+    Lives in `core` for the same reason `Interval` does: the pure backtest
+    layers name it constantly and the persistence layer stores it, and neither
+    should have to import the other to do so.
+    """
+
+    IN_SAMPLE = "IN_SAMPLE"
+    """Measured over the period the rule was chosen on. Not evidence."""
+
+    OUT_OF_SAMPLE = "OUT_OF_SAMPLE"
+    """Measured over a period the rule had not seen when it was chosen."""
+
+    HOLDOUT = "HOLDOUT"
+    """The reserved tail, evaluated once after every choice has been made.
+
+    Window generation never produces a window over it and `walk_forward` never
+    scores it. Scoring is a separate, deliberate call, because a holdout that
+    is reported on every iteration gets fitted by eye — which is harder to
+    notice than fitting it in code, and no less real.
+    """
+
+
 class Interval(StrEnum):
     """Bar sizes. Toss publishes 1-minute and daily; longer bars are derived.
 

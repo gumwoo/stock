@@ -35,8 +35,11 @@ from app.backtest.pit_repository import PitReader, coverage, snapshot_now
 from app.backtest.strategies import StrategyDefinition
 from app.backtest.walkforward import SampleType
 from app.core.calendar import MarketCalendar
+from app.core.clock import utc_now
 from app.core.types import Interval
 from app.models import Instrument
+from app.models.backtest import BacktestRun, BacktestWindow
+from app.repositories import backtest_repo
 
 
 class BacktestWindowError(Exception):
@@ -489,4 +492,109 @@ def evaluate_holdout(
         abstained=len(result.abstained_sessions),
         without_data=len(result.sessions_without_data),
         unfilled=len(result.unfilled),
+    )
+
+
+def persist(
+    session: Session,
+    report: WalkForwardReport,
+    *,
+    code: backtest_repo.CodeVersion | None = None,
+    started_at: datetime | None = None,
+) -> BacktestRun:
+    """Store a finished walk-forward with the coordinates that prove it.
+
+    The costs written are the ones that were applied, expanded into numbers.
+    Recording "the default cost model" would become a different claim the day
+    the default moved, and every stored run would silently reinterpret itself.
+
+    The holdout is not written here. It is not part of a walk-forward — it is
+    the separate measurement taken afterwards — and writing a row for it at
+    this point would mean the run had one before anyone decided to look.
+    """
+    costs = report.request.costs if report.request.costs is not None else CostModel()
+    definition = report.spec.definition or _fitted_placeholder(report)
+
+    run = backtest_repo.save_run(
+        session,
+        instrument_id=report.request.instrument_id,
+        definition=definition,
+        fitter_version=report.spec.fitter_version,
+        provenance=backtest_repo.RunProvenance(
+            code=code or backtest_repo.resolve_commit(),
+            data_snapshot_at=report.data_snapshot_at,
+            started_at=started_at or utc_now(),
+        ),
+        interval=report.request.interval,
+        period_start=report.request.start,
+        period_end=report.request.end,
+        starting_cash=report.request.starting_cash,
+        commission_bps=costs.commission_bps,
+        slippage_bps=costs.slippage_bps,
+        min_commission=costs.min_commission,
+        execution_model=report.request.execution_model.value,
+        bar_minutes=report.request.bar_minutes,
+        train_sessions=report.train_sessions,
+        eval_sessions=report.eval_sessions,
+        anchored=report.anchored,
+        holdout_start=report.holdout_start,
+        holdout_end=report.holdout_end,
+        require_complete_sessions=report.require_complete_sessions,
+    )
+
+    for window in report.windows:
+        _save_window(session, run, window)
+    return run
+
+
+def persist_holdout(session: Session, run: BacktestRun, result: WindowResult) -> BacktestWindow:
+    """Store the final measurement, once.
+
+    A second attempt collides on the run's unique slot rather than appending a
+    second opinion on the one period nothing was allowed to iterate against.
+    """
+    if result.sample_type is not SampleType.HOLDOUT:
+        raise HoldoutError(f"{result.sample_type} is not a holdout measurement")
+    return _save_window(session, run, result)
+
+
+def _save_window(session: Session, run: BacktestRun, window: WindowResult) -> BacktestWindow:
+    performance = window.performance
+    return backtest_repo.save_window(
+        session,
+        run,
+        window_index=window.index,
+        sample_type=window.sample_type,
+        period_start=window.start,
+        period_end=window.end,
+        chosen=window.chosen,
+        sessions=window.sessions,
+        observations=performance.observations if performance else 0,
+        total_return=performance.total_return if performance else None,
+        cagr=performance.cagr if performance else None,
+        max_drawdown=performance.max_drawdown if performance else None,
+        sharpe=performance.sharpe if performance else None,
+        win_rate=performance.win_rate if performance else None,
+        profit_factor=performance.profit_factor if performance else None,
+        trades=window.trades,
+        abstained=window.abstained,
+        without_data=window.without_data,
+        unfilled=window.unfilled,
+    )
+
+
+def _fitted_placeholder(report: WalkForwardReport) -> StrategyDefinition:
+    """The run-level definition for a fitted experiment.
+
+    A fitted run has no single strategy — each window chose its own, and those
+    are stored on the window rows. The run header records the kind the fitter
+    produced and the fitter's version, so the header is never mistaken for a
+    fixed rule that was actually run.
+    """
+    kinds = {w.chosen.kind for w in report.windows}
+    kind = kinds.pop() if len(kinds) == 1 else "mixed"
+    return StrategyDefinition(
+        kind=kind,
+        version=report.spec.version,
+        params={"fitted": True, "windows": len(report.of(SampleType.OUT_OF_SAMPLE))},
     )

@@ -40,26 +40,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from enum import StrEnum
 
+from app.core.types import SampleType
 
-class SampleType(StrEnum):
-    """Which side of the evidence a result sits on."""
-
-    IN_SAMPLE = "IN_SAMPLE"
-    """Measured over the period the rule was chosen on. Not evidence."""
-
-    OUT_OF_SAMPLE = "OUT_OF_SAMPLE"
-    """Measured over a period the rule had not seen when it was chosen."""
-
-    HOLDOUT = "HOLDOUT"
-    """The reserved tail, evaluated once after every choice has been made.
-
-    `generate` never produces a window over it and `walk_forward` never scores
-    it. Scoring is a separate, deliberate call, because a holdout that is
-    reported on every iteration gets fitted by eye — which is harder to notice
-    than fitting it in code, and no less real.
-    """
+__all__ = [
+    "SampleType",
+    "Split",
+    "WalkForwardError",
+    "Window",
+    "evaluation_covers",
+    "generate",
+]
 
 
 class WalkForwardError(Exception):
