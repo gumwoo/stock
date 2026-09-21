@@ -159,6 +159,48 @@ class TestItIsTheSameRuleTheSystemRuns:
 
         assert policy.STRATEGY_VERSION in definition.version
 
+    def test_the_thresholds_come_from_the_shared_policy(self) -> None:
+        """Two copies that happen to agree are not a shared policy.
+
+        The strategy declared its own 70/35 and the live scorer read
+        `policy.THRESHOLDS`. They matched by coincidence, so moving the live
+        threshold to 75/30 would have left the backtest measuring 70/35 with
+        nothing failing — and the drift would have been baked into every
+        stored strategy definition through the factory's defaults.
+        """
+        rule = TechnicalFundamental()
+
+        assert rule.thresholds.buy_interest == policy.THRESHOLDS.buy_interest
+        assert rule.thresholds.caution == policy.THRESHOLDS.caution
+
+    def test_the_factory_default_comes_from_it_too(self) -> None:
+        """Otherwise the drift persists into stored runs."""
+        definition = technical_fundamental()
+
+        assert definition.params["buy_interest"] == policy.THRESHOLDS.buy_interest
+        assert definition.params["caution"] == policy.THRESHOLDS.caution
+
+    def test_moving_the_policy_moves_both(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The property the two tests above only sample at today's values."""
+        import app.backtest.scoring_strategy as strategy_module
+        from app.scoring.combine import Thresholds
+
+        moved = Thresholds(buy_interest=75.0, caution=30.0)
+        monkeypatch.setattr(policy, "THRESHOLDS", moved)
+        monkeypatch.setattr(strategies, "THRESHOLDS", moved)
+        monkeypatch.setattr(strategy_module, "THRESHOLDS", moved)
+
+        assert strategies.technical_fundamental().params["buy_interest"] == 75.0
+        assert TechnicalFundamental().thresholds.buy_interest == 75.0
+
+    def test_both_paths_read_the_same_history_window(self) -> None:
+        """ "The same rule" stops being true the moment an indicator reaches
+        further back than the shorter of two windows."""
+        import app.backtest.scoring_strategy as strategy_module
+
+        assert strategy_module.SCORING_HISTORY_BARS is policy.SCORING_HISTORY_BARS
+        assert scoring_service.SCORING_HISTORY_BARS is policy.SCORING_HISTORY_BARS
+
     def test_the_definition_rebuilds_the_rule(self) -> None:
         built = strategies.build(technical_fundamental(buy_interest=65, caution=30))
 

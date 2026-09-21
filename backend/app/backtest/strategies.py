@@ -40,7 +40,7 @@ from app.backtest.engine import MarketData, Signal, Strategy
 from app.backtest.scoring_strategy import TechnicalFundamental
 from app.core.indicators import simple_moving_average
 from app.core.types import Interval, StrategyDefinition, UnknownStrategyError
-from app.scoring.policy import STRATEGY_VERSION
+from app.scoring.policy import STRATEGY_VERSION, THRESHOLDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,8 +153,8 @@ def buy_and_hold(*, version: str = "buy-and-hold@v1") -> StrategyDefinition:
 
 def technical_fundamental(
     *,
-    buy_interest: float = 70.0,
-    caution: float = 35.0,
+    buy_interest: float | None = None,
+    caution: float | None = None,
     currency: str = "KRW",
     version: str | None = None,
 ) -> StrategyDefinition:
@@ -166,8 +166,15 @@ def technical_fundamental(
     parameters because turning a score into a position is this strategy's
     decision rather than the scorer's.
     """
+    # Resolved here, at call time, so a change to the policy reaches every
+    # definition made afterwards. Written into `params` as concrete numbers,
+    # because a stored run has to say what it actually used rather than
+    # pointing at a constant that may since have moved.
+    buy = THRESHOLDS.buy_interest if buy_interest is None else buy_interest
+    sell = THRESHOLDS.caution if caution is None else caution
+
     return StrategyDefinition(
         kind="technical_fundamental",
-        version=version or f"{STRATEGY_VERSION}+{buy_interest:g}/{caution:g}",
-        params={"buy_interest": buy_interest, "caution": caution, "currency": currency},
+        version=version or f"{STRATEGY_VERSION}+{buy:g}/{sell:g}",
+        params={"buy_interest": buy, "caution": sell, "currency": currency},
     )

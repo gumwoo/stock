@@ -38,6 +38,16 @@ POLICY = MissingFactorPolicy.ABSTAIN
 
 THRESHOLDS = Thresholds()
 
+# How much price history the rule reads. Shared for the same reason the
+# weights are: the live scorer and the backtest must hand their engines the
+# same window, or "the same rule" stops being true the moment an indicator
+# starts reaching further back than the shorter of the two.
+#
+# It was 250 live and 260 in the backtest. Nothing differed today — the
+# longest indicator looks back 60 — but the divergence was invisible and
+# would have stayed invisible until something changed.
+SCORING_HISTORY_BARS = 250
+
 
 def apply_freshness(factor: Factor, *, policy: MissingFactorPolicy, required: bool) -> Factor:
     """Let the freshness verdict actually reduce the factor's weight.

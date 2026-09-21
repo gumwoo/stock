@@ -40,6 +40,7 @@ from app.scoring.combine import ExecutionTimingError, build_signal
 from app.scoring.policy import (
     POLICY,
     REQUIRED,
+    SCORING_HISTORY_BARS,
     STRATEGY_VERSION,
     THRESHOLDS,
     WEIGHTS,
@@ -55,7 +56,6 @@ logger = logging.getLogger(__name__)
 # missing a *new* one.
 FUNDAMENTAL_SOURCE_CHECK = timedelta(days=7)
 
-HISTORY_BARS = 250
 
 # Which value source speaks for which market. Korean instruments have no
 # SEC coverage at all, so their fundamental factor sits out until the DART
@@ -92,7 +92,7 @@ def score_instrument(
         session,
         instrument.instrument_id,
         Interval.DAY_1,
-        limit=HISTORY_BARS,
+        limit=SCORING_HISTORY_BARS,
         available_before=now,
     )
     if not bars:

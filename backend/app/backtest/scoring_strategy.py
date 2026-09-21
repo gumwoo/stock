@@ -41,14 +41,16 @@ from app.core.types import Interval as IntervalType
 from app.engines.fundamental import FundamentalEngine, FundamentalParams
 from app.engines.technical import PriceSeries, TechnicalEngine, TechnicalParams
 from app.scoring.combine import Thresholds
-from app.scoring.policy import POLICY, REQUIRED, WEIGHTS, apply_freshness
+from app.scoring.policy import (
+    POLICY,
+    REQUIRED,
+    SCORING_HISTORY_BARS,
+    THRESHOLDS,
+    WEIGHTS,
+    apply_freshness,
+)
 
-__all__ = ["HISTORY_BARS", "REQUIRED", "WEIGHTS", "TechnicalFundamental"]
-
-# Enough history for the longest indicator the technical engine computes, with
-# room to spare. Short of this the engine reports insufficient data and the
-# strategy abstains, which is the honest answer at the start of a run.
-HISTORY_BARS = 260
+__all__ = ["REQUIRED", "SCORING_HISTORY_BARS", "THRESHOLDS", "WEIGHTS", "TechnicalFundamental"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,13 +73,28 @@ class TechnicalFundamental:
     one.
     """
 
-    buy_interest: float = 70.0
-    caution: float = 35.0
+    # `None` means "whatever the shared policy says", resolved when the rule
+    # runs rather than when this module is imported. A default written as
+    # `THRESHOLDS.buy_interest` would look shared and be a copy: Python
+    # evaluates it once, at import, so a later change to the policy would
+    # leave this holding the old number with nothing failing.
+    buy_interest: float | None = None
+    caution: float | None = None
     interval: IntervalType = IntervalType.DAY_1
     currency: str = "KRW"
 
+    @property
+    def thresholds(self) -> Thresholds:
+        """What turns a score into a position, from the policy unless stated."""
+        return Thresholds(
+            buy_interest=(
+                THRESHOLDS.buy_interest if self.buy_interest is None else self.buy_interest
+            ),
+            caution=THRESHOLDS.caution if self.caution is None else self.caution,
+        )
+
     def evaluate(self, data: ScoringData, instrument_id: int) -> Signal:
-        bars = data.bars(instrument_id, self.interval, limit=HISTORY_BARS)
+        bars = data.bars(instrument_id, self.interval, limit=SCORING_HISTORY_BARS)
         if not bars:
             return Signal.ABSTAIN
 
@@ -112,9 +129,7 @@ class TechnicalFundamental:
             return Signal.ABSTAIN
 
         score = sum(f.contribution for f in factors)
-        action = Thresholds(buy_interest=self.buy_interest, caution=self.caution).action_for(
-            score, participating
-        )
+        action = self.thresholds.action_for(score, participating)
 
         match action:
             case SignalAction.BUY_INTEREST:
