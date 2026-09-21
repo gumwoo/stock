@@ -101,15 +101,31 @@ def execute(
             f"{snapshot.isoformat()}; there is nothing to simulate"
         )
 
-    first, last = span
-    if request.start < first or request.end > last:
+    calendar = MarketCalendar(instrument.market)
+
+    # Compare sessions, not the dates that were typed. A window is asked for
+    # in ordinary dates — "2025", "Q1", "through the end of November" — and
+    # those boundaries land on weekends and holidays constantly. The run only
+    # ever touches the sessions inside them, so a Sunday `end` one day past
+    # the final session asks for nothing that is missing, and refusing it
+    # would be refusing a question we can answer. Walk-forward makes this the
+    # normal case rather than the odd one: every window boundary is a month,
+    # quarter or year end.
+    requested = calendar.sessions_between(request.start, request.end)
+    if not requested:
         raise BacktestWindowError(
-            f"requested {request.start}..{request.end} but {instrument.name} has "
+            f"no {instrument.market} trading sessions between {request.start} "
+            f"and {request.end}; there is nothing to simulate"
+        )
+
+    first, last = span
+    if requested[0] < first or requested[-1] > last:
+        raise BacktestWindowError(
+            f"requested {request.start}..{request.end}, which covers sessions "
+            f"{requested[0]}..{requested[-1]}, but {instrument.name} has "
             f"{request.interval} data only for {first}..{last}. Trimming the window "
             "silently would report a shorter simulation as a full-period result"
         )
-
-    calendar = MarketCalendar(instrument.market)
     result = bt.run(
         strategy,
         PitReader(session, data_snapshot_at=snapshot),

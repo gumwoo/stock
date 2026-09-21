@@ -40,8 +40,9 @@ pytestmark = pytest.mark.integration
 
 US = MarketCalendar(Market.US)
 
-# Data exists for these sessions and no others.
-HELD = US.sessions_between(date(2025, 3, 3), date(2025, 6, 30))
+# Data exists for these sessions and no others. Chosen to start on a Monday
+# and end on a Friday, so the weekends on either side can be asked for.
+HELD = US.sessions_between(date(2025, 3, 3), date(2025, 6, 27))
 
 
 def _row(iid: int, day: date) -> CandleRow:
@@ -140,6 +141,57 @@ class TestPeriodsOutsideTheData:
         outcome = svc.execute(s, BuyAndHold(), request_for(iid, HELD[0], HELD[-1]))
 
         assert outcome.result.sessions == len(outcome.result.equity_curve)
+
+
+class TestWindowsAreJudgedBySessionsNotDates:
+    """A window is asked for in ordinary dates; it is run in sessions.
+
+    "2025", "Q2", "through the end of June" — those boundaries land on
+    weekends and holidays constantly, and the run only ever touches the
+    sessions inside them. Comparing the typed dates against the data's first
+    and last session refused questions that were perfectly answerable, and
+    walk-forward would have made that the normal case: every window boundary
+    is a month, quarter or year end.
+    """
+
+    def test_a_weekend_start_before_the_first_session_is_allowed(
+        self, narrow: tuple[Session, int]
+    ) -> None:
+        saturday = date(2025, 3, 1)
+        assert not US.is_session(saturday)
+        assert saturday < HELD[0]
+
+        s, iid = narrow
+        outcome = svc.execute(s, BuyAndHold(), request_for(iid, saturday, HELD[-1]))
+
+        assert outcome.result.sessions == len(HELD)
+
+    def test_a_weekend_end_after_the_last_session_is_allowed(
+        self, narrow: tuple[Session, int]
+    ) -> None:
+        sunday = date(2025, 6, 29)
+        assert not US.is_session(sunday)
+        assert sunday > HELD[-1]
+
+        s, iid = narrow
+        outcome = svc.execute(s, BuyAndHold(), request_for(iid, HELD[0], sunday))
+
+        assert outcome.result.sessions == len(HELD)
+
+    def test_a_genuine_shortfall_is_still_refused(self, narrow: tuple[Session, int]) -> None:
+        """Normalising to sessions must not soften the real check."""
+        s, iid = narrow
+        earlier = US.sessions_between(date(2025, 2, 20), date(2025, 2, 28))[0]
+        assert earlier < HELD[0]
+
+        with pytest.raises(BacktestWindowError, match="data only for"):
+            svc.execute(s, BuyAndHold(), request_for(iid, earlier, HELD[-1]))
+
+    def test_a_window_containing_no_session_is_refused(self, narrow: tuple[Session, int]) -> None:
+        """A weekend on its own is not a backtest period."""
+        s, iid = narrow
+        with pytest.raises(BacktestWindowError, match="trading sessions between"):
+            svc.execute(s, BuyAndHold(), request_for(iid, date(2025, 6, 28), date(2025, 6, 29)))
 
 
 class TestGapsInsideTheData:
