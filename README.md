@@ -61,10 +61,18 @@ wall-clock age, fundamentals against how recently the source was successfully
 checked.
 
 **Scores are decomposed, not asserted.** An RSI-based 80 and an ROE-based 80 are
-not the same quantity, so raw metrics are normalized cross-sectionally before
+not the same quantity, so raw metrics are normalized to a 0-100 position before
 weighting. Every factor stores its raw value, normalized position, requested
 weight, effective weight and resulting contribution — so "why was this 59.7?" is
 answerable from stored rows alone.
+
+That normalization is currently a fixed scale, not a cross-sectional one.
+Ranking an instrument against its peers needs peers, and there are two
+instruments here; `percentile_rank` exists and nothing calls it. `bounded` and
+`peak_at` map a value onto a stated range instead — a fixed opinion rather than
+a comparison, kept as separate functions so the difference is visible at the
+call site rather than hidden behind a fallback. Which one a strategy uses
+becomes a real choice once the universe is large enough to rank within.
 
 ---
 
