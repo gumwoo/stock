@@ -157,8 +157,22 @@ def filed_date_from_receipt(rcept_no: str) -> date | None:
         return None
 
 
+# As far back as asking is worth it. DART's full-statement endpoint is indexed
+# by business year and returns nothing for years before XBRL filing was in
+# place, so a larger number costs empty requests rather than finding more.
+MAX_YEARS_BACK = 15
+
+
 class DartFundamentalCollector(BaseCollector):
-    """Fetch Korean annual statements and store every reported revision."""
+    """Fetch Korean annual statements and store every reported revision.
+
+    `years_back` is the whole reach of a collection, and the default is short
+    on purpose: a weekly refresh does not need to re-walk a decade. A backtest
+    does, and the two are easy to leave disagreeing — ten years of prices
+    against five of filings scores the earlier half on technicals alone and
+    reports it as the same rule. `python -m app.cli collect --source dart
+    --period 10y` is how the longer reach is asked for.
+    """
 
     name = "DART_FUNDAMENTAL"
 

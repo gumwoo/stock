@@ -37,12 +37,14 @@ from app.backtest.strategies import technical_fundamental
 from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
 from app.core.types import Interval
+from app.engines.fundamental import REQUIRED_MONTHS
 from app.models import Base, Instrument
-from app.repositories import candle_repo
+from app.models.fundamental import FiscalPeriod, FundamentalSource
+from app.repositories import candle_repo, fundamental_repo
 from app.repositories.candle_repo import CandleRow
 from app.scoring import policy
 from app.services import backtest_service as svc
-from app.services import scoring_service
+from app.services import fundamental_service, scoring_service
 from tests.conftest import fake_cik
 
 pytestmark = pytest.mark.integration
@@ -309,8 +311,8 @@ class TestFundamentalsComeThroughTheSameDoor:
 
 
 class TestItStoresAndReproduces:
-    def test_a_walk_forward_runs_end_to_end(self, instrument: tuple[Session, Instrument]) -> None:
-        s, inst = instrument
+    def test_a_walk_forward_runs_end_to_end(self, funded: tuple[Session, Instrument]) -> None:
+        s, inst = funded
         report = svc.walk_forward(
             s,
             svc.StrategySpec(definition=technical_fundamental(currency="USD")),
@@ -331,10 +333,10 @@ class TestItStoresAndReproduces:
         assert run.strategy_kind == "technical_fundamental"
         assert run.strategy_params["buy_interest"] == 70.0
 
-    def test_the_stored_run_reproduces(self, instrument: tuple[Session, Instrument]) -> None:
+    def test_the_stored_run_reproduces(self, funded: tuple[Session, Instrument]) -> None:
         from app.services import reproduce_service as rs
 
-        s, inst = instrument
+        s, inst = funded
         report = svc.walk_forward(
             s,
             svc.StrategySpec(definition=technical_fundamental(currency="USD")),
@@ -352,3 +354,179 @@ class TestItStoresAndReproduces:
         s.commit()
 
         assert rs.reproduce(s, run.id).reproduced
+
+
+# --- a run must cover the era it claims to measure --------------------------
+
+FUNDED_CIK = str(int(CIK) + 1).zfill(len(CIK))
+
+# Facts for the years the run spans, filed before it starts. Annual only: the
+# coverage check asks where the filings begin, not how dense they are.
+ANNUAL: dict[str, Decimal] = {
+    "Revenues": Decimal("400000000"),
+    "NetIncomeLoss": Decimal("90000000"),
+    "OperatingIncomeLoss": Decimal("110000000"),
+    "EarningsPerShareBasic": Decimal("5.5"),
+    "EarningsPerShareDiluted": Decimal("5.4"),
+    "Assets": Decimal("800000000"),
+    "Liabilities": Decimal("300000000"),
+    "StockholdersEquity": Decimal("500000000"),
+    "CashAndCashEquivalentsAtCarryingValue": Decimal("120000000"),
+}
+
+
+def _facts(iid: int) -> list[fundamental_repo.FundamentalRow]:
+    rows = []
+    for year in (2021, 2022, 2023):
+        ends = date(year, 12, 31)
+        filed = date(year + 1, 2, 1)
+        available = US.next_session_open(filed)
+        for concept, value in ANNUAL.items():
+            instant = REQUIRED_MONTHS[concept] is None
+            rows.append(
+                fundamental_repo.FundamentalRow(
+                    instrument_id=iid,
+                    taxonomy="us-gaap",
+                    concept=concept,
+                    unit=fundamental_service.unit_for(concept, "USD"),
+                    period_start=None if instant else date(year, 1, 1),
+                    period_end=ends,
+                    fiscal_year=year,
+                    fiscal_period=FiscalPeriod.FY,
+                    form="10-K",
+                    value=value,
+                    filed_at=filed,
+                    available_at=available,
+                    accession=f"{FUNDED_CIK}-{year}-FY",
+                    source=FundamentalSource.SEC,
+                )
+            )
+    return rows
+
+
+@pytest.fixture
+def funded(db: object) -> Iterator[tuple[Session, Instrument]]:
+    """Prices across the whole run, and filings that begin before it does."""
+    factory = sessionmaker(bind=db, expire_on_commit=False, future=True)  # type: ignore[arg-type]
+    with factory() as s:
+        inst = Instrument(market=Market.US, name="FUNDED TEST CORP", us_cik=FUNDED_CIK)
+        s.add(inst)
+        s.flush()
+
+        candle_repo.save_revisions(
+            s,
+            [_row(inst.instrument_id, day, _price(i)) for i, day in enumerate(HISTORY)],
+        )
+        fundamental_repo.save_facts(s, _facts(inst.instrument_id))
+        s.commit()
+
+        yield s, inst
+
+        s.execute(
+            text("DELETE FROM backtest_run WHERE instrument_id = :i"),
+            {"i": inst.instrument_id},
+        )
+        for table in ("fundamental", "candle", "instrument"):
+            s.execute(
+                text(f"DELETE FROM {table} WHERE instrument_id = :i"),
+                {"i": inst.instrument_id},
+            )
+        s.commit()
+
+
+class TestARunMustCoverTheEraItMeasures:
+    """A period reaching back before the filings is not a measurement of this
+    rule — it is a measurement of the technical half, reported as if it were
+    the whole.
+
+    The live case: Samsung had prices from 2016-09 and DART filings only from
+    2023-03, because the collector's default reached back five years. A
+    ten-year run therefore spent six and a half years structurally unable to
+    buy, and returned +608% as though that were a verdict on the strategy.
+    Nothing failed, nothing warned, and the number looked plausible.
+    """
+
+    def test_it_refuses_a_period_with_no_filings_at_all(
+        self, instrument: tuple[Session, Instrument]
+    ) -> None:
+        s, inst = instrument
+
+        with pytest.raises(svc.BacktestWindowError, match="no SEC filings"):
+            svc.execute(
+                s,
+                strategies.build(technical_fundamental(currency="USD")),
+                svc.RunRequest(
+                    instrument_id=inst.instrument_id,
+                    start=HISTORY[0],
+                    end=HISTORY[-1],
+                    starting_cash=Decimal("100000"),
+                    costs=CostModel(Decimal("5"), Decimal("5")),
+                ),
+            )
+
+    def test_it_refuses_a_period_beginning_before_the_filings_do(
+        self, funded: tuple[Session, Instrument]
+    ) -> None:
+        """Price coverage reaches further back than fundamental coverage — the
+        exact shape that let the Samsung run through."""
+        s, inst = funded
+        candle_repo.save_revisions(
+            s,
+            [
+                _row(inst.instrument_id, day, Decimal("100"))
+                for day in US.sessions_between(date(2021, 1, 4), date(2022, 12, 30))
+            ],
+        )
+        s.flush()
+
+        with pytest.raises(svc.BacktestWindowError, match="filings only from"):
+            svc.execute(
+                s,
+                strategies.build(technical_fundamental(currency="USD")),
+                svc.RunRequest(
+                    instrument_id=inst.instrument_id,
+                    start=date(2021, 1, 4),
+                    end=HISTORY[-1],
+                    starting_cash=Decimal("100000"),
+                    costs=CostModel(Decimal("5"), Decimal("5")),
+                ),
+            )
+
+    def test_a_strategy_that_never_asks_is_not_held_to_it(
+        self, instrument: tuple[Session, Instrument]
+    ) -> None:
+        """The gate is keyed on what the strategy actually read, not on a flag
+        someone remembered to set. Buy-and-hold never opens the fundamental
+        door, so the absence of filings is nothing to it."""
+        s, inst = instrument
+
+        result = svc.execute(
+            s,
+            strategies.build(strategies.buy_and_hold()),
+            svc.RunRequest(
+                instrument_id=inst.instrument_id,
+                start=HISTORY[0],
+                end=HISTORY[-1],
+                starting_cash=Decimal("100000"),
+                costs=CostModel(Decimal("5"), Decimal("5")),
+            ),
+        )
+
+        assert result.result.fills
+
+    def test_a_covered_period_runs(self, funded: tuple[Session, Instrument]) -> None:
+        s, inst = funded
+
+        result = svc.execute(
+            s,
+            strategies.build(technical_fundamental(currency="USD")),
+            svc.RunRequest(
+                instrument_id=inst.instrument_id,
+                start=HISTORY[0],
+                end=HISTORY[-1],
+                starting_cash=Decimal("100000"),
+                costs=CostModel(Decimal("5"), Decimal("5")),
+            ),
+        )
+
+        assert result.result.equity_curve

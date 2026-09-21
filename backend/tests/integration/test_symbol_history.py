@@ -51,7 +51,11 @@ def session(engine: object) -> Iterator[Session]:
     with factory() as s:
         yield s
         s.execute(text("DELETE FROM symbol_history WHERE symbol IN ('OLDTK','NEWTK')"))
-        s.execute(text("DELETE FROM instrument WHERE us_cik = '9999999999'"))
+        # Bound to the same CIK the fixture creates, not to a literal. The
+        # literal was 9999999999 and stayed behind when the module moved to a
+        # derived identifier, so every run left another Boundary Test Corp in
+        # the development database and nothing failed.
+        s.execute(text("DELETE FROM instrument WHERE us_cik = :cik"), {"cik": CIK})
         s.commit()
 
 

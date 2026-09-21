@@ -42,7 +42,7 @@ from app.engines.fundamental import FundamentalSnapshot
 from app.models import Instrument
 from app.models.backtest import BacktestRun, BacktestWindow
 from app.models.fundamental import FundamentalSource
-from app.repositories import backtest_repo
+from app.repositories import backtest_repo, fundamental_repo
 from app.services import fundamental_service
 
 
@@ -86,21 +86,39 @@ class ScoringReader:
     point-in-time rules as one that asks about prices.
     """
 
-    __slots__ = ("_reader", "_session", "_source")
+    __slots__ = ("_asked", "_reader", "_session", "_source")
 
     def __init__(
-        self, session: Session, reader: PitReader, source: FundamentalSource | None
+        self,
+        session: Session,
+        reader: PitReader,
+        source: FundamentalSource | None,
+        asked: list[bool] | None = None,
     ) -> None:
         self._session = session
         self._reader = reader
         self._source = source
+        # Shared with every reader this one spawns, so "did the strategy read
+        # financials" survives the `at()` calls the engine makes each session.
+        self._asked = [] if asked is None else asked
+
+    @property
+    def read_fundamentals(self) -> bool:
+        """Whether anything actually asked for financials during the run.
+
+        Checking coverage unconditionally would refuse a moving-average run
+        for lacking data it never wanted. Checking a flag the caller sets
+        would be a flag somebody forgets. Recording the call itself is exact
+        and cannot be left out of a new strategy by accident.
+        """
+        return bool(self._asked)
 
     @property
     def asof(self) -> datetime:
         return self._reader.asof
 
     def at(self, asof: datetime) -> ScoringReader:
-        return ScoringReader(self._session, self._reader.at(asof), self._source)
+        return ScoringReader(self._session, self._reader.at(asof), self._source, self._asked)
 
     def bars(self, instrument_id: int, interval: Interval, *, limit: int = 250) -> list[Bar]:
         return self._reader.bars(instrument_id, interval, limit=limit)
@@ -111,6 +129,7 @@ class ScoringReader:
     def fundamentals(
         self, instrument_id: int, *, price: float, currency: str
     ) -> FundamentalSnapshot:
+        self._asked.append(True)
         return fundamental_service.build_snapshot(
             self._session,
             instrument_id,
@@ -139,6 +158,53 @@ def reader_for(session: Session, instrument: Instrument, snapshot: datetime) -> 
         PitReader(session, data_snapshot_at=snapshot),
         FUNDAMENTAL_SOURCE.get(instrument.market),
     )
+
+
+def _assert_fundamentals_cover(
+    session: Session,
+    instrument: Instrument,
+    *,
+    start: date,
+    snapshot: datetime,
+) -> None:
+    """Refuse a period that reaches back before the financials do.
+
+    Price coverage was checked from the start; this was not, and the gap is
+    not cosmetic. Under the current policy the fundamental factor carries 0.4
+    of the weight and the threshold scales to whatever participates, so an
+    era with no filings is one where the rule can hold or exit but never
+    enter — measured, not assumed.
+
+    Live consequence, which is why this exists: Samsung had prices from
+    2016-09 and DART filings only from 2023-03, because the collector's
+    default reaches back five years. A ten-year run therefore spent six and a
+    half of those years structurally unable to buy, and reported +608% as
+    though that were a verdict on the strategy.
+    """
+    source = FUNDAMENTAL_SOURCE.get(instrument.market)
+    if source is None:
+        return
+
+    # `coverage_start` is the earliest *filing* date, while a fact becomes
+    # readable at the following session's open. The check is therefore lenient
+    # by one session, which is the right direction: it refuses eras the data
+    # cannot speak to and never refuses one it can.
+    begins = fundamental_repo.coverage_start(
+        session, instrument.instrument_id, source=source, ingested_before=snapshot
+    )
+    if begins is None:
+        raise BacktestWindowError(
+            f"{instrument.name} has no {source} filings under this snapshot, but the "
+            "strategy read financials. Every session would score on technicals "
+            "alone, which is a different rule from the one being measured"
+        )
+    if start < begins:
+        raise BacktestWindowError(
+            f"the strategy read financials, but {instrument.name} has {source} filings "
+            f"only from {begins} and the run starts {start}. The earlier part would "
+            "score on technicals alone — a different rule, reported as the same one. "
+            "Collect further back, or start the run at the coverage boundary"
+        )
 
 
 def execute(
@@ -205,9 +271,10 @@ def execute(
             f"{request.interval} data only for {first}..{last}. Trimming the window "
             "silently would report a shorter simulation as a full-period result"
         )
+    data = reader_for(session, instrument, snapshot)
     result = bt.run(
         strategy,
-        reader_for(session, instrument, snapshot),
+        data,
         instrument_id=request.instrument_id,
         calendar=calendar,
         start=request.start,
@@ -218,6 +285,13 @@ def execute(
         execution_model=request.execution_model,
         bar_minutes=request.bar_minutes,
     )
+
+    # After the run, not before it, because the question is what the strategy
+    # actually read and only running it answers that. A refused ten-year run
+    # therefore does its work first — the cost of a gate that cannot be
+    # bypassed by forgetting to declare something.
+    if data.read_fundamentals:
+        _assert_fundamentals_cover(session, instrument, start=requested[0], snapshot=snapshot)
 
     if require_complete_sessions and not result.simulated_full_period:
         # Coverage is judged on the outer dates, so a gap inside them — a

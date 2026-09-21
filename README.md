@@ -140,7 +140,8 @@ reintroduces look-ahead bias without failing a single test.
 ### Backtests
 
 ```bash
-python -m app.cli collect --source yfinance --period 10y          # longer history first
+python -m app.cli collect --source yfinance --period 10y          # prices
+python -m app.cli collect --source dart --period 10y              # and filings, same reach
 python -m app.cli backtest run --symbol 005930 --strategy score   # the system's own rule
 python -m app.cli backtest run --symbol 005930     # default: a moving-average harness
 python -m app.cli backtest show --run 1            # what it recorded
@@ -169,6 +170,34 @@ need — strategy, fingerprints, commit, data snapshot, costs and split.
   rare, but in practice the rule is gated on having financials at all. Pinned
   as a test so a change to a weight or threshold fails loudly rather than
   silently altering what the system can say.
+- A run is refused when the period reaches back before the filings do, which
+  is why `--period` applies to both collectors. The first ten-year Samsung run
+  was made on ten years of prices and five years of DART filings, because the
+  collector's default reaches back five. For six and a half of those years the
+  fundamental factor stood down and the rule could hold or exit but never
+  enter, and it returned +608% as though that were a verdict on the strategy.
+  Nothing failed and nothing warned; the number simply looked plausible.
+
+#### What it measures, on the two instruments collected
+
+Ten years to 2026-09-18, full fundamental coverage, 5bp commission and 5bp
+slippage, next-open fills.
+
+| | | total return | MDD | Sharpe | trades |
+|---|---|---:|---:|---:|---:|
+| 삼성전자 | score 70/35 | +475.53% | -42.15% | 0.77 | 8 |
+| | buy-and-hold | +714.38% | -45.16% | 0.79 | 0 |
+| Apple | score 70/35 | +184.17% | -33.62% | 0.54 | 3 |
+| | buy-and-hold | +1073.22% | -38.70% | 0.99 | 0 |
+
+**The rule underperforms buying and holding on both, on every measure except a
+slightly shallower drawdown.** Two instruments over one decade is not a verdict
+on the strategy, and the decade is one long bull market in both — the sample a
+buy-and-hold benchmark wins by construction. But it is the measurement the
+harness produces, and reporting it is the point of having built the harness
+this way. The corrected Samsung figure is also 133 percentage points below the
+one the same code produced before the coverage check existed.
+
 ### Known limitations
 
 - `yfinance` ticker mapping assumes KOSPI (`.KS`). KOSDAQ needs `.KQ`, which

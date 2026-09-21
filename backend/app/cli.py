@@ -23,7 +23,7 @@ import sys
 
 from app import cli_backtest
 from app.collectors.base import run_collector
-from app.collectors.dart_fundamental import DartFundamentalCollector
+from app.collectors.dart_fundamental import MAX_YEARS_BACK, DartFundamentalCollector
 from app.collectors.sec_edgar import SecEdgarCollector
 from app.collectors.yfinance_history import FxRateCollector, YFinanceHistoryCollector
 from app.config import get_settings
@@ -43,6 +43,23 @@ COLLECTORS = {
     "sec": SecEdgarCollector,
     "dart": DartFundamentalCollector,
 }
+
+# How far back a collection reaches, in one vocabulary for every source that
+# has a choice about it.
+#
+# One flag rather than a period string here and a year count there, because
+# the thing that goes wrong is the two disagreeing. Samsung's ten-year backtest
+# was run on ten years of prices and five years of DART filings — the default
+# `years_back` — so for six and a half of those years the fundamental factor
+# stood down and the rule could hold or exit but never enter. It returned
+# +608%, and nothing in the collection, the run or the report said the two
+# histories did not line up.
+PERIODS: dict[str, int] = {"2y": 2, "5y": 5, "10y": 10, "max": MAX_YEARS_BACK}
+
+# Sources whose range is decided by the source, not by us. SEC's companyfacts
+# is the filer's entire XBRL history in a single document; there is no shorter
+# request to make, so a period given here would be silently discarded.
+FIXED_RANGE = frozenset({"sec"})
 
 
 def cmd_config() -> int:
@@ -80,9 +97,19 @@ def cmd_collect(source: str, period: str | None = None) -> int:
         print(f"unknown source {source!r}; known: {', '.join(sorted(COLLECTORS))}")
         return 2
 
-    # Only the price collectors take a period; the filing collectors decide
-    # their own range from the filer's fiscal calendar.
-    kwargs = {"period": period} if period and source in {"yfinance", "fx"} else {}
+    if period is not None and source in FIXED_RANGE:
+        print(
+            f"{source} has no adjustable range — it fetches the filer's whole "
+            f"history in one request. Drop --period."
+        )
+        return 2
+
+    # DART indexes filings by business year, the price sources take yfinance's
+    # period strings. Translated here rather than at the call site so the two
+    # cannot be asked for different eras by accident.
+    kwargs: dict[str, object] = {}
+    if period is not None:
+        kwargs = {"years_back": PERIODS[period]} if source == "dart" else {"period": period}
 
     with session_scope() as session:
         run = run_collector(factory(**kwargs), session)
@@ -153,9 +180,11 @@ def main(argv: list[str] | None = None) -> int:
     collect.add_argument("--source", required=True, choices=sorted(COLLECTORS))
     collect.add_argument(
         "--period",
-        help="how far back to fetch, for price sources: 2y, 5y, 10y, max. "
-        "Longer history is what lets a backtest include a falling market, "
-        "and two rising years is a sample that flatters any rule that buys",
+        choices=sorted(PERIODS),
+        help="how far back to fetch. Applies to prices and to DART filings "
+        "alike, because a backtest is only as long as the shorter of the two: "
+        "ten years of prices against five of filings measures the technical "
+        "half for the first five and reports it as the whole rule",
     )
 
     cli_backtest.register(sub)
