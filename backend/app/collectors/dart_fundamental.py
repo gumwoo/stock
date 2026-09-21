@@ -62,17 +62,47 @@ BASE = "https://opendart.fss.or.kr/api"
 # a Korean filing and a US one produce the same series. The ids are IFRS
 # taxonomy identifiers (or DART extensions where IFRS has no equivalent), which
 # are stable in a way the Korean labels are not.
-ACCOUNT_MAP: dict[str, str] = {
-    "ifrs-full_Revenue": "Revenues",
-    "ifrs-full_ProfitLoss": "NetIncomeLoss",
-    "dart_OperatingIncomeLoss": "OperatingIncomeLoss",
-    "ifrs-full_BasicEarningsLossPerShare": "EarningsPerShareBasic",
-    "ifrs-full_DilutedEarningsLossPerShare": "EarningsPerShareDiluted",
-    "ifrs-full_Assets": "Assets",
-    "ifrs-full_Liabilities": "Liabilities",
-    "ifrs-full_Equity": "StockholdersEquity",
-    "ifrs-full_CashAndCashEquivalents": "CashAndCashEquivalentsAtCarryingValue",
+#
+# **Both namespace spellings, because the prefix changed and the filings did
+# not.** The IFRS taxonomy moved from `ifrs` to `ifrs-full` with the 2018
+# edition, and DART's full-statement endpoint returns whichever the filing
+# used. Samsung's business years 2015 through 2018 come back as `ifrs_Revenue`
+# and `ifrs_ProfitLoss`; 2019 onwards as `ifrs-full_Revenue` and
+# `ifrs-full_ProfitLoss`. Mapping only the newer spelling silently dropped
+# eight of the nine concepts for every year before 2019 — and left the ninth,
+# because `dart_OperatingIncomeLoss` is a DART extension that never moved.
+#
+# The result was a Korean history that looked four years longer than it was.
+# Every one of those years held exactly one figure, none of them a figure the
+# scorer can anchor on, so a backtest reaching back to 2016 scored its opening
+# years on technicals alone while the coverage check saw filings and passed.
+_IFRS_ACCOUNTS: dict[str, str] = {
+    "Revenue": "Revenues",
+    "ProfitLoss": "NetIncomeLoss",
+    "BasicEarningsLossPerShare": "EarningsPerShareBasic",
+    "DilutedEarningsLossPerShare": "EarningsPerShareDiluted",
+    "Assets": "Assets",
+    "Liabilities": "Liabilities",
+    "Equity": "StockholdersEquity",
+    "CashAndCashEquivalents": "CashAndCashEquivalentsAtCarryingValue",
 }
+
+# Namespaces one concept may arrive under, newest first.
+IFRS_PREFIXES = ("ifrs-full_", "ifrs_")
+
+ACCOUNT_MAP: dict[str, str] = {
+    "dart_OperatingIncomeLoss": "OperatingIncomeLoss",
+    **{
+        f"{prefix}{local}": concept
+        for local, concept in _IFRS_ACCOUNTS.items()
+        for prefix in IFRS_PREFIXES
+    },
+}
+
+# What one annual report should yield. A year returning far fewer than this has
+# usually met a naming change rather than a company that reports less, which is
+# the failure above and is invisible unless counted.
+CONCEPTS_PER_REPORT = len(_IFRS_ACCOUNTS) + 1
 
 # Concepts measured at an instant rather than across a span. The distinction
 # decides whether a fact gets a period_start, and getting it wrong would let a
@@ -280,6 +310,20 @@ class DartFundamentalCollector(BaseCollector):
                     )
                     read += seen
                     saved += fundamental_repo.save_facts(session, rows)
+
+                    # A year that recognises almost nothing is the signature of
+                    # a taxonomy rename, not of a company reporting less. It
+                    # looks like a successful collection from every angle
+                    # except this count, which is why the count exists: the
+                    # `ifrs` to `ifrs-full` change cost four years of Korean
+                    # fundamentals and announced itself nowhere.
+                    found = {r.concept for r in rows}
+                    if len(found) < CONCEPTS_PER_REPORT:
+                        missing = sorted(set(ACCOUNT_MAP.values()) - found)
+                        warnings.append(
+                            f"{instrument.name} {year}: recognised {len(found)} of "
+                            f"{CONCEPTS_PER_REPORT} concepts, missing {', '.join(missing)}"
+                        )
 
         session.commit()
         return CollectionResult(
