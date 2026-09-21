@@ -134,7 +134,19 @@ markers = [
 # Split by file, not by test. Each integration file seeds an instrument under
 # its own CIK, so files are independent — but tests inside one file share that
 # CIK and would collide on its unique constraint if they ran together.
-addopts = "-n auto --dist loadfile"
+#
+# `not integration` by default, so a bare `pytest` is the unit suite and runs
+# in seconds. The integration tests talk to a live Postgres and walk hundreds
+# of simulated sessions each; they are the ones worth having and also the ones
+# that make a routine check take a quarter of an hour.
+#
+#     pytest                  the fast suite, on every change
+#     pytest -m integration   the slow half, when it is worth the wait
+#     pytest -m ""            everything
+#
+# CI runs `pytest -m ""`, so nothing is skipped on the way to main — the split
+# changes when the slow tests run, not whether they do.
+addopts = "-n auto --dist loadfile -m 'not integration'"
 
 [tool.coverage.run]
 source = ["app"]

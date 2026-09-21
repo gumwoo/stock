@@ -75,8 +75,12 @@ jobs:
       - name: Migrations apply cleanly
         run: alembic upgrade head
 
+      # `-m ""` clears the `not integration` default in pyproject.toml. Locally
+      # a bare `pytest` is the fast suite; here everything runs, because a
+      # gate that inherited the developer's shortcut would report success on
+      # half a suite and look exactly like a full pass.
       - name: pytest
-        run: pytest -q
+        run: pytest -q -m ""
 
   frontend:
     runs-on: ubuntu-latest
