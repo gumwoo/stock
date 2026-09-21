@@ -229,10 +229,11 @@ since `session.query(Candle).all()` returns everything. Measured against
 Samsung: every fitter call could read all 488 bars, including the 60 reserved
 as a holdout.
 
-The reader it gets now carries the run's snapshot and a ceiling at
-`train_end`, so the evaluation period, the holdout and any later backfill are
-unreachable rather than merely unmentioned. The dates are still passed,
-because a fitter needs to know what period it is fitting."""
+The reader it gets now carries the run's snapshot and is confined to
+`train_start..train_end` at both ends. The ceiling makes the evaluation
+period, the holdout and any later backfill unreachable rather than merely
+unmentioned; the floor is what makes a rolling split actually roll. The dates
+are still passed, because a fitter needs to know what period it is fitting."""
 
 
 def walk_forward(
@@ -258,9 +259,10 @@ def walk_forward(
     Args:
         strategy: used for both sides when `fit` is None.
         fit: given the training period, returns the strategy to evaluate
-            with. It is handed a reader bounded at `train_end`, so the
-            evaluation period and the holdout cannot be read at all — not
-            merely omitted from its arguments.
+            with. It is handed a reader confined to that period at both ends,
+            so the evaluation window and the holdout cannot be read at all —
+            not merely omitted from its arguments — and a rolling split does
+            not quietly train on everything before it too.
     """
     instrument = session.get(Instrument, request.instrument_id)
     if instrument is None:
@@ -284,11 +286,15 @@ def walk_forward(
         if fit is None:
             chosen = strategy
         else:
-            # Bounded at the training period's close: everything after it —
-            # the evaluation window, the holdout, a later backfill — cannot be
-            # read, rather than merely not being mentioned.
-            training_view = PitReader(session, data_snapshot_at=snapshot).bounded(
-                calendar.session_close(window.train_end)
+            # Confined to the training period at both ends. The ceiling keeps
+            # the evaluation window, the holdout and any later backfill
+            # unreadable rather than merely unmentioned. The floor is what
+            # makes a rolling split roll: without it the fitter reads back to
+            # the first bar in the database, and `anchored` becomes the only
+            # behaviour the fitter has.
+            training_view = PitReader(session, data_snapshot_at=snapshot).windowed(
+                not_before=calendar.session_open(window.train_start),
+                not_after=calendar.session_close(window.train_end),
             )
             chosen = fit(
                 training_view,

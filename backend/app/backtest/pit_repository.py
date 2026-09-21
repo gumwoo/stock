@@ -20,11 +20,11 @@ It is also the only place in `app.backtest` permitted to hold a session. CI
 forbids `engine`, `metrics`, `walkforward` and `execution` from importing
 SQLAlchemy at all, so a strategy that wants data has no route but this one.
 
-**A reader can be given a ceiling.** `bounded(not_after)` returns one that
-refuses to be positioned past an instant, which is how anything that must not
-see beyond a point — a parameter fitter, above all — is handed data. Giving it
-a session instead would make every guarantee here advisory, since it could
-query whatever it liked.
+**A reader can be confined to a span.** `windowed(not_before, not_after)`
+returns one that refuses to be positioned outside it and whose bars start at
+the floor. That is how anything which must see only one period — a parameter
+fitter, above all — is handed data. Giving it a session instead would make
+every guarantee here advisory, since it could query whatever it liked.
 
 **Reading and filling are different questions.** `bars` returns only completed
 bars, because a strategy must not see a close that has not happened.
@@ -67,7 +67,7 @@ class PitReader:
     for the whole run and is what makes a re-run reproducible.
     """
 
-    __slots__ = ("_asof", "_not_after", "_session", "_snapshot")
+    __slots__ = ("_asof", "_not_after", "_not_before", "_session", "_snapshot")
 
     def __init__(
         self,
@@ -75,18 +75,29 @@ class PitReader:
         *,
         data_snapshot_at: datetime,
         asof: datetime | None = None,
+        not_before: datetime | None = None,
         not_after: datetime | None = None,
     ) -> None:
         self._session = session
         self._snapshot = ensure_utc(data_snapshot_at, field="data_snapshot_at")
         self._asof = ensure_utc(asof, field="asof") if asof is not None else None
+        self._not_before = (
+            ensure_utc(not_before, field="not_before") if not_before is not None else None
+        )
         self._not_after = (
             ensure_utc(not_after, field="not_after") if not_after is not None else None
         )
         if self._asof is not None and self._not_after is not None and self._asof > self._not_after:
             raise PitViolationError(
-                f"asof {self._asof.isoformat()} is past this reader's ceiling "
-                f"{self._not_after.isoformat()}"
+                f"asof {self._asof.isoformat()} is past the ceiling {self._not_after.isoformat()}"
+            )
+        if (
+            self._asof is not None
+            and self._not_before is not None
+            and self._asof < self._not_before
+        ):
+            raise PitViolationError(
+                f"asof {self._asof.isoformat()} is before the floor {self._not_before.isoformat()}"
             )
 
     @property
@@ -104,25 +115,50 @@ class PitReader:
         """The latest instant this reader will ever answer for, if bounded."""
         return self._not_after
 
-    def bounded(self, not_after: datetime) -> PitReader:
-        """A reader that cannot be positioned past `not_after`.
+    @property
+    def not_before(self) -> datetime | None:
+        """The earliest bar this reader will return, if confined below."""
+        return self._not_before
 
-        For handing data to something that must not see beyond a point — a
+    def windowed(
+        self, *, not_before: datetime | None = None, not_after: datetime | None = None
+    ) -> PitReader:
+        """A reader confined to a span, in both directions.
+
+        For handing data to something that must see only one period — a
         parameter fitter, above all. Passing a raw session instead would make
         every guarantee in this module advisory: the caller could query
         whatever it liked, including the holdout.
 
-        Ceilings only tighten. Bounding an already-bounded reader keeps the
-        earlier limit if it was stricter, so a nested caller cannot widen its
-        own view by rebounding.
+        The ceiling stops it reading the future. The floor is what makes a
+        *rolling* training window actually roll. Without it `bars` looks back
+        as far as the data goes, so a fitter handed window 3 of a 120-session
+        rolling split saw 359 sessions, and rolling differed from anchored
+        only in the dates printed next to the result.
+
+        The floor applies to bars, which are the training sample. It does not
+        apply to fundamentals: a report filed before the window is not history
+        the fitter is being asked to exclude, it is the latest known state of
+        the company as the window opens, and dropping it would leave most
+        windows with no fundamentals at all — not a narrower training period
+        but a broken one.
+
+        Bounds only tighten, in both directions, so a caller cannot widen its
+        own view by re-windowing.
         """
-        ceiling = ensure_utc(not_after, field="not_after")
+        floor = ensure_utc(not_before, field="not_before") if not_before is not None else None
+        ceiling = ensure_utc(not_after, field="not_after") if not_after is not None else None
+
+        if self._not_before is not None:
+            floor = self._not_before if floor is None else max(floor, self._not_before)
         if self._not_after is not None:
-            ceiling = min(ceiling, self._not_after)
+            ceiling = self._not_after if ceiling is None else min(ceiling, self._not_after)
+
         return PitReader(
             self._session,
             data_snapshot_at=self._snapshot,
             asof=self._asof,
+            not_before=floor,
             not_after=ceiling,
         )
 
@@ -130,14 +166,20 @@ class PitReader:
         """A reader positioned at a new simulation instant, same snapshot.
 
         Returns a new reader rather than mutating this one, so a value held
-        across a step cannot silently start answering for a later moment.
+        across a step cannot silently start answering for a later moment. Any
+        confinement travels with it — a windowed reader stays windowed.
         """
         moment = ensure_utc(asof, field="asof")
         if self._not_after is not None and moment > self._not_after:
             raise PitViolationError(
-                f"simulation instant {moment.isoformat()} is past this reader's "
-                f"ceiling {self._not_after.isoformat()}; it was bounded so that "
+                f"simulation instant {moment.isoformat()} is past the ceiling "
+                f"{self._not_after.isoformat()}; this reader was confined so that "
                 "what lies beyond could not be read at all"
+            )
+        if self._not_before is not None and moment < self._not_before:
+            raise PitViolationError(
+                f"simulation instant {moment.isoformat()} is before the floor "
+                f"{self._not_before.isoformat()}"
             )
         if moment > self._snapshot:
             # Simulating past the snapshot is not a point-in-time question any
@@ -151,6 +193,7 @@ class PitReader:
             self._session,
             data_snapshot_at=self._snapshot,
             asof=moment,
+            not_before=self._not_before,
             not_after=self._not_after,
         )
 
@@ -168,6 +211,7 @@ class PitReader:
             instrument_id,
             interval,
             limit=limit,
+            since=self._not_before,
             available_before=self.asof,
             ingested_before=self._snapshot,
         )

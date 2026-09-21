@@ -306,7 +306,10 @@ class TestTheFitterCannotSeeAhead:
         results: list[bool] = []
 
         def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
-            wider = view.bounded(US.session_close(HISTORY[-1]))  # type: ignore[attr-defined]
+            wider = view.windowed(  # type: ignore[attr-defined]
+                not_before=US.session_open(HISTORY[0]),
+                not_after=US.session_close(HISTORY[-1]),
+            )
             try:
                 wider.at(US.session_close(HISTORY[-1]))
                 results.append(False)
@@ -351,6 +354,139 @@ class TestTheFitterCannotSeeAhead:
 
         assert seen
         assert Decimal("777") not in seen
+
+
+class TestRollingTrainingActuallyRolls:
+    """The floor, which is what separates rolling from anchored.
+
+    The ceiling stops the fitter reading the future. Nothing stopped it
+    reading the past, so `bars` looked back as far as the database went.
+    Measured on Samsung with a 120-session rolling split, the fitter saw:
+
+        window 0   120 bars   (rolling)
+        window 1   180 bars
+        window 2   240 bars
+        window 3   299 bars
+        window 4   359 bars
+
+    Only the first window was rolling. For the rest, `rolling` and `anchored`
+    differed in the dates printed beside the result and in nothing else.
+    """
+
+    def test_the_fitter_cannot_see_before_its_training_window(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """A distinctive bar at the very start of history, which only window 0
+        may see."""
+        s, iid = instrument
+        candle_repo.save_revisions(s, [_row(iid, HISTORY[0], Decimal("555"))])
+        s.commit()
+
+        earliest: list[date] = []
+        saw_555: list[bool] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
+            earliest.append(bars[0].ts.date())
+            saw_555.append(any(b.close == Decimal("555") for b in bars))
+            return BuyAndHold()
+
+        report = svc.walk_forward(
+            s,
+            BuyAndHold(),
+            request_for(iid),
+            train_sessions=120,
+            eval_sessions=60,
+            fit=fit,
+        )
+
+        assert len(earliest) > 1
+        # Only the first window starts at the first session, so only it sees it.
+        assert saw_555[0] is True
+        assert not any(saw_555[1:])
+        assert len(report.windows) == 2 * len(earliest)
+
+    def test_each_window_starts_at_its_own_training_start(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        s, iid = instrument
+        starts: list[tuple[date, date]] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
+            starts.append((lo, bars[0].ts.date()))
+            return BuyAndHold()
+
+        svc.walk_forward(
+            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60, fit=fit
+        )
+
+        assert starts
+        for train_start, first_bar in starts:
+            assert first_bar == train_start
+
+    def test_the_training_sample_is_the_length_that_was_asked_for(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """The count that grew with every window before the floor existed."""
+        s, iid = instrument
+        counts: list[int] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
+            counts.append(len(bars))
+            return BuyAndHold()
+
+        svc.walk_forward(
+            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60, fit=fit
+        )
+
+        assert counts == [120] * len(counts)
+
+    def test_an_anchored_split_does_start_at_the_beginning(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """The floor must follow the split, not override it."""
+        s, iid = instrument
+        starts: list[date] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
+            starts.append(bars[0].ts.date())
+            return BuyAndHold()
+
+        svc.walk_forward(
+            s,
+            BuyAndHold(),
+            request_for(iid),
+            train_sessions=120,
+            eval_sessions=60,
+            anchored=True,
+            fit=fit,
+        )
+
+        assert starts
+        assert set(starts) == {HISTORY[0]}
+
+    def test_reaching_below_the_floor_raises(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        refused: list[bool] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            try:
+                view.at(US.session_close(HISTORY[0]))
+                refused.append(False)
+            except PitViolationError:
+                refused.append(True)
+            return BuyAndHold()
+
+        svc.walk_forward(
+            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60, fit=fit
+        )
+
+        # Window 0's floor is the first session, so only later windows refuse.
+        assert refused[0] is False
+        assert all(refused[1:])
 
 
 class TestFoldsAreIndependentRuns:

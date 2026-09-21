@@ -151,6 +151,7 @@ def history(
     interval: Interval,
     *,
     limit: int = 250,
+    since: datetime | None = None,
     until: datetime | None = None,
     available_before: datetime | None = None,
     ingested_before: datetime | None = None,
@@ -158,6 +159,9 @@ def history(
     """Newest revision of each bar, oldest first.
 
     Args:
+        since: earliest bar *start* to return. Not a point-in-time filter —
+            it narrows which history a caller may learn from, which is what
+            makes a rolling training window actually roll.
         until: bound by bar *start*, for ordinary display. Not a
             point-in-time filter — a bar that has opened is not yet knowable.
         available_before: bound by bar *completion*. This is the honest
@@ -179,6 +183,8 @@ def history(
         )
         .where(Candle.instrument_id == instrument_id, Candle.interval == interval)
     )
+    if since is not None:
+        stmt = stmt.where(Candle.ts >= since)
     if until is not None:
         stmt = stmt.where(Candle.ts <= until)
     if available_before is not None:
