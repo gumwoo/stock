@@ -5,6 +5,7 @@ Alembic autogenerate reflects against. A model that is not imported here is
 invisible to migrations.
 """
 
+from app.core.types import Interval
 from app.models.base import Base
 from app.models.collector import CollectorRun, CollectorStatus
 from app.models.filing import Filing
@@ -19,7 +20,6 @@ from app.models.market import (
     CorporateAction,
     CorporateActionType,
     FxRate,
-    Interval,
 )
 from app.models.portfolio import (
     Holding,

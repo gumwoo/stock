@@ -29,14 +29,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.types import Interval
 from app.models.base import Base, BigIntPk, IngestedAt
-
-
-class Interval(StrEnum):
-    """Bar sizes. Toss publishes 1-minute and daily; longer bars are derived."""
-
-    MIN_1 = "1m"
-    DAY_1 = "1d"
 
 
 class CorporateActionType(StrEnum):

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from enum import StrEnum
 
 
@@ -80,6 +81,42 @@ class ReasonStatus(StrEnum):
     SUPPORTS = "SUPPORTS"
     NEUTRAL = "NEUTRAL"
     OPPOSES = "OPPOSES"
+
+
+class Interval(StrEnum):
+    """Bar sizes. Toss publishes 1-minute and daily; longer bars are derived.
+
+    Lives in `core` because a bar size is a property of the data, not of how
+    it is stored: the pure layers — the backtest engine above all — name
+    intervals constantly and must not import the ORM to do it. `app.models`
+    re-exports it, so the persistence layer's vocabulary is unchanged.
+    """
+
+    MIN_1 = "1m"
+    DAY_1 = "1d"
+
+
+@dataclass(frozen=True, slots=True)
+class Bar:
+    """One completed OHLCV bar, detached from any ORM.
+
+    Plain values so a simulation cannot hold a live ORM object whose lazy
+    loads would reach the database outside the point-in-time filter, and so
+    the pure layers can name the type without importing the repository that
+    produces it.
+
+    `ts` is the bar's start; `available_at` is when it completed and therefore
+    when its close became knowable. Keeping both is what lets a reader answer
+    "has this bar finished" without guessing from the clock.
+    """
+
+    ts: datetime
+    available_at: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
 
 
 @dataclass(frozen=True, slots=True)

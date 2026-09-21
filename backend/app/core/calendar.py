@@ -146,6 +146,19 @@ class MarketCalendar:
             return moment + timedelta(minutes=minutes)
         return self.session_close(moment.date())
 
+    def sessions_between(self, start: date, end: date) -> list[date]:
+        """Every trading session in `[start, end]`, inclusive, in order.
+
+        A backtest walks these rather than calendar days. Iterating days and
+        skipping non-sessions gives the same list, but also silently gives an
+        empty simulation when a period is wrong, whereas an empty list here is
+        visible to the caller.
+        """
+        if end < start:
+            raise ValueError(f"end {end} precedes start {start}")
+        sessions = self._cal.sessions_in_range(pd.Timestamp(start), pd.Timestamp(end))
+        return [ts.date() for ts in sessions]
+
     def is_open_at(self, ts: datetime) -> bool:
         """True if the market is in session at this instant.
 

@@ -32,7 +32,6 @@ did not exist yet.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -40,6 +39,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.clock import ensure_utc
+from app.core.types import Bar
 from app.models import Interval
 from app.models.fundamental import FundamentalSource
 from app.repositories import candle_repo, fundamental_repo
@@ -52,23 +52,6 @@ from app.repositories.fundamental_repo import (
 
 class PitViolationError(Exception):
     """A read was attempted outside the window the run is allowed to see."""
-
-
-@dataclass(frozen=True, slots=True)
-class Bar:
-    """A completed bar, detached from the ORM.
-
-    Plain values, so the simulation cannot accidentally hold a live ORM object
-    whose lazy loads would reach the database outside the PIT filter.
-    """
-
-    ts: datetime
-    available_at: datetime
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    volume: Decimal
 
 
 class PitReader:
