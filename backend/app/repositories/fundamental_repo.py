@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from itertools import pairwise
 from typing import NamedTuple
 
 from sqlalchemy import Select, func, select
@@ -197,6 +198,80 @@ def save_facts(session: Session, rows: Sequence[FundamentalRow]) -> int:
     # ids actually produced.
     inserted = session.execute(stmt.returning(Fundamental.id)).scalars().all()
     return len(inserted)
+
+
+# How far apart two consecutive annual `period_end` dates may sit and still be
+# the same series one year on. Measured rather than chosen: across Samsung's
+# and Apple's real filings the spacing runs 364-371 days — 52- and 53-week
+# fiscal calendars — while a skipped year lands near 730. 430 separates them
+# with room to spare in both directions.
+ANNUAL_ADJACENCY_DAYS = 430
+
+# The span that counts as an annual period, matching how `months=12` is
+# resolved elsewhere in this module.
+_ANNUAL_LOW, _ANNUAL_HIGH = 12 * 28, 12 * 31 + 10
+
+
+class AnnualGap(NamedTuple):
+    """A year the source skips, between two periods it does hold."""
+
+    after: date
+    before: date
+
+    @property
+    def days(self) -> int:
+        return (self.before - self.after).days
+
+
+def annual_gaps(
+    session: Session,
+    instrument_id: int,
+    *,
+    source: FundamentalSource | None = None,
+    ingested_before: datetime | None = None,
+    since: date | None = None,
+) -> list[AnnualGap]:
+    """Years missing from the middle of this instrument's annual filings.
+
+    `coverage_start` answers where the record begins and nothing about whether
+    it continues. A source holding 2016 and 2022 and nothing between passes a
+    start check for any period after 2016, and then every session from 2017 to
+    2022 anchors on the 2016 figures — five-year-old financials priced as
+    current, with no absence reported anywhere, because each lookup asks only
+    "what is the latest period available at this instant" and 2016 truthfully
+    is.
+
+    That is the same failure the start check was added for, one level in: not a
+    missing answer but a stale one wearing a current answer's clothes.
+
+    Periods are compared, not filing dates. Three of Samsung's periods —
+    2013, 2014 and 2015 — were all first filed on 2016-03-30 as comparatives in
+    one report, so filing dates cluster where the fiscal years do not.
+    """
+    span = Fundamental.period_end - Fundamental.period_start
+    stmt = (
+        select(Fundamental.period_end)
+        .where(
+            Fundamental.instrument_id == instrument_id,
+            Fundamental.period_start.is_not(None),
+            span.between(_ANNUAL_LOW, _ANNUAL_HIGH),
+        )
+        .group_by(Fundamental.period_end)
+        .order_by(Fundamental.period_end)
+    )
+    if source is not None:
+        stmt = stmt.where(Fundamental.source == source)
+    if ingested_before is not None:
+        stmt = stmt.where(Fundamental.ingested_at <= ingested_before)
+    if since is not None:
+        stmt = stmt.where(Fundamental.period_end >= since)
+
+    ends = list(session.execute(stmt).scalars().all())
+    return [
+        AnnualGap(after=a, before=b)
+        for a, b in pairwise(ends)
+        if (b - a).days > ANNUAL_ADJACENCY_DAYS
+    ]
 
 
 def coverage_start(
@@ -434,7 +509,7 @@ def previous_annual_fact(
     policy: RevisionPolicy = RevisionPolicy.AS_KNOWN_THEN,
     ingested_before: datetime | None = None,
     source: FundamentalSource | None = None,
-    max_gap_days: int = 430,
+    max_gap_days: int = ANNUAL_ADJACENCY_DAYS,
 ) -> FactLookup:
     """The annual period immediately before `before_period_end`.
 

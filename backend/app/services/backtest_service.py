@@ -165,9 +165,10 @@ def _assert_fundamentals_cover(
     instrument: Instrument,
     *,
     start: date,
+    end: date,
     snapshot: datetime,
 ) -> None:
-    """Refuse a period that reaches back before the financials do.
+    """Refuse a period the financials do not cover, at either edge.
 
     Price coverage was checked from the start; this was not, and the gap is
     not cosmetic. Under the current policy the fundamental factor carries 0.4
@@ -204,6 +205,31 @@ def _assert_fundamentals_cover(
             f"only from {begins} and the run starts {start}. The earlier part would "
             "score on technicals alone — a different rule, reported as the same one. "
             "Collect further back, or start the run at the coverage boundary"
+        )
+
+    # Where the record begins says nothing about whether it continues. A source
+    # holding 2016 and 2022 and nothing between passes the check above for any
+    # period after 2016, and then every session from 2017 to 2022 anchors on
+    # 2016 figures — five-year-old financials scored as current. Nothing
+    # reports an absence, because each lookup asks only which period was latest
+    # at that instant and 2016 truthfully was. A stale answer wearing a current
+    # answer's clothes is worse than a missing one; the missing one is visible.
+    gaps = fundamental_repo.annual_gaps(
+        session,
+        instrument.instrument_id,
+        source=source,
+        ingested_before=snapshot,
+        since=begins,
+    )
+    inside = [g for g in gaps if g.after <= end and g.before >= start]
+    if inside:
+        listed = ", ".join(f"{g.after}..{g.before} ({g.days}d)" for g in inside)
+        raise BacktestWindowError(
+            f"{instrument.name} is missing annual {source} periods inside the run: "
+            f"{listed}. Sessions in a gap anchor on the last period before it, so the "
+            "rule would price years of the simulation off financials that old while "
+            "reporting them as current. Collect the missing years, or run a period "
+            "that does not cross the gap"
         )
 
 
@@ -291,7 +317,9 @@ def execute(
     # therefore does its work first — the cost of a gate that cannot be
     # bypassed by forgetting to declare something.
     if data.read_fundamentals:
-        _assert_fundamentals_cover(session, instrument, start=requested[0], snapshot=snapshot)
+        _assert_fundamentals_cover(
+            session, instrument, start=requested[0], end=requested[-1], snapshot=snapshot
+        )
 
     if require_complete_sessions and not result.simulated_full_period:
         # Coverage is judged on the outer dates, so a gap inside them — a
