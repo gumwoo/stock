@@ -229,7 +229,6 @@ def annual_gaps(
     *,
     source: FundamentalSource | None = None,
     ingested_before: datetime | None = None,
-    since: date | None = None,
 ) -> list[AnnualGap]:
     """Years missing from the middle of this instrument's annual filings.
 
@@ -247,6 +246,14 @@ def annual_gaps(
     Periods are compared, not filing dates. Three of Samsung's periods —
     2013, 2014 and 2015 — were all first filed on 2016-03-30 as comparatives in
     one report, so filing dates cluster where the fiscal years do not.
+
+    **The whole record is scanned, with no lower bound.** There was one, taking
+    `coverage_start` — a filing date — and applying it to `period_end`. The two
+    are different axes, and every period whose report landed in a later
+    calendar year fell below it: on Samsung that is 2013, 2014 and 2015, so a
+    missing 2016 would have left 2015 and 2017 with nothing to pair against and
+    the gap invisible. Callers narrow to the span they care about after the
+    fact, where the comparison is period to period on both sides.
     """
     span = Fundamental.period_end - Fundamental.period_start
     stmt = (
@@ -263,8 +270,6 @@ def annual_gaps(
         stmt = stmt.where(Fundamental.source == source)
     if ingested_before is not None:
         stmt = stmt.where(Fundamental.ingested_at <= ingested_before)
-    if since is not None:
-        stmt = stmt.where(Fundamental.period_end >= since)
 
     ends = list(session.execute(stmt).scalars().all())
     return [

@@ -215,12 +215,12 @@ def _assert_fundamentals_cover(
     # at that instant and 2016 truthfully was. A stale answer wearing a current
     # answer's clothes is worse than a missing one; the missing one is visible.
     gaps = fundamental_repo.annual_gaps(
-        session,
-        instrument.instrument_id,
-        source=source,
-        ingested_before=snapshot,
-        since=begins,
+        session, instrument.instrument_id, source=source, ingested_before=snapshot
     )
+    # Narrowed here, period against period. Narrowing inside the query with
+    # `coverage_start` compared a filing date against `period_end` and dropped
+    # the gap's own left neighbour whenever its report landed the following
+    # year — which is most of them.
     inside = [g for g in gaps if g.after <= end and g.before >= start]
     if inside:
         listed = ", ".join(f"{g.after}..{g.before} ({g.days}d)" for g in inside)
