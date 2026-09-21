@@ -1,0 +1,224 @@
+/*
+ * Backtest screen.
+ *
+ * Linear-ish: thin borders, restrained hover, no card backgrounds. The table
+ * is the content, so it gets the space and everything else stays quiet.
+ *
+ * In-sample and out-of-sample sit in adjacent columns on purpose. Separate
+ * cards, or a toggle between them, would let a reader see one without the
+ * other — which is exactly the comparison the screen exists to force.
+ */
+
+.bt {
+  display: grid;
+  grid-template-columns: 17rem 1fr;
+  gap: var(--s-7);
+  align-items: start;
+}
+
+@media (max-width: 60rem) {
+  .bt {
+    grid-template-columns: 1fr;
+  }
+}
+
+.bt__empty {
+  padding: var(--s-8) 0;
+  color: var(--c-text-secondary);
+}
+
+.bt__cmd {
+  display: inline-block;
+  padding: var(--s-2) var(--s-3);
+  margin-top: var(--s-3);
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  background: var(--c-bg-subtle);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+}
+
+/* --- run list ---------------------------------------------------------- */
+
+.bt__list {
+  display: flex;
+  flex-direction: column;
+}
+
+.bt__run {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3) var(--s-3);
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--c-border);
+  cursor: pointer;
+}
+
+.bt__run:hover {
+  background: var(--c-bg-subtle);
+}
+
+.bt__run--on {
+  background: var(--c-bg-subtle);
+}
+
+.bt__runName {
+  font-size: var(--t-small);
+  font-weight: var(--w-medium);
+}
+
+.bt__runMeta {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- detail ------------------------------------------------------------ */
+
+.bt__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-4);
+  margin-bottom: var(--s-5);
+}
+
+.bt__title {
+  margin: 0;
+  font-size: var(--t-h1);
+  font-weight: var(--w-medium);
+}
+
+.bt__symbol {
+  margin-left: var(--s-2);
+  font-size: var(--t-body);
+  color: var(--c-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.bt__sub {
+  margin: var(--s-2) 0 0;
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+}
+
+.bt__info {
+  flex: 0 0 auto;
+  padding: var(--s-2) var(--s-4);
+  font-size: var(--t-small);
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.bt__info:hover {
+  background: var(--c-bg-subtle);
+}
+
+.bt__banner {
+  padding: var(--s-3) var(--s-4);
+  margin: 0 0 var(--s-5);
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+  background: var(--c-bg-subtle);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+}
+
+.bt__banner--fitted {
+  color: var(--c-text);
+}
+
+/* --- table ------------------------------------------------------------- */
+
+.bt__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.bt__th {
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-micro);
+  font-weight: var(--w-medium);
+  color: var(--c-text-tertiary);
+  text-align: left;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--c-border-strong);
+  white-space: nowrap;
+}
+
+.bt__th--num {
+  text-align: right;
+}
+
+.bt__td {
+  padding: var(--s-3);
+  font-size: var(--t-small);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.bt__td--num {
+  text-align: right;
+}
+
+.bt__td--dates {
+  color: var(--c-text-secondary);
+  white-space: nowrap;
+}
+
+.bt__mean .bt__td {
+  font-weight: var(--w-medium);
+  border-bottom: none;
+}
+
+/* --- holdout ----------------------------------------------------------- */
+
+.bt__holdout {
+  padding-top: var(--s-5);
+  margin-top: var(--s-6);
+  border-top: 1px solid var(--c-border-strong);
+}
+
+.bt__holdoutTitle {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-h3);
+  font-weight: var(--w-medium);
+}
+
+.bt__holdoutNote {
+  margin: 0 0 var(--s-4);
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+  max-width: 48rem;
+}
+
+.bt__holdoutFigures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-7);
+}
+
+.bt__figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.bt__figureLabel {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.bt__figureValue {
+  font-size: var(--t-h3);
+  font-variant-numeric: tabular-nums;
+}

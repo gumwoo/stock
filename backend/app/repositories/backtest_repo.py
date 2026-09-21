@@ -202,6 +202,8 @@ def save_window(
 
     A holdout row collides with any existing one for the same run, which is
     what makes "evaluated once" a property of the data rather than a habit.
+    The collision is contained in a savepoint: refusing a duplicate must not
+    discard whatever else the caller has done in the same transaction.
     """
     window = BacktestWindow(
         run_id=run.id,
@@ -226,11 +228,16 @@ def save_window(
         without_data=without_data,
         unfilled=unfilled,
     )
-    session.add(window)
+    # A SAVEPOINT, so a refused duplicate rolls back only this insert.
+    # `session.rollback()` would roll back the whole transaction: probed live,
+    # a second holdout attempted before committing took the run and its first
+    # holdout with it, and the subsequent commit succeeded on an empty
+    # transaction — no error, no data.
     try:
-        session.flush()
+        with session.begin_nested():
+            session.add(window)
+            session.flush()
     except IntegrityError as exc:
-        session.rollback()
         if sample_type is SampleType.HOLDOUT:
             raise HoldoutAlreadyRecordedError(
                 f"run {run.id} already has a holdout measurement. It is evaluated "

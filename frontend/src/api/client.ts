@@ -1,4 +1,11 @@
-import type { Candle, Diagnostics, Instrument, Signal } from "./types";
+import type {
+  BacktestRunDetail,
+  BacktestRunSummary,
+  Candle,
+  Diagnostics,
+  Instrument,
+  Signal,
+} from "./types";
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: { Accept: "application/json" } });
@@ -24,4 +31,6 @@ export const api = {
     get<Candle[]>(`/api/candles/${id}?limit=${limit}`),
   rescore: () => post<Signal[]>("/api/signals/rescore"),
   config: () => get<Diagnostics>("/health/config"),
+  backtests: () => get<BacktestRunSummary[]>("/api/backtests"),
+  backtest: (id: number) => get<BacktestRunDetail>(`/api/backtests/${id}`),
 };

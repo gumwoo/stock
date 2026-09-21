@@ -1,0 +1,124 @@
+/*
+ * Run information drawer.
+ *
+ * A drawer genuinely floats above the page, so it is one of the few places a
+ * shadow is honest here. Everything inside is label/value rows at one indent —
+ * this is reference material somebody scans for a specific line, not a layout
+ * to admire.
+ */
+
+.runinfo {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(30rem, 100vw);
+  overflow-y: auto;
+  padding: var(--s-6);
+  background: var(--c-surface);
+  border-left: 1px solid var(--c-border);
+  box-shadow: var(--shadow-overlay);
+  z-index: 40;
+}
+
+.runinfo__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-4);
+  margin-bottom: var(--s-6);
+}
+
+.runinfo__eyebrow {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.runinfo__title {
+  margin: var(--s-1) 0 0;
+  font-size: var(--t-h2);
+  font-weight: var(--w-medium);
+}
+
+.runinfo__close {
+  padding: var(--s-2);
+  font-size: var(--t-small);
+  color: var(--c-text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.runinfo__close:hover {
+  color: var(--c-text);
+}
+
+.runinfo__section {
+  padding-top: var(--s-5);
+  margin-bottom: var(--s-5);
+  border-top: 1px solid var(--c-border);
+}
+
+.runinfo__sectionTitle {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-micro);
+  font-weight: var(--w-medium);
+  color: var(--c-text-tertiary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.runinfo__row {
+  display: flex;
+  gap: var(--s-4);
+  align-items: baseline;
+  justify-content: space-between;
+  padding: var(--s-2) 0;
+}
+
+.runinfo__label {
+  flex: 0 0 auto;
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+}
+
+.runinfo__value {
+  font-size: var(--t-small);
+  text-align: right;
+  word-break: break-all;
+}
+
+.runinfo__value--mono {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+}
+
+.runinfo__warn {
+  margin: var(--s-2) 0 0;
+  padding: var(--s-3);
+  font-size: var(--t-small);
+  color: var(--c-warn);
+  background: var(--c-warn-soft);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+}
+
+.runinfo__note {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+}
+
+.runinfo__cmd {
+  display: block;
+  padding: var(--s-3);
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  color: var(--c-text);
+  background: var(--c-bg-subtle);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  word-break: break-all;
+}

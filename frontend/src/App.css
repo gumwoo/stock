@@ -79,3 +79,35 @@
     gap: var(--s-1);
   }
 }
+
+/*
+ * Top-level tabs.
+ *
+ * Two screens answer different questions — what the rules say today, and
+ * whether the rules have been checked — so they are peers rather than one
+ * nested inside the other.
+ */
+.shell__tabs {
+  display: flex;
+  gap: var(--s-1);
+  margin-left: var(--s-6);
+}
+
+.shell__tab {
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+
+.shell__tab:hover {
+  color: var(--c-text);
+}
+
+.shell__tab--on {
+  color: var(--c-text);
+  border-bottom-color: var(--c-text);
+}

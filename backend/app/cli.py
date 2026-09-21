@@ -9,6 +9,9 @@ difference between a minute and an afternoon.
     python -m app.cli seed            create the starting watchlist
     python -m app.cli collect --source yfinance
     python -m app.cli candles --symbol 005930
+    python -m app.cli backtest run --symbol 005930
+    python -m app.cli backtest show --run 1
+    python -m app.cli backtest reproduce --run 1
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import json
 import logging
 import sys
 
+from app import cli_backtest
 from app.collectors.base import run_collector
 from app.collectors.dart_fundamental import DartFundamentalCollector
 from app.collectors.sec_edgar import SecEdgarCollector
@@ -144,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
     collect = sub.add_parser("collect", help="run one collector")
     collect.add_argument("--source", required=True, choices=sorted(COLLECTORS))
 
+    cli_backtest.register(sub)
+
     candles = sub.add_parser("candles", help="print stored daily bars")
     candles.add_argument("--symbol", required=True)
     candles.add_argument("--market", default="KR", choices=[m.value for m in Market])
@@ -160,6 +166,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_runs()
         case "collect":
             return cmd_collect(args.source)
+        case "backtest":
+            return cli_backtest.dispatch(args)
         case "candles":
             return cmd_candles(args.symbol, Market(args.market), args.limit)
         case _:  # pragma: no cover

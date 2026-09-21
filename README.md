@@ -137,6 +137,27 @@ The reason it is enforced rather than trusted: the point-in-time filter lives in
 the repository layer. A `session.query(Candle)` inside an engine bypasses it and
 reintroduces look-ahead bias without failing a single test.
 
+### Backtests
+
+```bash
+python -m app.cli backtest run --symbol 005930     # walk forward, store it
+python -m app.cli backtest show --run 1            # what it recorded
+python -m app.cli backtest holdout --run 1         # the final measurement, once
+python -m app.cli backtest reproduce --run 1       # run it again and compare
+```
+
+`run` deliberately stops short of the holdout. A holdout reported on every run
+gets fitted by eye, which is harder to notice than fitting it in code and no
+less real, so taking it is a separate command. `--with-holdout` exists for the
+case where the choices are already made, and for fitted runs, whose fitter is
+code and cannot be rebuilt from a stored row afterwards.
+
+`reproduce` exits non-zero when anything differs, so it works in a check.
+
+The Backtest screen shows the same runs with in-sample and out-of-sample in
+adjacent columns, and **Run info** opens every coordinate a reproduction would
+need — strategy, fingerprints, commit, data snapshot, costs and split.
+
 ### Known limitations
 
 - `yfinance` ticker mapping assumes KOSPI (`.KS`). KOSDAQ needs `.KQ`, which

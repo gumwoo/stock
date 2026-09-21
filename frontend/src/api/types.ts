@@ -86,3 +86,65 @@ export interface Diagnostics {
   disabled: DisabledCapability[];
   summary: string;
 }
+
+/** One measured window of a stored backtest run. */
+export interface BacktestWindow {
+  window_index: number;
+  sample_type: "IN_SAMPLE" | "OUT_OF_SAMPLE" | "HOLDOUT";
+  period_start: string;
+  period_end: string;
+  strategy: string;
+  strategy_params: Record<string, unknown>;
+  sessions: number;
+  observations: number;
+  total_return: number | null;
+  cagr: number | null;
+  max_drawdown: number | null;
+  sharpe: number | null;
+  win_rate: number | null;
+  profit_factor: number | null;
+  trades: number;
+  abstained: number;
+  without_data: number;
+  unfilled: number;
+}
+
+export interface BacktestRunSummary {
+  id: number;
+  instrument_id: number;
+  symbol: string;
+  name: string;
+  strategy_kind: string;
+  strategy_version: string;
+  strategy_params: Record<string, unknown>;
+  fitter_version: string | null;
+  period_start: string;
+  period_end: string;
+  started_at: string;
+  windows: number;
+  has_holdout: boolean;
+}
+
+export interface BacktestRunDetail extends BacktestRunSummary {
+  market: string;
+  interval: string;
+  strategy_fingerprint: string;
+  fit_trace_fingerprint: string;
+  holdout_strategy_fingerprint: string | null;
+  git_commit_sha: string;
+  git_dirty: boolean;
+  data_snapshot_at: string;
+  starting_cash: number;
+  commission_bps: number;
+  slippage_bps: number;
+  min_commission: number;
+  execution_model: string;
+  bar_minutes: number | null;
+  train_sessions: number;
+  eval_sessions: number;
+  anchored: boolean;
+  require_complete_sessions: boolean;
+  holdout_start: string | null;
+  holdout_end: string | null;
+  window_rows: BacktestWindow[];
+}

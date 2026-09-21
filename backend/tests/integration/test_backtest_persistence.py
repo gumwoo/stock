@@ -704,3 +704,94 @@ class TestAFittedRunIsIdentifiedByWhatItChose:
         recomputed = hashlib.sha256(trace.encode("utf-8")).hexdigest()[:16]
 
         assert recomputed == run.fit_trace_fingerprint
+
+
+class TestARefusedDuplicateKeepsTheTransaction:
+    """Refusing a second holdout must not discard the first — or the run.
+
+    `save_window` caught the unique violation and called `session.rollback()`,
+    which rolls back the whole transaction rather than the failed insert. The
+    existing tests missed it because they commit after the first holdout, so
+    there was nothing left to lose. Probed without that commit:
+
+        run #1022 and its holdout written, nothing committed yet
+          second holdout refused, as intended
+          committed
+          runs before 3 -> after 3
+          the run survived: False   its windows: 0
+
+    No error and no data, which is the worst shape a failure can take.
+    """
+
+    def test_the_run_and_its_first_holdout_survive(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report = svc.walk_forward(
+            s,
+            StrategySpec(definition=moving_average_cross(short=10, long=30)),
+            request_for(iid),
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
+            holdout_sessions=HOLDOUT,
+        )
+        run = svc.persist(s, report, code=CODE)  # deliberately not committed
+        svc.evaluate_and_persist_holdout(s, run, report)  # deliberately not committed
+
+        with pytest.raises(backtest_repo.HoldoutAlreadyRecordedError):
+            svc.evaluate_and_persist_holdout(s, run, report)
+
+        s.commit()
+
+        stored = backtest_repo.get_run(s, run.id)
+        assert stored is not None
+        assert len(backtest_repo.windows_of(s, run.id)) == len(report.windows) + 1
+        assert backtest_repo.holdout_of(s, run.id) is not None
+
+    def test_unrelated_work_in_the_same_transaction_survives(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """A savepoint contains the failure; a rollback would not."""
+        s, iid = instrument
+        report = svc.walk_forward(
+            s,
+            StrategySpec(definition=moving_average_cross(short=10, long=30)),
+            request_for(iid),
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
+            holdout_sessions=HOLDOUT,
+        )
+        run = svc.persist(s, report, code=CODE)
+        svc.evaluate_and_persist_holdout(s, run, report)
+
+        marker = Instrument(market=Market.US, name="SAVEPOINT WITNESS", us_cik=CIK_SECOND)
+        s.add(marker)
+        s.flush()
+        marker_id = marker.instrument_id
+
+        with pytest.raises(backtest_repo.HoldoutAlreadyRecordedError):
+            svc.evaluate_and_persist_holdout(s, run, report)
+
+        s.commit()
+
+        assert s.get(Instrument, marker_id) is not None
+        s.execute(text("DELETE FROM instrument WHERE instrument_id = :i"), {"i": marker_id})
+        s.commit()
+
+    def test_the_session_is_still_usable_afterwards(self, instrument: tuple[Session, int]) -> None:
+        """A rolled-back session refuses further work until reset."""
+        s, iid = instrument
+        report = svc.walk_forward(
+            s,
+            StrategySpec(definition=moving_average_cross(short=10, long=30)),
+            request_for(iid),
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
+            holdout_sessions=HOLDOUT,
+        )
+        run = svc.persist(s, report, code=CODE)
+        svc.evaluate_and_persist_holdout(s, run, report)
+
+        with pytest.raises(backtest_repo.HoldoutAlreadyRecordedError):
+            svc.evaluate_and_persist_holdout(s, run, report)
+
+        assert s.execute(text("SELECT 1")).scalar() == 1
+        s.commit()

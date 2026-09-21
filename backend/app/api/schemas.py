@@ -13,6 +13,7 @@ was actually stored rather than a summary recomputed in the browser.
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -153,3 +154,90 @@ class PortfolioOut(BaseModel):
         )
     )
     note: str | None = None
+
+
+class BacktestWindowOut(BaseModel):
+    """One measurement, with the caveats that qualify it.
+
+    `abstained`, `without_data` and `unfilled` travel beside the returns
+    rather than in a footnote. A window whose strategy declined to judge for
+    half its sessions produced a number that means something different from
+    one that traded throughout, and a screen that shows only the return cannot
+    say which it is looking at.
+    """
+
+    window_index: int
+    sample_type: str
+    period_start: date
+    period_end: date
+    strategy: str
+    strategy_params: dict[str, Any]
+
+    sessions: int
+    observations: int
+    total_return: float | None
+    cagr: float | None
+    max_drawdown: float | None
+    sharpe: float | None
+    win_rate: float | None
+    profit_factor: float | None
+
+    trades: int
+    abstained: int
+    without_data: int
+    unfilled: int
+
+
+class BacktestRunSummary(BaseModel):
+    """Enough to list a run and tell it apart from its neighbours."""
+
+    id: int
+    instrument_id: int
+    symbol: str
+    name: str
+    strategy_kind: str
+    strategy_version: str
+    strategy_params: dict[str, Any]
+    fitter_version: str | None
+    period_start: date
+    period_end: date
+    started_at: datetime
+    windows: int
+    has_holdout: bool
+
+
+class BacktestRunDetail(BacktestRunSummary):
+    """Every coordinate a reproduction would need.
+
+    The screen's job is to show that a result can be checked, not to
+    summarise it — so the commit, the data snapshot, the costs that were
+    applied and the fingerprints are all here rather than hidden behind a
+    developer tool.
+    """
+
+    market: str
+    interval: str
+
+    strategy_fingerprint: str
+    fit_trace_fingerprint: str
+    holdout_strategy_fingerprint: str | None
+
+    git_commit_sha: str
+    git_dirty: bool
+    data_snapshot_at: datetime
+
+    starting_cash: float
+    commission_bps: float
+    slippage_bps: float
+    min_commission: float
+    execution_model: str
+    bar_minutes: int | None
+
+    train_sessions: int
+    eval_sessions: int
+    anchored: bool
+    require_complete_sessions: bool
+    holdout_start: date | None
+    holdout_end: date | None
+
+    window_rows: list[BacktestWindowOut]
