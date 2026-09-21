@@ -479,7 +479,7 @@ class TestARunMustCoverTheEraItMeasures:
         )
         s.flush()
 
-        with pytest.raises(svc.BacktestWindowError, match="filings only from"):
+        with pytest.raises(svc.BacktestWindowError, match="can anchor on only from"):
             svc.execute(
                 s,
                 strategies.build(technical_fundamental(currency="USD")),

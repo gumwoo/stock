@@ -192,11 +192,12 @@ def _assert_fundamentals_cover(
     # by one session, which is the right direction: it refuses eras the data
     # cannot speak to and never refuses one it can.
     # Scoped to what the scorer can anchor on, not to whatever was filed. The
-    # difference is two years on the instrument this check was written for:
-    # Samsung's DART record reaches 2013, and its 2013-2016 filings carry
-    # `OperatingIncomeLoss` alone — no net income, no revenue, no EPS. Asked
-    # unscoped, coverage begins 2016-03-30; asked as the scorer would, it
-    # begins when the 2017 report lands in April 2018.
+    # difference is four years on the instrument this check was written for.
+    # Samsung's DART record reaches 2013, its 2013-2016 filings carry
+    # `OperatingIncomeLoss` alone — no net income, no revenue, no EPS — and
+    # its 2017-2019 anchor figures first appear as comparatives inside the 2019
+    # report, filed 2020-03-30. Asked unscoped, coverage begins 2016-03-30;
+    # asked as the scorer would, it begins 2020-03-30.
     begins = fundamental_repo.coverage_start(
         session,
         instrument.instrument_id,

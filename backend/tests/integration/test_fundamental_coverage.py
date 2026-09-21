@@ -275,7 +275,7 @@ class TestTheRecordRunningOutBeforeTheRunDoes:
         # Chosen to land between the two bounds, which is the only place they
         # disagree and therefore the only place the choice is testable.
         behind = (RUN_END - date(2019, 12, 31)).days
-        assert fundamental_repo.ANNUAL_ADJACENCY_DAYS < behind
+        assert behind > fundamental_repo.ANNUAL_ADJACENCY_DAYS
         assert behind <= fundamental_repo.ANNUAL_STALENESS_DAYS
 
         assert run(s, inst) is not None

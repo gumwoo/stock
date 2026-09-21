@@ -339,12 +339,14 @@ def coverage_start(
     `concepts` asks a narrower and often more honest question: not when the
     record begins, but when it begins carrying something usable. Samsung's DART
     history reaches 2013, and its 2013-2016 filings hold `OperatingIncomeLoss`
-    and nothing else — no net income, no revenue, no EPS. A scorer that anchors
-    on those four concepts can see nothing at all until the 2017 report lands
-    in April 2018, so the unscoped answer of 2016-03-30 overstates coverage by
-    two years. Left unscoped by default, because the absence machinery uses
-    this to say "our source does not reach that era", which is about the source
-    rather than about any one caller's needs.
+    and nothing else — no net income, no revenue, no EPS. Nor do the years
+    after it help as early as their dates suggest: the 2017, 2018 and 2019
+    anchor figures all first appear as comparatives inside the 2019 annual
+    report, filed 2020-03-30. So a scorer anchoring on those four concepts can
+    read nothing at all until that date, and the unscoped answer of 2016-03-30
+    overstates coverage by four years. Left unscoped by default, because the
+    absence machinery uses this to say "our source does not reach that era",
+    which is about the source rather than about any one caller's needs.
     """
     stmt = select(func.min(Fundamental.filed_at)).where(Fundamental.instrument_id == instrument_id)
     if concepts is not None:
