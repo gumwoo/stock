@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
+from itertools import pairwise
 
 from sqlalchemy.orm import Session
 
@@ -190,21 +191,35 @@ def _assert_fundamentals_cover(
     # readable at the following session's open. The check is therefore lenient
     # by one session, which is the right direction: it refuses eras the data
     # cannot speak to and never refuses one it can.
+    # Scoped to what the scorer can anchor on, not to whatever was filed. The
+    # difference is two years on the instrument this check was written for:
+    # Samsung's DART record reaches 2013, and its 2013-2016 filings carry
+    # `OperatingIncomeLoss` alone — no net income, no revenue, no EPS. Asked
+    # unscoped, coverage begins 2016-03-30; asked as the scorer would, it
+    # begins when the 2017 report lands in April 2018.
     begins = fundamental_repo.coverage_start(
-        session, instrument.instrument_id, source=source, ingested_before=snapshot
+        session,
+        instrument.instrument_id,
+        concepts=fundamental_service.ANCHOR_CANDIDATES,
+        source=source,
+        ingested_before=snapshot,
     )
+    anchors = ", ".join(fundamental_service.ANCHOR_CANDIDATES)
     if begins is None:
         raise BacktestWindowError(
-            f"{instrument.name} has no {source} filings under this snapshot, but the "
-            "strategy read financials. Every session would score on technicals "
-            "alone, which is a different rule from the one being measured"
+            f"{instrument.name} has no {source} filings carrying a figure the scorer "
+            f"can anchor on ({anchors}) under this snapshot, but the strategy read "
+            "financials. Every session would score on technicals alone, which is a "
+            "different rule from the one being measured"
         )
     if start < begins:
         raise BacktestWindowError(
             f"the strategy read financials, but {instrument.name} has {source} filings "
-            f"only from {begins} and the run starts {start}. The earlier part would "
-            "score on technicals alone — a different rule, reported as the same one. "
-            "Collect further back, or start the run at the coverage boundary"
+            f"the scorer can anchor on only from {begins} and the run starts {start}. "
+            "The earlier part would score on technicals alone — a different rule, "
+            f"reported as the same one. Anchoring needs one of {anchors}; a filing "
+            "holding only other figures does not make the year usable. Collect "
+            "further back, or start the run at the coverage boundary"
         )
 
     # Where the record begins says nothing about whether it continues. A source
@@ -214,9 +229,32 @@ def _assert_fundamentals_cover(
     # reports an absence, because each lookup asks only which period was latest
     # at that instant and 2016 truthfully was. A stale answer wearing a current
     # answer's clothes is worse than a missing one; the missing one is visible.
-    gaps = fundamental_repo.annual_gaps(
-        session, instrument.instrument_id, source=source, ingested_before=snapshot
+    # Scoped to the concepts the scorer actually anchors on. A year counts as
+    # covered because one of these resolves, not because any annual figure was
+    # tagged for it: `build_snapshot` walks ANCHOR_CANDIDATES and gives up when
+    # none do, so a year carrying only OperatingIncomeLoss reads as present and
+    # then anchors on the year before, which is the failure this whole check is
+    # about wearing a different hat.
+    ends = fundamental_repo.annual_period_ends(
+        session,
+        instrument.instrument_id,
+        concepts=fundamental_service.ANCHOR_CANDIDATES,
+        source=source,
+        ingested_before=snapshot,
     )
+    if not ends:
+        raise BacktestWindowError(
+            f"{instrument.name} has {source} filings from {begins}, but none of them "
+            f"carry an annual figure the scorer can anchor on "
+            f"({', '.join(fundamental_service.ANCHOR_CANDIDATES)}). Every session "
+            "would score on technicals alone"
+        )
+
+    gaps = [
+        fundamental_repo.AnnualGap(after=a, before=b)
+        for a, b in pairwise(ends)
+        if (b - a).days > fundamental_repo.ANNUAL_ADJACENCY_DAYS
+    ]
     # Narrowed here, period against period. Narrowing inside the query with
     # `coverage_start` compared a filing date against `period_end` and dropped
     # the gap's own left neighbour whenever its report landed the following
@@ -230,6 +268,22 @@ def _assert_fundamentals_cover(
             "rule would price years of the simulation off financials that old while "
             "reporting them as current. Collect the missing years, or run a period "
             "that does not cross the gap"
+        )
+
+    # The right-hand edge, which pairing cannot reach. A record ending at 2020
+    # has no following period to be measured against, so a run to 2025 crosses
+    # no gap and anchors every session from 2021 onward on the same 2020
+    # figures — the identical failure, in the one place a scan of pairs is
+    # structurally blind to.
+    behind = (end - ends[-1]).days
+    if behind > fundamental_repo.ANNUAL_STALENESS_DAYS:
+        raise BacktestWindowError(
+            f"{instrument.name}'s newest annual {source} period ends {ends[-1]}, "
+            f"{behind} days before the run ends {end}. Past "
+            f"{fundamental_repo.ANNUAL_STALENESS_DAYS} days a further report is not "
+            "merely undue, it is missing, and the sessions after it would anchor on "
+            "financials that old while reporting them as current. Collect the later "
+            "years, or end the run within the covered period"
         )
 
 

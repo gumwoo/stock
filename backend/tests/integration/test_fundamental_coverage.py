@@ -60,16 +60,21 @@ ANNUAL: dict[str, Decimal] = {
 }
 
 
-def _facts(iid: int, year: int) -> list[fundamental_repo.FundamentalRow]:
+def _facts(
+    iid: int, year: int, *, only: tuple[str, ...] | None = None
+) -> list[fundamental_repo.FundamentalRow]:
     """One year's annual filing, filed the following spring.
 
     The lag matters to what this file tests. A period's `period_end` and its
     `filed_at` are different axes, and here they land in different calendar
     years — which is exactly the case a coverage scan must not conflate.
+
+    `only` files a partial year: the concepts named and nothing else.
     """
     ends = date(year, 12, 31)
     filed = date(year + 1, 3, 30)
     available = US.next_session_open(filed)
+    chosen = ANNUAL if only is None else {k: v for k, v in ANNUAL.items() if k in only}
     return [
         fundamental_repo.FundamentalRow(
             instrument_id=iid,
@@ -87,7 +92,7 @@ def _facts(iid: int, year: int) -> list[fundamental_repo.FundamentalRow]:
             accession=f"{CIK}-{year}-FY",
             source=FundamentalSource.SEC,
         )
-        for concept, value in ANNUAL.items()
+        for concept, value in chosen.items()
     ]
 
 
@@ -146,14 +151,14 @@ def instrument(db: object) -> Iterator[tuple[Session, Instrument]]:
         s.commit()
 
 
-def run(s: Session, inst: Instrument) -> object:
+def run(s: Session, inst: Instrument, *, start: date = RUN_START, end: date = RUN_END) -> object:
     return svc.execute(
         s,
         strategies.build(technical_fundamental(currency="USD")),
         svc.RunRequest(
             instrument_id=inst.instrument_id,
-            start=RUN_START,
-            end=RUN_END,
+            start=start,
+            end=end,
             starting_cash=Decimal("100000"),
             costs=CostModel(Decimal("5"), Decimal("5")),
         ),
@@ -229,3 +234,95 @@ class TestTheScanReadsOneAxis:
 
         assert begins == date(2020, 3, 30), "the earliest filing postdates the earliest period"
         assert [(g.after, g.before) for g in gaps] == [(date(2019, 12, 31), date(2021, 12, 31))]
+
+
+class TestTheRecordRunningOutBeforeTheRunDoes:
+    """Pairing two periods cannot see past the last one.
+
+    A record ending at 2016 has no following period to be measured against, so
+    a run reaching 2021 crosses no gap at all — and anchors every session from
+    2018 onward on the same 2016 figures. Structurally the same failure as a
+    hole in the middle, in the one place a scan of pairs is blind to.
+    """
+
+    def test_a_record_that_stops_years_early_is_refused(
+        self, instrument: tuple[Session, Instrument]
+    ) -> None:
+        s, inst = instrument
+        for year in (2015, 2016):
+            fundamental_repo.save_facts(s, _facts(inst.instrument_id, year))
+        s.flush()
+
+        with pytest.raises(svc.BacktestWindowError, match="newest annual"):
+            run(s, inst)
+
+    def test_waiting_for_the_next_report_is_not_being_behind(
+        self, instrument: tuple[Session, Instrument]
+    ) -> None:
+        """The distinction the 550-day bound exists to make.
+
+        With only annual filings, the newest period is always at least a year
+        old and is legitimately older still in the months before the next
+        report lands — measured at 457 days for Samsung, whose filing lag runs
+        66 to 92 days. Reusing the 430-day adjacency bound here would reject
+        that healthy record for a month every year.
+        """
+        s, inst = instrument
+        for year in (2018, 2019):
+            fundamental_repo.save_facts(s, _facts(inst.instrument_id, year))
+        s.flush()
+
+        # Chosen to land between the two bounds, which is the only place they
+        # disagree and therefore the only place the choice is testable.
+        behind = (RUN_END - date(2019, 12, 31)).days
+        assert fundamental_repo.ANNUAL_ADJACENCY_DAYS < behind
+        assert behind <= fundamental_repo.ANNUAL_STALENESS_DAYS
+
+        assert run(s, inst) is not None
+
+
+class TestAYearCountsOnlyIfTheScorerCanAnchorOnIt:
+    def test_a_year_with_no_anchor_concept_is_a_gap(
+        self, instrument: tuple[Session, Instrument]
+    ) -> None:
+        """2020 is filed, but only a concept the scorer never anchors on.
+
+        `build_snapshot` walks ANCHOR_CANDIDATES and gives up when none of them
+        resolve, so this year's sessions anchor on 2019 exactly as if 2020 were
+        absent. A coverage scan counting any annual figure would call the year
+        present and disagree with the scorer about what it could see.
+        """
+        s, inst = instrument
+        fundamental_repo.save_facts(s, _facts(inst.instrument_id, 2019))
+        fundamental_repo.save_facts(
+            s, _facts(inst.instrument_id, 2020, only=("OperatingIncomeLoss",))
+        )
+        fundamental_repo.save_facts(s, _facts(inst.instrument_id, 2021))
+        s.flush()
+
+        with pytest.raises(svc.BacktestWindowError, match="missing annual"):
+            run(s, inst)
+
+    def test_the_repository_scopes_to_the_concepts_it_is_given(
+        self, instrument: tuple[Session, Instrument]
+    ) -> None:
+        """Stated without going through a backtest."""
+        s, inst = instrument
+        fundamental_repo.save_facts(s, _facts(inst.instrument_id, 2019))
+        fundamental_repo.save_facts(
+            s, _facts(inst.instrument_id, 2020, only=("OperatingIncomeLoss",))
+        )
+        s.flush()
+
+        unscoped = fundamental_repo.annual_period_ends(
+            s, inst.instrument_id, source=FundamentalSource.SEC
+        )
+        scoped = fundamental_repo.annual_period_ends(
+            s,
+            inst.instrument_id,
+            concepts=fundamental_service.ANCHOR_CANDIDATES,
+            source=FundamentalSource.SEC,
+        )
+
+        assert unscoped == [date(2019, 12, 31), date(2020, 12, 31)]
+        assert scoped == [date(2019, 12, 31)]

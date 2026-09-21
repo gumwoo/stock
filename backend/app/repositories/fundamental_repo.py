@@ -223,10 +223,60 @@ class AnnualGap(NamedTuple):
         return (self.before - self.after).days
 
 
+# How far past the newest annual period a run may reach before the record is
+# behind rather than merely waiting. Deliberately NOT `ANNUAL_ADJACENCY_DAYS`,
+# which measures the distance between two periods and is wrong here by a
+# filing season: a period ends, and its report lands months later. Samsung's
+# own first-filing lag runs 66-92 days and Apple's 32-37, so an annual-only
+# record legitimately sits 457 days old on the morning before the next report
+# — a 430-day bound would reject Samsung for a month every year. 430 plus a
+# statutory filing window (90 days in both KR and US, with margin) separates
+# "the next report is not due yet" from "a report is missing".
+ANNUAL_STALENESS_DAYS = 550
+
+
+def annual_period_ends(
+    session: Session,
+    instrument_id: int,
+    *,
+    concepts: Sequence[str] | None = None,
+    source: FundamentalSource | None = None,
+    ingested_before: datetime | None = None,
+) -> list[date]:
+    """Every annual `period_end` this source holds, in order.
+
+    `concepts` narrows to the ones that decide whether a year is usable at all.
+    Without it a year counts as present because any annual figure was tagged
+    for it, and the scorer anchors on a different set: it walks
+    `ANCHOR_CANDIDATES` and gives up if none resolve. A year carrying only
+    `OperatingIncomeLoss` would therefore read as covered while every session
+    in it silently anchored on the year before.
+    """
+    span = Fundamental.period_end - Fundamental.period_start
+    stmt = (
+        select(Fundamental.period_end)
+        .where(
+            Fundamental.instrument_id == instrument_id,
+            Fundamental.period_start.is_not(None),
+            span.between(_ANNUAL_LOW, _ANNUAL_HIGH),
+        )
+        .group_by(Fundamental.period_end)
+        .order_by(Fundamental.period_end)
+    )
+    if concepts is not None:
+        stmt = stmt.where(Fundamental.concept.in_(tuple(concepts)))
+    if source is not None:
+        stmt = stmt.where(Fundamental.source == source)
+    if ingested_before is not None:
+        stmt = stmt.where(Fundamental.ingested_at <= ingested_before)
+    return list(session.execute(stmt).scalars().all())
+
+
 def annual_gaps(
     session: Session,
     instrument_id: int,
     *,
+    concepts: Sequence[str] | None = None,
     source: FundamentalSource | None = None,
     ingested_before: datetime | None = None,
 ) -> list[AnnualGap]:
@@ -255,23 +305,13 @@ def annual_gaps(
     the gap invisible. Callers narrow to the span they care about after the
     fact, where the comparison is period to period on both sides.
     """
-    span = Fundamental.period_end - Fundamental.period_start
-    stmt = (
-        select(Fundamental.period_end)
-        .where(
-            Fundamental.instrument_id == instrument_id,
-            Fundamental.period_start.is_not(None),
-            span.between(_ANNUAL_LOW, _ANNUAL_HIGH),
-        )
-        .group_by(Fundamental.period_end)
-        .order_by(Fundamental.period_end)
+    ends = annual_period_ends(
+        session,
+        instrument_id,
+        concepts=concepts,
+        source=source,
+        ingested_before=ingested_before,
     )
-    if source is not None:
-        stmt = stmt.where(Fundamental.source == source)
-    if ingested_before is not None:
-        stmt = stmt.where(Fundamental.ingested_at <= ingested_before)
-
-    ends = list(session.execute(stmt).scalars().all())
     return [
         AnnualGap(after=a, before=b)
         for a, b in pairwise(ends)
@@ -283,6 +323,7 @@ def coverage_start(
     session: Session,
     instrument_id: int,
     *,
+    concepts: Sequence[str] | None = None,
     source: FundamentalSource | None = None,
     ingested_before: datetime | None = None,
 ) -> date | None:
@@ -294,8 +335,20 @@ def coverage_start(
 
     Bounded by `ingested_before` so a reproduced run sees the boundary as it
     stood then, not as later backfills have extended it.
+
+    `concepts` asks a narrower and often more honest question: not when the
+    record begins, but when it begins carrying something usable. Samsung's DART
+    history reaches 2013, and its 2013-2016 filings hold `OperatingIncomeLoss`
+    and nothing else — no net income, no revenue, no EPS. A scorer that anchors
+    on those four concepts can see nothing at all until the 2017 report lands
+    in April 2018, so the unscoped answer of 2016-03-30 overstates coverage by
+    two years. Left unscoped by default, because the absence machinery uses
+    this to say "our source does not reach that era", which is about the source
+    rather than about any one caller's needs.
     """
     stmt = select(func.min(Fundamental.filed_at)).where(Fundamental.instrument_id == instrument_id)
+    if concepts is not None:
+        stmt = stmt.where(Fundamental.concept.in_(tuple(concepts)))
     if source is not None:
         stmt = stmt.where(Fundamental.source == source)
     if ingested_before is not None:

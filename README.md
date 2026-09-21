@@ -180,23 +180,32 @@ need — strategy, fingerprints, commit, data snapshot, costs and split.
 
 #### What it measures, on the two instruments collected
 
-Ten years to 2026-09-18, full fundamental coverage, 5bp commission and 5bp
-slippage, next-open fills.
+Each run spans only what its financials can speak to, which is not the same
+span for the two. 5bp commission, 5bp slippage, next-open fills.
 
-| | | total return | MDD | Sharpe | trades |
-|---|---|---:|---:|---:|---:|
-| 삼성전자 | score 70/35 | +475.53% | -42.15% | 0.77 | 8 |
-| | buy-and-hold | +714.38% | -45.16% | 0.79 | 0 |
-| Apple | score 70/35 | +184.17% | -33.62% | 0.54 | 3 |
-| | buy-and-hold | +1073.22% | -38.70% | 0.99 | 0 |
+| | | period | total return | MDD | Sharpe | trades |
+|---|---|---|---:|---:|---:|---:|
+| 삼성전자 | score 70/35 | 2020-03 – 2026-09 | +460.35% | -42.19% | 1.01 | 2 |
+| | buy-and-hold | | +442.94% | -45.15% | 0.89 | 0 |
+| Apple | score 70/35 | 2016-09 – 2026-09 | +184.17% | -33.62% | 0.54 | 3 |
+| | buy-and-hold | | +1073.22% | -38.70% | 0.99 | 0 |
 
-**The rule underperforms buying and holding on both, on every measure except a
-slightly shallower drawdown.** Two instruments over one decade is not a verdict
-on the strategy, and the decade is one long bull market in both — the sample a
-buy-and-hold benchmark wins by construction. But it is the measurement the
-harness produces, and reporting it is the point of having built the harness
-this way. The corrected Samsung figure is also 133 percentage points below the
-one the same code produced before the coverage check existed.
+**The two disagree, and the sample is far too small to say which is typical.**
+On Samsung the rule beats buying and holding on return, drawdown and Sharpe
+while making two trades in six years. On Apple it trails badly — 184% against
+1073% — having made three trades in ten and spent 28% of the decade out of a
+market that rose throughout. One instrument each way, over periods that do not
+even match, is an illustration of the harness rather than a result from it.
+
+Samsung's window starts in 2020 rather than 2016 for a reason worth stating.
+Its DART record reaches 2013, but the 2013-2016 filings carry
+`OperatingIncomeLoss` and nothing else, and the 2017-2019 figures the scorer
+anchors on first appear as comparatives inside the 2019 annual report, filed
+2020-03-30. So there is nothing to anchor on before that date, and a run
+starting earlier would score its opening years on technicals alone. Two
+reported figures were wrong before this was caught — +608% when the collector
+reached back only five years, then +475% when the record reached back but
+carried no anchorable concept. Both looked entirely plausible.
 
 ### Known limitations
 
