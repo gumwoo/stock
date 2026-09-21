@@ -23,6 +23,11 @@ price at the execution instant — a suspension, a halt, data we never collected
 would be inventing a trade the strategy never placed, and substituting a
 nearby price would be inventing the price.
 
+**A session with no bar produces no decision.** The portfolio is still marked,
+at the last price that printed, because it is genuinely worth something. But
+the strategy is not asked: it would receive the previous session's inputs
+unchanged and its answer would be counted as a new judgement.
+
 **Nothing fills outside the window.** A decision on the final session would
 otherwise execute on the session after it, which is outside the period the run
 claims to cover: the equity curve stops at the window's end while a position
@@ -239,21 +244,30 @@ def run(
         # Mark to market first, so the curve reflects the portfolio the
         # strategy is about to judge rather than the one it produces.
         mark = _latest_bar(view, instrument_id, interval, decision_at)
-        if mark is None:
-            # Nothing has ever printed by this session, so there is no value to
-            # record. The window reaches back past the data.
-            without_data.append(day)
-        else:
-            if mark.ts != calendar.session_open(day):
-                # The session itself produced no bar — a halt, a suspension, a
-                # stretch the collector missed. The portfolio is still worth
-                # something and the honest mark is the last price the market
-                # actually printed, so the curve continues. But the session is
-                # recorded, because "we marked this day at a stale price" and
-                # "this day traded" are different facts and only the caller
-                # can decide whether the difference matters.
-                without_data.append(day)
+
+        if mark is not None:
+            # The portfolio is worth something on a day the instrument did not
+            # trade, and the honest mark is the last price the market actually
+            # printed. Valuing at a stale price is fine; deciding on one is
+            # not, which is why only this part happens unconditionally.
             curve.append(EquityPoint(day=day, value=cash + mark.close * position.quantity))
+
+        if mark is None or mark.ts != calendar.session_open(day):
+            # This session produced no bar of its own — nothing has printed
+            # yet, or a halt, a suspension, a stretch the collector missed.
+            #
+            # The strategy is not asked. Asking it would hand it the same
+            # inputs as the previous session and take the answer as a fresh
+            # judgement: three of Samsung's sessions, where our calendar and
+            # KRX disagree, were re-evaluated on byte-identical data and could
+            # have opened a position on the strength of it. A decision needs
+            # something new to decide about, and a stale re-read is not that.
+            #
+            # Recorded here rather than in `abstained_sessions`, which means
+            # something narrower: the strategy declined to judge. Here it was
+            # never asked, and the two must not be summed into one count.
+            without_data.append(day)
+            continue
 
         signal = strategy.evaluate(view, instrument_id)
 

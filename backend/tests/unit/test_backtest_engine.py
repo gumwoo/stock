@@ -311,6 +311,140 @@ class TestAbstain:
         assert abstained.abstained_sessions == DAYS
 
 
+class TestSessionsWithNoBar:
+    """A session the calendar believes in and the market did not print.
+
+    Live case: three sessions in Samsung's history where `exchange_calendars`
+    says KRX traded and no bar exists. The engine marked them at the previous
+    close — correct, the portfolio is worth something — and then asked the
+    strategy anyway, handing it byte-identical inputs to the session before
+    and counting the answer as a fresh judgement. It could have opened a
+    position on the strength of re-reading yesterday.
+
+    Valuing at a stale price is fine. Deciding on one is not.
+    """
+
+    @staticmethod
+    def _with_a_hole() -> tuple[dict[date, str], date]:
+        prices = flat_prices("100")
+        gap = DAYS[4]
+        del prices[gap]
+        return prices, gap
+
+    def test_the_strategy_is_not_asked(self) -> None:
+        prices, gap = self._with_a_hole()
+        _, strategy = execute([Signal.HOLD] * len(DAYS), prices)
+
+        assert strategy.seen is not None
+        assert gap not in [moment.date() for moment in strategy.seen]
+
+    def test_every_other_session_is_still_asked(self) -> None:
+        prices, _ = self._with_a_hole()
+        _, strategy = execute([Signal.HOLD] * len(DAYS), prices)
+
+        assert strategy.seen is not None
+        assert len(strategy.seen) == len(DAYS) - 1
+
+    def test_the_day_is_recorded(self) -> None:
+        prices, gap = self._with_a_hole()
+        result, _ = execute([Signal.HOLD] * len(DAYS), prices)
+
+        assert result.sessions_without_data == [gap]
+        assert not result.simulated_full_period
+
+    def test_it_is_not_counted_as_an_abstention(self) -> None:
+        """ABSTAIN is the strategy declining to judge. Here it was never asked,
+        and summing the two would hide which happened."""
+        prices, _ = self._with_a_hole()
+        result, _ = execute([Signal.HOLD] * len(DAYS), prices)
+
+        assert result.abstained_sessions == []
+
+    def test_the_portfolio_is_still_marked_at_the_last_printed_price(self) -> None:
+        prices, gap = self._with_a_hole()
+        prices[DAYS[3]] = "150"
+        result, _ = execute([Signal.HOLD] * len(DAYS), prices)
+
+        by_day = {p.day: p.value for p in result.equity_curve}
+        assert gap in by_day
+        assert by_day[gap] == by_day[DAYS[3]]
+
+    def test_the_curve_still_covers_every_session(self) -> None:
+        prices, _ = self._with_a_hole()
+        result, _ = execute([Signal.HOLD] * len(DAYS), prices)
+
+        assert [p.day for p in result.equity_curve] == DAYS
+
+    def test_a_stale_re_read_cannot_open_a_position(self) -> None:
+        """The whole point, as an outcome rather than a mechanism.
+
+        A strategy that would buy on exactly the empty session — and only
+        then — buys nothing, because it is never consulted there.
+        """
+        prices, gap = self._with_a_hole()
+
+        class EnterOnTheGap:
+            def evaluate(self, data: MarketData, instrument_id: int) -> Signal:
+                return Signal.ENTER if data.asof.date() == gap else Signal.HOLD
+
+        result = run(
+            EnterOnTheGap(),
+            FakeMarket(prices),
+            instrument_id=IID,
+            calendar=US,
+            start=DAYS[0],
+            end=DAYS[-1],
+            starting_cash=Decimal("10000"),
+            costs=CostModel(Decimal("0"), Decimal("0")),
+        )
+        assert result.fills == []
+        assert result.sessions_without_data == [gap]
+
+    def test_a_decision_whose_fill_lands_on_the_hole_is_unfilled(self) -> None:
+        """Different failure, same cause: there is no opening price to pay."""
+        prices, gap = self._with_a_hole()
+        before_gap = DAYS[3]
+
+        class EnterTheDayBefore:
+            def evaluate(self, data: MarketData, instrument_id: int) -> Signal:
+                return Signal.ENTER if data.asof.date() == before_gap else Signal.HOLD
+
+        result = run(
+            EnterTheDayBefore(),
+            FakeMarket(prices),
+            instrument_id=IID,
+            calendar=US,
+            start=DAYS[0],
+            end=DAYS[-1],
+            starting_cash=Decimal("10000"),
+            costs=CostModel(Decimal("0"), Decimal("0")),
+        )
+        assert result.fills == []
+        assert "no opening price" in result.unfilled[0].reason
+        assert result.unfilled[0].execution_at.date() == gap
+
+    def test_the_same_strategy_does_trade_on_a_session_that_printed(self) -> None:
+        """Otherwise the tests above pass on a strategy that never fires."""
+        prices, _ = self._with_a_hole()
+        traded = DAYS[1]  # its fill lands on DAYS[2], which printed
+
+        class EnterOnThatDay:
+            def evaluate(self, data: MarketData, instrument_id: int) -> Signal:
+                return Signal.ENTER if data.asof.date() == traded else Signal.HOLD
+
+        result = run(
+            EnterOnThatDay(),
+            FakeMarket(prices),
+            instrument_id=IID,
+            calendar=US,
+            start=DAYS[0],
+            end=DAYS[-1],
+            starting_cash=Decimal("10000"),
+            costs=CostModel(Decimal("0"), Decimal("0")),
+        )
+        assert len(result.fills) == 1
+
+
 class TestDeterminism:
     def test_the_same_inputs_produce_the_same_run(self) -> None:
         script = [Signal.ENTER, Signal.HOLD, Signal.EXIT, Signal.ENTER]
