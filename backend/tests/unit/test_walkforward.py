@@ -173,6 +173,20 @@ class TestRefusals:
 
 
 class TestStep:
+    """The step must equal the evaluation length, and that is enforced.
+
+    Anything else breaks what `evaluation_covers` reports, in the flattering
+    direction. Measured on these sessions with 120/60 windows:
+
+        step 30   span 360 sessions, 660 observations — every day in the
+                  overlap counted twice, invisible from the span
+        step 90   span 330 sessions, 240 evaluated — 90 sessions inside the
+                  reported range never measured, and nothing saying so
+
+    A single pair of dates cannot express either, so those splits are refused
+    rather than summarised misleadingly.
+    """
+
     def test_the_default_step_tiles_the_evaluation_periods(self) -> None:
         split = generate(SESSIONS, train_sessions=100, eval_sessions=50)
 
@@ -182,12 +196,37 @@ class TestStep:
         ]
         assert set(gaps) == {1}
 
-    def test_a_smaller_step_reuses_evaluation_days(self) -> None:
-        """Allowed, and the caller's business — the results no longer concatenate."""
-        split = generate(SESSIONS, train_sessions=100, eval_sessions=50, step_sessions=10)
+    def test_a_smaller_step_is_refused(self) -> None:
+        """It would measure the overlap twice."""
+        with pytest.raises(WalkForwardError, match="must equal eval_sessions"):
+            generate(SESSIONS, train_sessions=100, eval_sessions=50, step_sessions=10)
 
-        spans = [(w.eval_start, w.eval_end) for w in split.windows]
-        assert spans[1][0] < spans[0][1]
+    def test_a_larger_step_is_refused(self) -> None:
+        """It would leave a hole inside the span it reports."""
+        with pytest.raises(WalkForwardError, match="must equal eval_sessions"):
+            generate(SESSIONS, train_sessions=100, eval_sessions=50, step_sessions=80)
+
+    def test_stating_the_step_explicitly_is_allowed(self) -> None:
+        stated = generate(SESSIONS, train_sessions=100, eval_sessions=50, step_sessions=50)
+        implied = generate(SESSIONS, train_sessions=100, eval_sessions=50)
+
+        assert stated == implied
+
+    def test_every_session_in_the_span_is_evaluated_exactly_once(self) -> None:
+        """The property the refusals exist to protect."""
+        split = generate(SESSIONS, train_sessions=100, eval_sessions=50)
+
+        measured = [
+            index
+            for w in split.windows
+            for index in range(SESSIONS.index(w.eval_start), SESSIONS.index(w.eval_end) + 1)
+        ]
+        span = evaluation_covers(split)
+        assert span is not None
+        expected = range(SESSIONS.index(span[0]), SESSIONS.index(span[1]) + 1)
+
+        assert measured == list(expected)
+        assert len(measured) == len(set(measured))
 
 
 class TestReportingTheSpan:

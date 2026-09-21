@@ -11,9 +11,11 @@ defined in calendar months drift against the data they are measured on. The
 boundaries that come out are real session dates, which is also what makes them
 safe to hand to the backtest service.
 
-**Evaluation windows never overlap.** Each session appears in exactly one
-evaluation period, so no day is measured twice. Training windows do overlap,
-which is the point of rolling them.
+**Evaluation windows tile.** Each session in the evaluated span appears in
+exactly one evaluation period — not twice, and not zero times. That is
+enforced rather than assumed: the step must equal the evaluation length, so
+the shapes that would break it cannot be constructed. Training windows do
+overlap, which is the point of rolling them.
 
 That is a statement about *dates*, not about a portfolio. Each window is run
 as an independent simulation starting from cash with no position, so window 1
@@ -103,11 +105,10 @@ def generate(
     Args:
         train_sessions: length of each training period.
         eval_sessions: length of each evaluation period.
-        step_sessions: how far to roll between windows. Defaults to
-            `eval_sessions`, which is what makes the evaluation periods tile
-            the timeline exactly once. A smaller step reuses evaluation days
-            across windows, so the results can no longer be concatenated — it
-            is allowed, and it is the caller's business to know.
+        step_sessions: how far to roll between windows. It must equal
+            `eval_sessions`, and exists as a parameter so that intent is
+            stated rather than assumed. Any other value breaks the property
+            the rest of this module and its readers rely on — see below.
         anchored: keep every training period starting at the first session,
             growing it, rather than rolling a fixed-length one. Anchored
             training uses more data; rolling training is the one that reveals
@@ -131,6 +132,26 @@ def generate(
     step = step_sessions if step_sessions is not None else eval_sessions
     if step < 1:
         raise WalkForwardError(f"step must be at least one session, got {step}")
+    if step != eval_sessions:
+        # Anything else quietly breaks what `evaluation_covers` reports, and
+        # it breaks it in the flattering direction. Measured on two years of
+        # NYSE sessions with 120/60 windows:
+        #
+        #   step 30  span 360 sessions, 660 observations — every day in the
+        #            overlap counted twice, and the span cannot show it
+        #   step 90  span 330 sessions, 240 evaluated — 90 sessions inside the
+        #            reported range never evaluated at all, and nothing says so
+        #
+        # Overlapping walk-forward is a real technique, but using it means
+        # reporting `unique_oos_sessions` and `total_oos_observations`
+        # separately rather than one span. Until something needs that, the
+        # honest move is to refuse the shapes we cannot describe.
+        raise WalkForwardError(
+            f"step_sessions ({step}) must equal eval_sessions ({eval_sessions}): "
+            "evaluation periods must tile the timeline exactly once, or the "
+            "reported out-of-sample span silently covers days that were "
+            "measured twice or not at all"
+        )
 
     if holdout_sessions >= len(sessions):
         raise WalkForwardError(
@@ -181,6 +202,12 @@ def evaluation_covers(split: Split) -> tuple[date, date] | None:
     history the out-of-sample figures actually speak for. A split whose
     evaluation periods cover eight months of a three-year history is not a
     three-year out-of-sample test, however many windows it has.
+
+    This is a contiguous, once-each span because `generate` refuses any step
+    that would make it otherwise. A single pair of dates cannot express "360
+    sessions, 660 observations" or "330 sessions, 90 of them never measured",
+    so those splits are not constructible rather than being summarised
+    misleadingly.
     """
     if not split.windows:
         return None
