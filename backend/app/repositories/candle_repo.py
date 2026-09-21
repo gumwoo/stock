@@ -213,3 +213,43 @@ def count_for(session: Session, instrument_id: int, interval: Interval) -> int:
         Candle.instrument_id == instrument_id, Candle.interval == interval
     )
     return int(session.execute(stmt).scalar() or 0)
+
+
+def opening_price(
+    session: Session,
+    instrument_id: int,
+    interval: Interval,
+    ts: datetime,
+    *,
+    ingested_before: datetime | None = None,
+) -> Decimal | None:
+    """The open of the bar beginning exactly at `ts`, or None.
+
+    Deliberately not filtered by `available_at`, and deliberately returning one
+    number rather than a bar.
+
+    A bar's `available_at` is when it *completes*, which is the right gate for
+    a strategy: at 10:00 the day's close does not exist. But an opening price
+    is known at 10:00, because that is when it printed. A fill at the open of
+    the next session is a real trade a real person could place, and gating it
+    on bar completion would make it impossible to simulate — leaving only the
+    alternative of reading the finished bar afterwards and taking its `open`,
+    which gets the same number by way of a row that did not exist yet.
+
+    Returning `Decimal` rather than the row is what keeps that distinction from
+    eroding. A caller holding the bar could reach for `.close`, and nothing
+    would look wrong.
+    """
+    stmt = (
+        select(Candle.open)
+        .where(
+            Candle.instrument_id == instrument_id,
+            Candle.interval == interval,
+            Candle.ts == ts,
+        )
+        .order_by(Candle.ingested_at.desc())
+        .limit(1)
+    )
+    if ingested_before is not None:
+        stmt = stmt.where(Candle.ingested_at <= ingested_before)
+    return session.execute(stmt).scalars().first()

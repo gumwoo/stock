@@ -19,6 +19,15 @@ there is no way to ask it a question that skips either.
 It is also the only place in `app.backtest` permitted to hold a session. CI
 forbids `engine`, `metrics`, `walkforward` and `execution` from importing
 SQLAlchemy at all, so a strategy that wants data has no route but this one.
+
+**Reading and filling are different questions.** `bars` returns only completed
+bars, because a strategy must not see a close that has not happened.
+`opening_price_at` returns one price from a bar that is still open, because an
+opening price is knowable the moment it prints and a fill at the next
+session's open is a real trade. Collapsing the two leaves no correct answer: a
+Friday-open fill either cannot be simulated, or is simulated by reading
+Friday's finished bar and taking its `open` — the right number from a row that
+did not exist yet.
 """
 
 from __future__ import annotations
@@ -39,11 +48,6 @@ from app.repositories.fundamental_repo import (
     FundamentalContext,
     RevisionPolicy,
 )
-
-# How far back to look when resolving a named bar. Generous enough for a fill
-# a few sessions after its decision, bounded so a wrong timestamp cannot turn
-# into a full-history scan.
-_FILL_SEARCH_DEPTH = 40
 
 
 class PitViolationError(Exception):
@@ -144,18 +148,35 @@ class PitReader:
             for r in rows
         ]
 
-    def bar_at(self, instrument_id: int, interval: Interval, ts: datetime) -> Bar | None:
-        """One specific bar, if it was knowable and held.
+    def opening_price_at(
+        self, instrument_id: int, interval: Interval, execution_at: datetime
+    ) -> Decimal | None:
+        """The price a fill at `execution_at` would get, or None.
 
-        Used for fills: the engine names the instant it wants to trade at and
-        gets the bar or nothing. Nothing means the fill cannot happen, which is
-        the correct answer for a suspended or not-yet-complete session.
+        Separate from `bars` on purpose, and the separation is the point.
+
+        `bars` answers what the strategy may *read*, so it returns only bars
+        that had completed — at 10:00 the day's close does not exist. Fills
+        need something else. A daily decision taken at Thursday's close fills
+        at Friday's open, and Friday's bar does not complete until Friday's
+        close, so asking `bars` for it returns nothing and the trade cannot be
+        simulated at all. Waiting for the bar to complete and then reading its
+        `open` gets the right number out of a row that did not exist yet.
+
+        An opening price is knowable at the instant it prints, which is what
+        makes this safe where reading the whole bar would not be. It returns a
+        single `Decimal` so a caller cannot reach past it to `.close`.
+
+        `ingested_at <= data_snapshot_at` still applies: reproducibility is not
+        relaxed here, only bar completion.
         """
-        moment = ensure_utc(ts, field="ts")
-        for bar in self.bars(instrument_id, interval, limit=_FILL_SEARCH_DEPTH):
-            if bar.ts == moment:
-                return bar
-        return None
+        return candle_repo.opening_price(
+            self._session,
+            instrument_id,
+            interval,
+            ensure_utc(execution_at, field="execution_at"),
+            ingested_before=self._snapshot,
+        )
 
     # --- fundamentals -----------------------------------------------------
 

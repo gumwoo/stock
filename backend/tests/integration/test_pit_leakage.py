@@ -233,6 +233,71 @@ class TestBackfill:
         assert wide.at(SIM_ASOF).bars(iid, Interval.DAY_1)[-1].close == Decimal("999")
 
 
+class TestFillsUseADifferentDoorFromReads:
+    """A daily fill happens on a bar that has not finished.
+
+    Thursday's close decides; Friday's open fills. Friday's bar does not
+    complete until Friday's close, so the reader the strategy uses cannot see
+    it at all — correctly, since Friday's close does not exist yet. Asking it
+    anyway returns nothing and the trade cannot be simulated; waiting for the
+    bar and then taking its `open` gets the right number out of a row that did
+    not exist at fill time.
+
+    An opening price is knowable when it prints, so it gets its own accessor,
+    filtered on the snapshot but not on bar completion.
+    """
+
+    def test_the_fill_bar_is_invisible_to_the_strategy_reader(
+        self, planted: tuple[Session, int, datetime]
+    ) -> None:
+        """The situation that had no correct answer before."""
+        s, iid, snapshot = planted
+        at_open = US.session_open(date(2025, 11, 13))
+        view = PitReader(s, data_snapshot_at=snapshot).at(at_open)
+
+        assert all(b.ts < at_open for b in view.bars(iid, Interval.DAY_1))
+
+    def test_but_its_opening_price_is_available(
+        self, planted: tuple[Session, int, datetime]
+    ) -> None:
+        s, iid, snapshot = planted
+        at_open = US.session_open(date(2025, 11, 13))
+        view = PitReader(s, data_snapshot_at=snapshot).at(at_open)
+
+        assert view.opening_price_at(iid, Interval.DAY_1, at_open) == Decimal("140")
+
+    def test_it_returns_a_price_not_a_bar(self, planted: tuple[Session, int, datetime]) -> None:
+        """So a caller cannot reach past it to a close that does not exist."""
+        s, iid, snapshot = planted
+        at_open = US.session_open(date(2025, 11, 13))
+        price = (
+            PitReader(s, data_snapshot_at=snapshot)
+            .at(at_open)
+            .opening_price_at(iid, Interval.DAY_1, at_open)
+        )
+        assert isinstance(price, Decimal)
+
+    def test_a_non_session_instant_has_no_price(
+        self, planted: tuple[Session, int, datetime]
+    ) -> None:
+        s, iid, snapshot = planted
+        saturday = US.session_open(date(2025, 11, 13)) + timedelta(days=2)
+        view = PitReader(s, data_snapshot_at=snapshot).at(saturday)
+        assert view.opening_price_at(iid, Interval.DAY_1, saturday) is None
+
+    def test_the_snapshot_still_binds_the_fill_price(
+        self, planted: tuple[Session, int, datetime]
+    ) -> None:
+        """Reproducibility is not relaxed here — only bar completion is."""
+        s, iid, snapshot = planted
+        at_open = US.session_open(date(2025, 11, 13))
+        candle_repo.save_revisions(s, [_bar(iid, date(2025, 11, 13), "777")])
+        s.commit()
+
+        view = PitReader(s, data_snapshot_at=snapshot).at(at_open)
+        assert view.opening_price_at(iid, Interval.DAY_1, at_open) == Decimal("140")
+
+
 class TestFundamentalsGoThroughTheSameDoor:
     def test_a_fact_filed_before_the_instant_is_readable(
         self, planted: tuple[Session, int, datetime]

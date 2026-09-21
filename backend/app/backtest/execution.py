@@ -26,8 +26,9 @@ holds no session and reads no table, which CI enforces.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from app.core.calendar import MarketCalendar
@@ -53,7 +54,9 @@ class ExecutionModel(StrEnum):
     """Fill at the start of the next bar of the strategy's own interval.
 
     For intraday strategies, where the next tradable instant is the following
-    bar rather than the following session.
+    bar rather than the following session. On a 30-minute clock a decision
+    taken when the 09:30 bar completes fills at 10:00 — the same instant,
+    because that is when the next bar opens.
     """
 
 
@@ -77,11 +80,19 @@ class ExecutionDecision:
                 f"({self.data_asof.isoformat()}); the decision was made before the "
                 "data it used was readable"
             )
-        if self.execution_at <= self.decision_at:
+        if self.execution_at < self.decision_at:
+            raise ExecutionTimingError(
+                f"execution_at {self.execution_at.isoformat()} precedes "
+                f"decision_at {self.decision_at.isoformat()}"
+            )
+        if self.execution_at == self.decision_at and self.model is not ExecutionModel.NEXT_BAR:
+            # Under NEXT_OPEN the two instants are genuinely apart: a close is
+            # hours from the next open. Anywhere else, equality means a fill at
+            # the close that produced the decision.
             raise ExecutionTimingError(
                 f"execution_at {self.execution_at.isoformat()} is not after "
-                f"decision_at {self.decision_at.isoformat()}; a fill cannot happen "
-                "at the instant the decision becomes possible"
+                f"decision_at under {self.model}; a fill cannot happen at the "
+                "instant the decision becomes possible"
             )
 
 
@@ -107,13 +118,39 @@ def earliest_execution(
     if bar_minutes is None:
         raise ValueError("NEXT_BAR needs bar_minutes to know how long a bar is")
 
-    # The next bar starts when this one ends. If that instant falls outside a
-    # session — the decision came from the day's last bar — the next tradable
-    # instant is the following session's open, which the calendar decides.
-    boundary = calendar.bar_available_at(moment, minutes=bar_minutes)
+    # The next bar opens the moment this one closes, so a decision taken at a
+    # bar boundary fills at that same instant. Adding a bar length here would
+    # skip a whole bar: `decision_at` is already the moment the data became
+    # readable, which for a bar series *is* its close, which *is* the next
+    # bar's open.
+    #
+    # Sharing a wall-clock timestamp is not the same-close leak. The ordering
+    # BAR_CLOSE -> DECISION -> NEXT_BAR_OPEN is real, and the price taken is
+    # the next bar's open, never the close that produced the decision — which
+    # `PitReader.opening_price_at` is what actually enforces.
+    if not calendar.is_open_at(moment):
+        return calendar.next_tradable_open(moment)
+
+    boundary = _bar_boundary_at_or_after(calendar, moment, bar_minutes)
     if calendar.is_open_at(boundary):
         return boundary
     return calendar.next_tradable_open(boundary)
+
+
+def _bar_boundary_at_or_after(
+    calendar: MarketCalendar, moment: datetime, bar_minutes: int
+) -> datetime:
+    """The first bar boundary at or after `moment`, counted from the open.
+
+    A decision landing exactly on a boundary stays there. One landing inside a
+    bar — a scheduler that fired a few seconds late, say — moves up to the next
+    boundary rather than inventing a fill in the middle of a bar that has no
+    price of its own.
+    """
+    session_start = calendar.session_open(moment.date())
+    elapsed = (moment - session_start).total_seconds() / 60.0
+    steps = math.ceil(elapsed / bar_minutes)
+    return session_start + timedelta(minutes=steps * bar_minutes)
 
 
 def decide(
