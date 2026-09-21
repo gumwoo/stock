@@ -19,8 +19,8 @@ not a differently-scoped answer that looks like the one requested.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -167,6 +167,57 @@ def execute(
     )
 
 
+StrategyFitter = Callable[[MarketData, int, date, date], Strategy]
+"""Chooses a strategy from a training period.
+
+Receives a `MarketData` reader confined to that period at both ends, not a
+database session. The difference is the whole guarantee. An earlier version
+passed the session and claimed the fitter could not look ahead because the
+evaluation dates were not among its arguments — which was true and irrelevant,
+since a query returns everything. Measured against Samsung, every fitter call
+could read all 488 bars, including the 60 reserved as a holdout.
+
+The ceiling makes the evaluation period, the holdout and any later backfill
+unreachable rather than merely unmentioned; the floor is what makes a rolling
+split actually roll. The dates are still passed, because a fitter needs to
+know what period it is fitting.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class StrategySpec:
+    """What was run, named well enough to be stored and compared.
+
+    A `Strategy` is a live object: two of them cannot be compared, and neither
+    can be written to a row. `version` is what persists and what a later
+    reader matches on, so it must change whenever the behaviour does — moving
+    a moving average from 20/60 to 10/30 produces different trades from
+    identical data, which makes it a different strategy and not a tweak.
+
+    Exactly one of `strategy` and `fit` is given. A fixed rule and a rule
+    chosen per window are different experiments, and a run must be one of
+    them throughout rather than whichever the caller passed most recently.
+    """
+
+    version: str
+    strategy: Strategy | None = None
+    fit: StrategyFitter | None = None
+    params: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.version.strip():
+            raise ValueError("a strategy spec needs a version")
+        if (self.strategy is None) == (self.fit is None):
+            raise ValueError(
+                "give exactly one of strategy or fit: a fixed rule and a fitted "
+                "one are different experiments"
+            )
+
+    @property
+    def fitted(self) -> bool:
+        return self.fit is not None
+
+
 @dataclass(frozen=True, slots=True)
 class WindowResult:
     """One window's two measurements, and what stood behind them."""
@@ -201,12 +252,19 @@ class WalkForwardReport:
     """
 
     windows: tuple[WindowResult, ...]
-    fitted: bool
+    spec: StrategySpec
+    request: RunRequest
     data_snapshot_at: datetime
     train_sessions: int
+    eval_sessions: int
     anchored: bool
+    require_complete_sessions: bool
     holdout_start: date | None = None
     holdout_end: date | None = None
+
+    @property
+    def fitted(self) -> bool:
+        return self.spec.fitted
 
     def of(self, sample: SampleType) -> tuple[WindowResult, ...]:
         return tuple(w for w in self.windows if w.sample_type is sample)
@@ -220,27 +278,9 @@ class WalkForwardReport:
         return out[0].start, out[-1].end
 
 
-StrategyFitter = Callable[[MarketData, int, date, date], Strategy]
-"""Chooses a strategy from a training period.
-
-Receives a `MarketData` reader bounded at the training period's close, not a
-database session. The difference is the whole guarantee. An earlier version
-passed the session and claimed the fitter could not look ahead because the
-evaluation dates were not among its arguments — which was true and irrelevant,
-since `session.query(Candle).all()` returns everything. Measured against
-Samsung: every fitter call could read all 488 bars, including the 60 reserved
-as a holdout.
-
-The reader it gets now carries the run's snapshot and is confined to
-`train_start..train_end` at both ends. The ceiling makes the evaluation
-period, the holdout and any later backfill unreachable rather than merely
-unmentioned; the floor is what makes a rolling split actually roll. The dates
-are still passed, because a fitter needs to know what period it is fitting."""
-
-
 def walk_forward(
     session: Session,
-    strategy: Strategy,
+    spec: StrategySpec,
     request: RunRequest,
     *,
     train_sessions: int,
@@ -248,7 +288,6 @@ def walk_forward(
     step_sessions: int | None = None,
     anchored: bool = False,
     holdout_sessions: int = 0,
-    fit: StrategyFitter | None = None,
     data_snapshot_at: datetime | None = None,
     require_complete_sessions: bool = True,
 ) -> WalkForwardReport:
@@ -258,13 +297,8 @@ def walk_forward(
     a collection landing mid-run widen the data under the later windows only,
     which is the sort of difference that reads as the strategy improving.
 
-    Args:
-        strategy: used for both sides when `fit` is None.
-        fit: given the training period, returns the strategy to evaluate
-            with. It is handed a reader confined to that period at both ends,
-            so the evaluation window and the holdout cannot be read at all —
-            not merely omitted from its arguments — and a rolling split does
-            not quietly train on everything before it too.
+    The spec says whether the rule is fixed or fitted per window; a run is one
+    or the other throughout.
     """
     instrument = session.get(Instrument, request.instrument_id)
     if instrument is None:
@@ -285,8 +319,9 @@ def walk_forward(
 
     results: list[WindowResult] = []
     for window in split.windows:
-        if fit is None:
-            chosen = strategy
+        if spec.fit is None:
+            chosen = spec.strategy
+            assert chosen is not None  # guaranteed by StrategySpec
         else:
             # Confined to the training period at both ends. The ceiling keeps
             # the evaluation window, the holdout and any later backfill
@@ -298,7 +333,7 @@ def walk_forward(
                 not_before=calendar.session_open(window.train_start),
                 not_after=calendar.session_close(window.train_end),
             )
-            chosen = fit(
+            chosen = spec.fit(
                 training_view,
                 request.instrument_id,
                 window.train_start,
@@ -333,10 +368,13 @@ def walk_forward(
 
     return WalkForwardReport(
         windows=tuple(results),
-        fitted=fit is not None,
+        spec=spec,
+        request=request,
         data_snapshot_at=snapshot,
         train_sessions=train_sessions,
+        eval_sessions=eval_sessions,
         anchored=anchored,
+        require_complete_sessions=require_complete_sessions,
         holdout_start=split.holdout_start,
         holdout_end=split.holdout_end,
     )
@@ -348,12 +386,7 @@ class HoldoutError(Exception):
 
 def evaluate_holdout(
     session: Session,
-    strategy: Strategy,
-    request: RunRequest,
     report: WalkForwardReport,
-    *,
-    fit: StrategyFitter | None = None,
-    require_complete_sessions: bool = True,
 ) -> WindowResult:
     """Evaluate the reserved tail, once, after every choice has been made.
 
@@ -362,18 +395,23 @@ def evaluate_holdout(
     would see its number each time, and after a few iterations it would be as
     thoroughly fitted as the training data — by eye rather than by code, which
     is harder to notice and no less real. A holdout survives only while
-    looking at it is a separate, deliberate act, so this is a separate
-    function that a caller has to mean.
+    looking at it is a separate, deliberate act.
 
-    It takes the `WalkForwardReport` rather than a fresh set of parameters so
-    that the snapshot, the training length and the anchoring cannot drift from
-    the run this is supposed to conclude. A holdout scored against a different
-    snapshot is not the final check on that run; it is a new run that happens
-    to use the same dates.
+    **It takes the report and nothing else.** An earlier version accepted the
+    strategy, the request and the fitter again, and claimed the report kept
+    the run from drifting. That was true only of the snapshot, the training
+    length and the anchoring. Everything else could be swapped, and the two
+    ways that went wrong were not subtle:
 
-    The strategy is refit once on everything up to the session before the
-    holdout opens — the most data any choice was allowed to see — and applied
-    to the holdout unchanged. Without a fitter, `strategy` is used as given.
+        AAPL run, fitted, 10,000 cash, 5bp     honest holdout      -1.72%
+        scored against Samsung instead                            -16.63%
+        scored with fit=None instead                              +21.91%
+
+    A different instrument was accepted as the conclusion of the Apple
+    experiment, and dropping the fitter moved the number 23 points in the
+    flattering direction. Neither is reachable now: the request, the spec and
+    the split all come from the report, so the only thing a caller can vary is
+    which report they pass.
     """
     if report.holdout_start is None or report.holdout_end is None:
         raise HoldoutError(
@@ -381,6 +419,7 @@ def evaluate_holdout(
             "before the choices are made, not after"
         )
 
+    request = report.request
     instrument = session.get(Instrument, request.instrument_id)
     if instrument is None:
         raise BacktestWindowError(f"no instrument {request.instrument_id}")
@@ -397,22 +436,25 @@ def evaluate_holdout(
         sessions[0] if report.anchored else sessions[max(0, opening - report.train_sessions)]
     )
 
-    chosen = strategy
-    if fit is not None:
+    chosen = report.spec.strategy
+    if report.spec.fit is not None:
         # Same confinement as every other fitting: it may read up to the last
         # session before the holdout opens and no further.
         training_view = PitReader(session, data_snapshot_at=report.data_snapshot_at).windowed(
             not_before=calendar.session_open(final_train_start),
             not_after=calendar.session_close(final_train_end),
         )
-        chosen = fit(training_view, request.instrument_id, final_train_start, final_train_end)
+        chosen = report.spec.fit(
+            training_view, request.instrument_id, final_train_start, final_train_end
+        )
+    assert chosen is not None  # guaranteed by StrategySpec
 
     outcome = execute(
         session,
         chosen,
         replace(request, start=report.holdout_start, end=report.holdout_end),
         data_snapshot_at=report.data_snapshot_at,
-        require_complete_sessions=require_complete_sessions,
+        require_complete_sessions=report.require_complete_sessions,
     )
     result = outcome.result
 

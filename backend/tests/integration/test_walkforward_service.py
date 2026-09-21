@@ -16,6 +16,7 @@ prevents that claim travels on the report itself.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator
 from datetime import date, datetime
 from decimal import Decimal
@@ -35,7 +36,7 @@ from app.models import Base, Instrument
 from app.repositories import candle_repo
 from app.repositories.candle_repo import CandleRow
 from app.services import backtest_service as svc
-from app.services.backtest_service import RunRequest
+from app.services.backtest_service import RunRequest, StrategySpec
 
 pytestmark = pytest.mark.integration
 
@@ -97,6 +98,14 @@ def instrument(db: object) -> Iterator[tuple[Session, int]]:
         s.commit()
 
 
+def fixed(strategy: object = None) -> StrategySpec:
+    return StrategySpec(version="test-fixed@v1", strategy=strategy or BuyAndHold())
+
+
+def fitted(fit: object) -> StrategySpec:
+    return StrategySpec(version="test-fitted@v1", fit=fit)  # type: ignore[arg-type]
+
+
 def request_for(iid: int) -> RunRequest:
     return RunRequest(
         instrument_id=iid,
@@ -111,7 +120,7 @@ class TestTheReport:
     def test_each_window_is_measured_on_both_sides(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument
         report = svc.walk_forward(
-            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60
+            s, fixed(), request_for(iid), train_sessions=120, eval_sessions=60
         )
 
         assert len(report.of(SampleType.IN_SAMPLE)) == len(report.of(SampleType.OUT_OF_SAMPLE))
@@ -121,7 +130,7 @@ class TestTheReport:
         """So a reader can see how much history the figures speak for."""
         s, iid = instrument
         report = svc.walk_forward(
-            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60
+            s, fixed(), request_for(iid), train_sessions=120, eval_sessions=60
         )
         span = report.evaluation_span
 
@@ -133,7 +142,7 @@ class TestTheReport:
         s, iid = instrument
         report = svc.walk_forward(
             s,
-            MovingAverageCross(short=10, long=30),
+            fixed(MovingAverageCross(short=10, long=30)),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
@@ -148,7 +157,7 @@ class TestTheReport:
         ones only, which reads as the strategy improving."""
         s, iid = instrument
         report = svc.walk_forward(
-            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60
+            s, fixed(), request_for(iid), train_sessions=120, eval_sessions=60
         )
 
         assert isinstance(report.data_snapshot_at, datetime)
@@ -158,7 +167,7 @@ class TestNothingWasFitted:
     def test_a_fixed_strategy_reports_fitted_false(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument
         report = svc.walk_forward(
-            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60
+            s, fixed(), request_for(iid), train_sessions=120, eval_sessions=60
         )
 
         assert report.fitted is False
@@ -171,11 +180,10 @@ class TestNothingWasFitted:
 
         report = svc.walk_forward(
             s,
-            BuyAndHold(),
+            fitted(fit),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
-            fit=fit,
         )
 
         assert report.fitted is True
@@ -206,11 +214,10 @@ class TestTheFitterCannotSeeAhead:
 
         report = svc.walk_forward(
             s,
-            BuyAndHold(),
+            fitted(fit),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
-            fit=fit,
         )
 
         evaluations = report.of(SampleType.OUT_OF_SAMPLE)
@@ -221,26 +228,31 @@ class TestTheFitterCannotSeeAhead:
     def test_the_fitted_strategy_is_the_one_evaluated(
         self, instrument: tuple[Session, int]
     ) -> None:
-        """Otherwise the fitter is decorative."""
+        """Otherwise the fitter is decorative.
+
+        There is no longer a second strategy to confuse it with — a spec holds
+        a fixed rule or a fitter, never both — so this asserts the fitter's
+        output is what the engine consults, against a fixed run that behaves
+        visibly differently.
+        """
         s, iid = instrument
 
-        class NeverTrades:
+        class AlwaysAbstains:
             def evaluate(self, data: MarketData, instrument_id: int) -> Signal:
-                return Signal.HOLD
+                return Signal.ABSTAIN
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> NeverTrades:
-            return NeverTrades()
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> AlwaysAbstains:
+            return AlwaysAbstains()
 
-        report = svc.walk_forward(
-            s,
-            BuyAndHold(),  # would trade on every window if it were used
-            request_for(iid),
-            train_sessions=120,
-            eval_sessions=60,
-            fit=fit,
+        abstaining = svc.walk_forward(
+            s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60
+        )
+        judging = svc.walk_forward(
+            s, fixed(), request_for(iid), train_sessions=120, eval_sessions=60
         )
 
-        assert all(w.trades == 0 for w in report.windows)
+        assert all(w.abstained == w.sessions for w in abstaining.windows)
+        assert all(w.abstained == 0 for w in judging.windows)
 
     def test_it_cannot_read_a_bar_from_after_the_training_period(
         self, instrument: tuple[Session, int]
@@ -260,12 +272,11 @@ class TestTheFitterCannotSeeAhead:
 
         svc.walk_forward(
             s,
-            BuyAndHold(),
+            fitted(fit),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
             holdout_sessions=60,
-            fit=fit,
         )
 
         assert latest
@@ -288,12 +299,11 @@ class TestTheFitterCannotSeeAhead:
 
         svc.walk_forward(
             s,
-            BuyAndHold(),
+            fitted(fit),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
             holdout_sessions=60,
-            fit=fit,
         )
 
         assert refused and all(refused)
@@ -301,7 +311,7 @@ class TestTheFitterCannotSeeAhead:
     def test_it_cannot_widen_its_own_view_by_rebounding(
         self, instrument: tuple[Session, int]
     ) -> None:
-        """Ceilings only tighten."""
+        """Bounds only tighten."""
         s, iid = instrument
         results: list[bool] = []
 
@@ -317,9 +327,7 @@ class TestTheFitterCannotSeeAhead:
                 results.append(True)
             return BuyAndHold()
 
-        svc.walk_forward(
-            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60, fit=fit
-        )
+        svc.walk_forward(s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60)
 
         assert results and all(results)
 
@@ -344,11 +352,10 @@ class TestTheFitterCannotSeeAhead:
 
         svc.walk_forward(
             s,
-            BuyAndHold(),
+            fitted(fit),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
-            fit=fit,
             data_snapshot_at=snapshot,
         )
 
@@ -393,11 +400,10 @@ class TestRollingTrainingActuallyRolls:
 
         report = svc.walk_forward(
             s,
-            BuyAndHold(),
+            fitted(fit),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
-            fit=fit,
         )
 
         assert len(earliest) > 1
@@ -417,9 +423,7 @@ class TestRollingTrainingActuallyRolls:
             starts.append((lo, bars[0].ts.date()))
             return BuyAndHold()
 
-        svc.walk_forward(
-            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60, fit=fit
-        )
+        svc.walk_forward(s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60)
 
         assert starts
         for train_start, first_bar in starts:
@@ -437,9 +441,7 @@ class TestRollingTrainingActuallyRolls:
             counts.append(len(bars))
             return BuyAndHold()
 
-        svc.walk_forward(
-            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60, fit=fit
-        )
+        svc.walk_forward(s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60)
 
         assert counts == [120] * len(counts)
 
@@ -457,12 +459,11 @@ class TestRollingTrainingActuallyRolls:
 
         svc.walk_forward(
             s,
-            BuyAndHold(),
+            fitted(fit),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
             anchored=True,
-            fit=fit,
         )
 
         assert starts
@@ -480,9 +481,7 @@ class TestRollingTrainingActuallyRolls:
                 refused.append(True)
             return BuyAndHold()
 
-        svc.walk_forward(
-            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60, fit=fit
-        )
+        svc.walk_forward(s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60)
 
         # Window 0's floor is the first session, so only later windows refuse.
         assert refused[0] is False
@@ -495,7 +494,7 @@ class TestFoldsAreIndependentRuns:
     def test_each_window_is_measured_on_its_own(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument
         report = svc.walk_forward(
-            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60
+            s, fixed(), request_for(iid), train_sessions=120, eval_sessions=60
         )
 
         out = report.of(SampleType.OUT_OF_SAMPLE)
@@ -519,7 +518,7 @@ class TestWalkForwardNeverScoresTheHoldout:
         s, iid = instrument
         report = svc.walk_forward(
             s,
-            BuyAndHold(),
+            fixed(),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
@@ -532,7 +531,7 @@ class TestWalkForwardNeverScoresTheHoldout:
         s, iid = instrument
         report = svc.walk_forward(
             s,
-            BuyAndHold(),
+            fixed(),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
@@ -547,7 +546,7 @@ class TestWalkForwardNeverScoresTheHoldout:
         with pytest.raises(WalkForwardError, match="sessions"):
             svc.walk_forward(
                 s,
-                BuyAndHold(),
+                fixed(),
                 request_for(iid),
                 train_sessions=10_000,
                 eval_sessions=60,
@@ -562,12 +561,23 @@ class TestTheFinalHoldoutEvaluation:
     not available while the rule was being chosen, which is the whole of its
     value — and it survives only because scoring it is a deliberate act rather
     than something `walk_forward` returns for free.
+
+    It also takes the report and nothing else. An earlier version accepted the
+    strategy, the request and the fitter again, so a caller could conclude the
+    Apple experiment with a Samsung run, or score a fitted run without its
+    fitter. Both were accepted, and both moved the number:
+
+        AAPL, fitted, 10,000 cash, 5bp      honest        -1.72%
+        scored against Samsung instead                   -16.63%
+        scored with fit=None instead                     +21.91%
     """
 
-    def _report(self, s: Session, iid: int, **kwargs: object) -> object:
+    def _report(
+        self, s: Session, iid: int, spec: StrategySpec | None = None, **kwargs: object
+    ) -> svc.WalkForwardReport:
         return svc.walk_forward(
             s,
-            BuyAndHold(),
+            spec if spec is not None else fixed(),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
@@ -579,29 +589,21 @@ class TestTheFinalHoldoutEvaluation:
         s, iid = instrument
         report = self._report(s, iid)
 
-        final = svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report)  # type: ignore[arg-type]
+        final = svc.evaluate_holdout(s, report)
 
         assert final.sample_type is SampleType.HOLDOUT
-        assert (final.start, final.end) == (report.holdout_start, report.holdout_end)  # type: ignore[attr-defined]
+        assert (final.start, final.end) == (report.holdout_start, report.holdout_end)
         assert final.sessions == 60
-
-    def test_it_is_a_single_result(self, instrument: tuple[Session, int]) -> None:
-        s, iid = instrument
-        report = self._report(s, iid)
-
-        final = svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report)  # type: ignore[arg-type]
-
-        assert isinstance(final, svc.WindowResult)
 
     def test_a_run_with_no_holdout_refuses(self, instrument: tuple[Session, int]) -> None:
         """Reserving it afterwards is not reserving it."""
         s, iid = instrument
         report = svc.walk_forward(
-            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60
+            s, fixed(), request_for(iid), train_sessions=120, eval_sessions=60
         )
 
         with pytest.raises(svc.HoldoutError, match="reserved no holdout"):
-            svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report)
+            svc.evaluate_holdout(s, report)
 
     def test_it_reuses_the_run_snapshot(self, instrument: tuple[Session, int]) -> None:
         """A holdout scored against a different snapshot concludes a different run."""
@@ -612,16 +614,41 @@ class TestTheFinalHoldoutEvaluation:
         candle_repo.save_revisions(s, [_row(iid, HISTORY[-1], Decimal("4242"))])
         s.commit()
 
-        final = svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report)  # type: ignore[arg-type]
-        again = svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report)  # type: ignore[arg-type]
+        assert svc.evaluate_holdout(s, report) == svc.evaluate_holdout(s, report)
 
-        assert final == again
+    def test_the_request_cannot_be_swapped(self) -> None:
+        """The instrument, the cash and the costs all come from the report.
+
+        Before this, a Samsung request was accepted as the conclusion of an
+        Apple experiment.
+        """
+        params = list(inspect.signature(svc.evaluate_holdout).parameters)
+        assert params == ["session", "report"]
+
+    def test_a_fitted_run_is_concluded_with_its_fitter(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """Dropping it moved the Apple holdout 23 points, in the flattering
+        direction. The fitter travels on the spec now, so it cannot be left
+        out or swapped in."""
+        s, iid = instrument
+        calls: list[int] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            calls.append(1)
+            return BuyAndHold()
+
+        report = self._report(s, iid, spec=fitted(fit))
+        during_walk_forward = len(calls)
+
+        svc.evaluate_holdout(s, report)
+
+        assert report.fitted is True
+        assert len(calls) == during_walk_forward + 1
 
     def test_the_final_fitter_cannot_see_the_holdout(self, instrument: tuple[Session, int]) -> None:
         """It refits on everything up to the session before it opens."""
         s, iid = instrument
-        report = self._report(s, iid)
-        assert report.holdout_start is not None  # type: ignore[attr-defined]
         seen: list[tuple[date, date, date]] = []
 
         def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
@@ -629,29 +656,37 @@ class TestTheFinalHoldoutEvaluation:
             seen.append((lo, hi, bars[-1].ts.date()))
             return BuyAndHold()
 
-        svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report, fit=fit)  # type: ignore[arg-type]
+        report = self._report(s, iid, spec=fitted(fit))
+        assert report.holdout_start is not None
+        seen.clear()  # only the final fit is of interest
+
+        svc.evaluate_holdout(s, report)
 
         assert len(seen) == 1
         train_start, train_end, latest = seen[0]
-        assert train_end < report.holdout_start  # type: ignore[attr-defined]
+        assert train_end < report.holdout_start
         assert latest <= train_end
         assert train_start < train_end
 
     def test_reaching_into_the_holdout_raises(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument
-        report = self._report(s, iid)
-        assert report.holdout_end is not None  # type: ignore[attr-defined]
+        holdout_end: list[date] = []
         refused: list[bool] = []
 
         def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
-            try:
-                view.at(US.session_close(report.holdout_end))  # type: ignore[attr-defined]
-                refused.append(False)
-            except PitViolationError:
-                refused.append(True)
+            if holdout_end:
+                try:
+                    view.at(US.session_close(holdout_end[0]))
+                    refused.append(False)
+                except PitViolationError:
+                    refused.append(True)
             return BuyAndHold()
 
-        svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report, fit=fit)  # type: ignore[arg-type]
+        report = self._report(s, iid, spec=fitted(fit))
+        assert report.holdout_end is not None
+        holdout_end.append(report.holdout_end)
+
+        svc.evaluate_holdout(s, report)
 
         assert refused == [True]
 
@@ -659,7 +694,6 @@ class TestTheFinalHoldoutEvaluation:
         self, instrument: tuple[Session, int]
     ) -> None:
         s, iid = instrument
-        report = self._report(s, iid)
         lengths: list[int] = []
 
         def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
@@ -667,7 +701,10 @@ class TestTheFinalHoldoutEvaluation:
             lengths.append(len(bars))
             return BuyAndHold()
 
-        svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report, fit=fit)  # type: ignore[arg-type]
+        report = self._report(s, iid, spec=fitted(fit))
+        lengths.clear()
+
+        svc.evaluate_holdout(s, report)
 
         assert lengths == [120]
 
@@ -676,7 +713,6 @@ class TestTheFinalHoldoutEvaluation:
     ) -> None:
         """The final fit must follow the run it concludes, not its own default."""
         s, iid = instrument
-        report = self._report(s, iid, anchored=True)
         starts: list[date] = []
 
         def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
@@ -684,6 +720,40 @@ class TestTheFinalHoldoutEvaluation:
             starts.append(bars[0].ts.date())
             return BuyAndHold()
 
-        svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report, fit=fit)  # type: ignore[arg-type]
+        report = self._report(s, iid, spec=fitted(fit), anchored=True)
+        starts.clear()
+
+        svc.evaluate_holdout(s, report)
 
         assert starts == [HISTORY[0]]
+
+
+class TestTheSpecIsTheExperiment:
+    """A run is a fixed rule or a fitted one, throughout."""
+
+    def test_both_strategy_and_fitter_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="exactly one"):
+            StrategySpec(version="v1", strategy=BuyAndHold(), fit=lambda *a: BuyAndHold())
+
+    def test_neither_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="exactly one"):
+            StrategySpec(version="v1")
+
+    def test_a_version_is_required(self) -> None:
+        """It is what persists, and what a later reader matches on."""
+        with pytest.raises(ValueError, match="needs a version"):
+            StrategySpec(version="   ", strategy=BuyAndHold())
+
+    def test_the_report_carries_the_whole_experiment(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        spec = StrategySpec(
+            version="ma-10-30@v1",
+            strategy=MovingAverageCross(short=10, long=30),
+            params={"short": 10, "long": 30},
+        )
+        report = svc.walk_forward(s, spec, request_for(iid), train_sessions=120, eval_sessions=60)
+
+        assert report.spec.version == "ma-10-30@v1"
+        assert report.spec.params == {"short": 10, "long": 30}
+        assert report.request == request_for(iid)
+        assert report.eval_sessions == 60
