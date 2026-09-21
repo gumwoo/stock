@@ -274,6 +274,8 @@ class WalkForwardReport:
     windows: tuple[WindowResult, ...]
     spec: StrategySpec
     request: RunRequest
+    code: backtest_repo.CodeVersion
+    started_at: datetime
     data_snapshot_at: datetime
     train_sessions: int
     eval_sessions: int
@@ -323,6 +325,12 @@ def walk_forward(
     instrument = session.get(Instrument, request.instrument_id)
     if instrument is None:
         raise BacktestWindowError(f"no instrument {request.instrument_id}")
+
+    # Captured before anything runs. Resolving it at persist time would
+    # record whatever HEAD happened to be once a long run finished, which is
+    # not necessarily the code that produced the numbers.
+    code = backtest_repo.resolve_commit()
+    started_at = utc_now()
 
     snapshot = data_snapshot_at if data_snapshot_at is not None else snapshot_now(session)
     calendar = MarketCalendar(instrument.market)
@@ -392,6 +400,8 @@ def walk_forward(
         windows=tuple(results),
         spec=spec,
         request=request,
+        code=code,
+        started_at=started_at,
         data_snapshot_at=snapshot,
         train_sessions=train_sessions,
         eval_sessions=eval_sessions,
@@ -577,9 +587,13 @@ def persist(
     report: WalkForwardReport,
     *,
     code: backtest_repo.CodeVersion | None = None,
-    started_at: datetime | None = None,
 ) -> BacktestRun:
     """Store a finished walk-forward with the coordinates that prove it.
+
+    The commit and the start time come from the report, captured when the run
+    began. Resolving them here would record the state of the working tree once
+    persisting happened to be called — after a long run, potentially a
+    different commit from the one that produced the numbers.
 
     The costs written are the ones that were applied, expanded into numbers.
     Recording "the default cost model" would become a different claim the day
@@ -592,8 +606,8 @@ def persist(
     run = backtest_repo.save_run(
         session,
         provenance=backtest_repo.RunProvenance(
-            code=code or backtest_repo.resolve_commit(),
-            started_at=started_at or utc_now(),
+            code=code or report.code,
+            started_at=report.started_at,
         ),
         **experiment_fields(report),
     )
