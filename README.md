@@ -234,31 +234,72 @@ Measured per session over the same ten years, on the corrected data.
 | Apple fundamental | 44.7 | 47.3 | 58.9 | 64.8 | 71.3 |
 | Apple total | 33.2 | 45.5 | 58.8 | 66.0 | 75.5 |
 
-**The fundamental factor carries 40% of the weight and almost none of the
-variance.** Its median sits at 58.5 on both instruments and it spans 22 points
-where technical spans 75. Blending them does not widen the judgement, it
-narrows it: Samsung's technical p10-p90 is 34.7 points wide and the combined
-score's is 22.1.
+BUY_INTEREST fires on 72 of Samsung's 2455 sessions and 62 of Apple's 2512 —
+2.9% and 2.5%. CAUTION on 56 and 4. The rest, 95% of the decade, is WATCH.
 
-What that does to the thresholds is arithmetic. With the fundamental parked
-near 58.5, reaching a combined 70 needs a technical score of 77.7, and falling
-to 35 needs 19.3 — the top few percent and the very bottom of technical's own
-range. So BUY_INTEREST fires on 5.3% of Samsung's sessions and 4.7% of
-Apple's, CAUTION on 2.3% and 0.2%, and the rule holds whatever it holds for
-the other 92-95%. Apple's four CAUTION sessions in ten years are not caution
-being rare; they are its fundamental floor of 44.7 making the combined score
-almost unable to reach 35.
+**Combining the two factors narrows the judgement rather than widening it.**
+Samsung's technical p10-p90 spans 34.7 points and the combined score's spans
+22.1. Not because the fundamental sits still — its yearly medians run 32.7 to
+67.1 on Samsung and 44.8 to 66.6 on Apple — but because the two are weakly
+related, and averaging weakly related series reduces variance. That is the
+arithmetic of diversification, applied to a decision rather than a portfolio.
+The consequence is that both thresholds land in technical's own tails: against
+a typical fundamental near 58, a combined 70 needs technical above 77 and a
+combined 35 needs it below 20.
 
-The flatness is not only annual data moving slowly. The engine averages six
-metrics, and technical's six all derive from price so they move together,
-while ROE, P/E, P/B and margin do not — averaging weakly-related normalized
-values pulls towards the middle, and adding metrics flattens it further. The
-fixed-scale normalization compounds it: ranking would spread an ordinary
-company across the range, while a fixed scale puts it near 50 by construction.
+**And the signals are not spread across the decade.**
 
-Stated as a measurement, not a diagnosis. Whether 0.6/0.4 over a near-constant
-factor is the intended design is a question for the strategy, and changing it
-by looking at these two instruments is how a holdout gets fitted by eye.
+| year | 삼성 BUY | 삼성 CAUTION | 삼성 fund median | Apple BUY | Apple CAUTION | Apple fund median |
+|---|---:|---:|---:|---:|---:|---:|
+| 2017 | 0 | 0 | 50.5 | 3 | 0 | 63.5 |
+| 2018 | 4 | 1 | 66.1 | 4 | 2 | 62.3 |
+| 2019 | 13 | 0 | 66.6 | 13 | 0 | 64.1 |
+| 2020 | 7 | 0 | 55.0 | 20 | 1 | 57.9 |
+| 2021 | 0 | 0 | 57.1 | 12 | 0 | 44.8 |
+| 2022 | 1 | 0 | 67.1 | 6 | 0 | 66.6 |
+| 2023 | 7 | 0 | 64.1 | 4 | 0 | 58.4 |
+| 2024 | 0 | **51** | **32.7** | 0 | 0 | 50.0 |
+| 2025 | **31** | 0 | 61.4 | 0 | 1 | 51.2 |
+| 2026 | 9 | 4 | 46.3 | 0 | 0 | 50.3 |
+
+43% of Samsung's buy signals are in 2025 and 91% of its caution signals are in
+2024, the year FY2023's collapsed earnings reached the filings. 73% of Apple's
+are in 2019-2021, and **it has produced none at all since 2023**.
+
+The Apple column is the interesting one. Its technical median barely moves
+across the decade — 58 to 65, every year. What moved is the fundamental score,
+from 66.6 in 2022 to around 50 from 2024 on. The fundamental engine reads P/E
+and P/B, so a rising price makes the valuation worse: **the rule stopped buying
+Apple during exactly the stretch when Apple kept rising.** That is most of the
++184% against +1073%, and it is the value tilt in the engine behaving as built
+rather than a defect.
+
+#### Walk-forward, 250 train / 125 evaluate / 125 holdout
+
+The strategy is fixed rather than fitted, so the in-sample and out-of-sample
+figures ran the same rule and the gap between them is not evidence of
+overfitting — `WalkForwardReport.fitted` is false and exists so that claim
+cannot be made by accident. What the windows do show is consistency across
+periods.
+
+| | OOS windows | flat in cash | positive | negative | best |
+|---|---:|---:|---:|---:|---:|
+| 삼성전자 | 16 | 7 (44%) | 5 | 4 | +55.19% |
+| Apple | 17 | 6 (35%) | 8 | 3 | +29.73% |
+
+The median out-of-sample return is exactly 0.00% for both, because the
+commonest outcome is that the rule never enters at all. Samsung's best window,
+2025-05 to 2025-11, returns more than every other window of either instrument
+combined. Apple's **last five consecutive windows are all flat cash** — it has
+held no position since September 2023.
+
+Closed trades are near zero everywhere because a window that enters and does
+not exit records an open position rather than a completed round-trip; the
+equity is real, the trade count is not the thing to read.
+
+Stated as measurements. Retuning weights against the two instruments the
+holdout was carved from is how a holdout gets fitted by eye, so nothing is
+changed on the strength of them.
 
 ### Known limitations
 
