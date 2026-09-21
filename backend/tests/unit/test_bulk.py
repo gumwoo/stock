@@ -76,8 +76,8 @@ class TestTheWidthsTheRepositoriesPass:
     def test_a_filing_row_binds_seven(self) -> None:
         assert len(FilingRow._fields) == 7
 
-    def test_a_fundamental_row_binds_fifteen(self) -> None:
-        assert len(FundamentalRow._fields) == 15
+    def test_a_fundamental_row_binds_sixteen(self) -> None:
+        assert len(FundamentalRow._fields) == 16
 
     def test_a_candle_row_binds_ten(self) -> None:
         assert len(CandleRow.__annotations__) == 10

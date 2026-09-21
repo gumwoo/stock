@@ -36,11 +36,12 @@ from itertools import pairwise
 from typing import NamedTuple
 
 from sqlalchemy import Select, func, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models import Filing, Fundamental
-from app.models.fundamental import FiscalPeriod, FundamentalSource
+from app.models.fundamental import SEMANTIC_VERSIONS, FiscalPeriod, FundamentalSource
 from app.repositories import bulk, filing_repo
 
 
@@ -179,6 +180,10 @@ class FundamentalRow(NamedTuple):
     accession: str | None
     source: FundamentalSource
     frame: str | None = None
+    # Defaulted so a caller cannot forget it, and defaulted to the *current*
+    # reading rather than to 1: a row being written now was written by this
+    # code, whatever the map happens to say today.
+    semantic_version: int = 0
 
 
 def save_facts(session: Session, rows: Sequence[FundamentalRow]) -> int:
@@ -191,14 +196,42 @@ def save_facts(session: Session, rows: Sequence[FundamentalRow]) -> int:
     if not rows:
         return 0
 
+    # Stamped here rather than at each call site. A collector that forgot
+    # would write rows indistinguishable from an older reading, which is the
+    # one thing this column exists to prevent.
+    rows = [
+        r._replace(semantic_version=SEMANTIC_VERSIONS[r.source]) if not r.semantic_version else r
+        for r in rows
+    ]
+
     written = 0
     for batch in bulk.batched(rows, columns=len(FundamentalRow._fields)):
         stmt = pg_insert(Fundamental).values([r._asdict() for r in batch])
-        stmt = stmt.on_conflict_do_nothing(constraint="uq_fundamental_context_filing")
-        # RETURNING rather than rowcount: with ON CONFLICT DO NOTHING the
-        # driver reports -1 for a multi-values insert, so the only reliable
-        # count is the ids actually produced.
-        written += len(session.execute(stmt.returning(Fundamental.id)).scalars().all())
+        # A conflict means we already hold this context from this filing. Under
+        # DO NOTHING the row kept whatever `semantic_version` it was first
+        # written with, so a dataset collected before the reading changed could
+        # never be brought forward: recollecting matched every row, inserted
+        # none, and left the old stamp in place with the backtest still
+        # refusing. Re-deriving a value and getting the same answer is exactly
+        # the evidence that the row is good under the new reading, so it is
+        # stamped.
+        #
+        # Guarded on the value being unchanged. If the new reading produces a
+        # different number for the same context and filing, that is a genuine
+        # disagreement: the row keeps the old stamp, the gate keeps refusing,
+        # and somebody looks. Overwriting the value instead would edit history
+        # a stored run may have used.
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_fundamental_context_filing",
+            set_={"semantic_version": stmt.excluded.semantic_version},
+            where=Fundamental.value == stmt.excluded.value,
+        )
+        # `xmax = 0` is true only for a row this statement inserted, which is
+        # the one way to tell an insert from a re-stamp in the same RETURNING.
+        result = session.execute(
+            stmt.returning(Fundamental.id, sa_text("(xmax = 0) AS inserted"))
+        ).all()
+        written += sum(1 for _, inserted in result if inserted)
     return written
 
 
@@ -235,6 +268,29 @@ class AnnualGap(NamedTuple):
 # statutory filing window (90 days in both KR and US, with margin) separates
 # "the next report is not due yet" from "a report is missing".
 ANNUAL_STALENESS_DAYS = 550
+
+
+def oldest_semantic_version(
+    session: Session,
+    instrument_id: int,
+    *,
+    source: FundamentalSource,
+    ingested_before: datetime | None = None,
+) -> int | None:
+    """The oldest reading any stored row for this instrument was written under.
+
+    The question coverage cannot answer. A deletion leaves no trace — nothing
+    records that a concept was ever expected — but a row surviving from an
+    earlier reading does say so about itself, and that is enough to refuse a
+    dataset that has not been recollected since the reading changed.
+    """
+    stmt = select(func.min(Fundamental.semantic_version)).where(
+        Fundamental.instrument_id == instrument_id,
+        Fundamental.source == source,
+    )
+    if ingested_before is not None:
+        stmt = stmt.where(Fundamental.ingested_at <= ingested_before)
+    return session.execute(stmt).scalar()
 
 
 def annual_period_ends(

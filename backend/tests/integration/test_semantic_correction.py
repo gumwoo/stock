@@ -45,7 +45,7 @@ from app.core.calendar import Market, MarketCalendar
 from app.core.types import Interval
 from app.engines.fundamental import REQUIRED_MONTHS
 from app.models import Base, Instrument
-from app.models.fundamental import FiscalPeriod, FundamentalSource
+from app.models.fundamental import SEMANTIC_VERSIONS, FiscalPeriod, FundamentalSource
 from app.repositories import candle_repo, fundamental_repo
 from app.repositories.candle_repo import CandleRow
 from app.services import backtest_service as svc
@@ -288,3 +288,178 @@ class TestReproductionIsWhatCatchesIt:
         )
 
         assert before and not after
+
+
+@pytest.fixture
+def reading_moved() -> Iterator[int]:
+    """Raise SEC's reading, as a real change to the mapping would.
+
+    The map is mutated rather than monkeypatched onto a module, because the
+    collector, the repository and the gate all hold the same dict object and a
+    per-module patch would leave them disagreeing — which is the very thing
+    the version exists to detect.
+    """
+    was = SEMANTIC_VERSIONS[FundamentalSource.SEC]
+    SEMANTIC_VERSIONS[FundamentalSource.SEC] = was + 1
+    try:
+        yield was
+    finally:
+        SEMANTIC_VERSIONS[FundamentalSource.SEC] = was
+
+
+def age_the_dataset(s: Session, iid: int, version: int) -> None:
+    """Mark every stored fact as collected under an earlier reading."""
+    s.execute(
+        text("UPDATE fundamental SET semantic_version = :v WHERE instrument_id = :i"),
+        {"i": iid, "v": version},
+    )
+    s.flush()
+
+
+class TestAStaleReadingIsRefused:
+    """What the coverage gate could not do, and this can.
+
+    A deletion leaves nothing behind to refuse: after the rows are gone there
+    is no record that the concept was ever expected. A row surviving from an
+    earlier reading of the filings does say so about itself, which is enough to
+    refuse a dataset that has not been recollected since the reading moved.
+    """
+
+    def test_a_score_run_is_refused(
+        self, instrument: tuple[Session, Instrument], reading_moved: int
+    ) -> None:
+        s, inst = instrument
+        age_the_dataset(s, inst.instrument_id, reading_moved)
+
+        with pytest.raises(svc.BacktestWindowError, match="collected under reading"):
+            run(s, inst)
+
+    def test_the_message_says_how_to_clear_it(
+        self, instrument: tuple[Session, Instrument], reading_moved: int
+    ) -> None:
+        """A refusal nobody can act on is an outage."""
+        s, inst = instrument
+        age_the_dataset(s, inst.instrument_id, reading_moved)
+
+        with pytest.raises(svc.BacktestWindowError, match="collect --source sec"):
+            run(s, inst)
+
+    def test_a_strategy_that_reads_no_financials_is_unaffected(
+        self, instrument: tuple[Session, Instrument], reading_moved: int
+    ) -> None:
+        """Keyed on what the run actually read, like every other fundamental
+        check here."""
+        s, inst = instrument
+        age_the_dataset(s, inst.instrument_id, reading_moved)
+
+        result = svc.execute(
+            s, strategies.build(strategies.buy_and_hold()), request_for(inst.instrument_id)
+        )
+
+        assert result.result.fills
+
+    def test_the_current_reading_runs(self, instrument: tuple[Session, Instrument]) -> None:
+        """Or the guard is just an outage with a version number."""
+        s, inst = instrument
+
+        assert run(s, inst) is not None
+
+
+class TestRecollectingClearsIt:
+    """The half that was missing on the first attempt.
+
+    `ON CONFLICT DO NOTHING` matched every row, inserted none and left the old
+    stamps in place, so a recollection could not bring a dataset forward and
+    the refusal was permanent. Re-deriving a value and getting the same answer
+    is exactly the evidence the row is sound under the new reading.
+    """
+
+    def test_rows_are_restamped_when_the_value_agrees(
+        self, instrument: tuple[Session, Instrument], reading_moved: int
+    ) -> None:
+        s, inst = instrument
+        age_the_dataset(s, inst.instrument_id, reading_moved)
+
+        # A whole recollection, because that is what clears it. Refreshing one
+        # year leaves the rest stamped old and the gate still refusing, which
+        # is correct: the dataset is what has to be current, not a slice.
+        for year in (2018, 2019, 2020, 2021):
+            fundamental_repo.save_facts(s, _facts(inst.instrument_id, year))
+        s.flush()
+
+        assert (
+            fundamental_repo.oldest_semantic_version(
+                s, inst.instrument_id, source=FundamentalSource.SEC
+            )
+            == SEMANTIC_VERSIONS[FundamentalSource.SEC]
+        )
+
+    def test_refreshing_one_year_is_not_enough(
+        self, instrument: tuple[Session, Instrument], reading_moved: int
+    ) -> None:
+        """The dataset is what has to be current, not a slice of it."""
+        s, inst = instrument
+        age_the_dataset(s, inst.instrument_id, reading_moved)
+
+        fundamental_repo.save_facts(s, _facts(inst.instrument_id, 2021))
+        s.flush()
+
+        with pytest.raises(svc.BacktestWindowError, match="collected under reading"):
+            run(s, inst)
+
+    def test_nothing_is_counted_as_newly_written(
+        self, instrument: tuple[Session, Instrument], reading_moved: int
+    ) -> None:
+        """A re-stamp is not a collection. Reporting it as one would inflate
+        every recollection's saved count."""
+        s, inst = instrument
+        age_the_dataset(s, inst.instrument_id, reading_moved)
+
+        assert fundamental_repo.save_facts(s, _facts(inst.instrument_id, 2021)) == 0
+
+    def test_a_row_whose_value_disagrees_keeps_the_old_stamp(
+        self, instrument: tuple[Session, Instrument], reading_moved: int
+    ) -> None:
+        """The guard on the re-stamp. Same context, same filing, a different
+        number means the two readings disagree, and that is for a person to
+        look at rather than for an upsert to settle by overwriting history."""
+        s, inst = instrument
+        age_the_dataset(s, inst.instrument_id, reading_moved)
+
+        changed = [
+            r._replace(value=r.value * 2) if r.concept == "Revenues" else r
+            for r in _facts(inst.instrument_id, 2021)
+        ]
+        fundamental_repo.save_facts(s, changed)
+        s.flush()
+
+        assert (
+            fundamental_repo.oldest_semantic_version(
+                s, inst.instrument_id, source=FundamentalSource.SEC
+            )
+            == reading_moved
+        )
+
+    def test_the_disagreeing_value_is_not_overwritten(
+        self, instrument: tuple[Session, Instrument], reading_moved: int
+    ) -> None:
+        """A stored run may have used it."""
+        s, inst = instrument
+        original = ANNUAL["Revenues"]
+        age_the_dataset(s, inst.instrument_id, reading_moved)
+
+        changed = [
+            r._replace(value=r.value * 2) if r.concept == "Revenues" else r
+            for r in _facts(inst.instrument_id, 2021)
+        ]
+        fundamental_repo.save_facts(s, changed)
+        s.flush()
+
+        stored = s.execute(
+            text(
+                "SELECT value FROM fundamental WHERE instrument_id = :i "
+                "AND concept = 'Revenues' AND period_end = DATE '2021-12-31'"
+            ),
+            {"i": inst.instrument_id},
+        ).scalar()
+        assert stored == original

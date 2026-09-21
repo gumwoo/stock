@@ -42,7 +42,7 @@ from app.core.types import Bar, Interval, StrategyDefinition
 from app.engines.fundamental import FundamentalSnapshot
 from app.models import Instrument
 from app.models.backtest import BacktestRun, BacktestWindow
-from app.models.fundamental import FundamentalSource
+from app.models.fundamental import SEMANTIC_VERSIONS, FundamentalSource
 from app.repositories import backtest_repo, fundamental_repo
 from app.services import fundamental_service
 
@@ -191,6 +191,27 @@ def _assert_fundamentals_cover(
     # readable at the following session's open. The check is therefore lenient
     # by one session, which is the right direction: it refuses eras the data
     # cannot speak to and never refuses one it can.
+    # Asked before anything about coverage, because it is a different
+    # question. Coverage asks what is stored; this asks whether what is stored
+    # still means what this code thinks it means. A deletion leaves no trace —
+    # nothing records that a concept was ever expected here — but a row
+    # surviving from an earlier reading of the filings does say so about
+    # itself, and a dataset holding one has not been recollected since the
+    # reading changed.
+    written_under = fundamental_repo.oldest_semantic_version(
+        session, instrument.instrument_id, source=source, ingested_before=snapshot
+    )
+    current = SEMANTIC_VERSIONS[source]
+    if written_under is not None and written_under < current:
+        raise BacktestWindowError(
+            f"{instrument.name}'s {source} facts include rows collected under "
+            f"reading {written_under} while this build reads them as {current}. "
+            "A concept can hold a different quantity under the same name across "
+            "that boundary, so the run would mix two definitions and report one "
+            f"number. Recollect: python -m app.cli collect --source "
+            f"{str(source).lower()} --period max"
+        )
+
     # Scoped to what the scorer can anchor on, not to whatever was filed. The
     # difference is four years on the instrument this check was written for.
     # Samsung's DART record reaches 2013, its 2013-2016 filings carry

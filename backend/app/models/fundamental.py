@@ -37,6 +37,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Numeric,
+    SmallInteger,
     String,
     UniqueConstraint,
 )
@@ -60,6 +61,26 @@ class FundamentalSource(StrEnum):
     YFINANCE = "YFINANCE"
 
 
+# How the collector for each source currently reads its filings, as a number
+# that changes whenever that reading changes meaning.
+#
+# Not a schema version and not a code version. A row records a value under a
+# concept name, and the mapping from what a filing says to what that name means
+# is a decision this system makes. When the decision changes, every row written
+# under the old one holds a different quantity from the rows written after,
+# and nothing about the row itself says which.
+#
+# DART moved to 2 when profit and equity stopped being read from the
+# including-NCI IFRS totals — `ifrs-full_ProfitLoss` and `ifrs-full_Equity` —
+# and started being read from the parent-attributable tags, because the us-gaap
+# names they land under mean the parent-only figures. The two differ by 34.8%
+# for LG화학 on FY2023.
+#
+# SEC has never moved: it reads the us-gaap elements by name, so there is no
+# mapping decision to change.
+SEMANTIC_VERSIONS: dict[FundamentalSource, int] = {}
+
+
 class FiscalPeriod(StrEnum):
     """Which part of the fiscal year a fact covers."""
 
@@ -70,6 +91,15 @@ class FiscalPeriod(StrEnum):
     Q4 = "Q4"
     H1 = "H1"
     UNKNOWN = "UNKNOWN"
+
+
+SEMANTIC_VERSIONS.update(
+    {
+        FundamentalSource.DART: 2,
+        FundamentalSource.SEC: 1,
+        FundamentalSource.YFINANCE: 1,
+    }
+)
 
 
 class Fundamental(Base):
@@ -146,6 +176,14 @@ class Fundamental(Base):
         Enum(FundamentalSource, name="fundamental_source", native_enum=False, length=12),
         nullable=False,
     )
+    semantic_version: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+        server_default="1",
+        doc="Which reading of this source's filings produced the row. See "
+        "SEMANTIC_VERSIONS: a row written under an older one may hold a "
+        "different quantity under the same concept name.",
+    )
     frame: Mapped[str | None] = mapped_column(
         String(32), nullable=True, doc="SEC calendar frame, e.g. CY2008Q4I"
     )
@@ -181,6 +219,13 @@ class Fundamental(Base):
             "unit",
             "period_end",
             "filed_at",
+        ),
+        # The gate asks for the oldest reading per instrument and source.
+        Index(
+            "ix_fundamental_semantic_version",
+            "instrument_id",
+            "source",
+            "semantic_version",
         ),
         Index("ix_fundamental_available", "instrument_id", "available_at"),
         Index("ix_fundamental_ingested", "ingested_at"),
