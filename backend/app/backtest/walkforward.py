@@ -12,9 +12,16 @@ boundaries that come out are real session dates, which is also what makes them
 safe to hand to the backtest service.
 
 **Evaluation windows never overlap.** Each session appears in exactly one
-evaluation period, so the out-of-sample results can be concatenated without
-counting any day twice. Training windows do overlap, which is the point of
-rolling them.
+evaluation period, so no day is measured twice. Training windows do overlap,
+which is the point of rolling them.
+
+That is a statement about *dates*, not about a portfolio. Each window is run
+as an independent simulation starting from cash with no position, so window 1
+does not inherit what window 0 was holding when it ended. The per-fold results
+are comparable to each other, and chaining them into a single "continuous
+out-of-sample equity curve" would describe a portfolio that never existed. A
+continuously refitted simulation is a different thing, needing the engine to
+carry state across refits, and is not what this produces.
 
 **The holdout is carved off before anything else and never returned.** Windows
 are generated from what remains, so no amount of iterating on window

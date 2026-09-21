@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.backtest import engine as bt
 from app.backtest import walkforward as wf
-from app.backtest.engine import BacktestResult, CostModel, Strategy
+from app.backtest.engine import BacktestResult, CostModel, MarketData, Strategy
 from app.backtest.execution import ExecutionModel
 from app.backtest.metrics import Performance, summarise
 from app.backtest.pit_repository import PitReader, coverage, snapshot_now
@@ -193,6 +193,11 @@ class WalkForwardReport:
     tuned on. An IN/OUT gap then says nothing about overfitting, and the UI
     must not present it as if it did. The flag is here so that claim cannot be
     made by accident.
+
+    Each window is an independent run starting from cash. The evaluation dates
+    tile the timeline, but the portfolios do not continue across them: window 1
+    does not inherit window 0 position. These are per-fold comparisons, and
+    stitching their curves together would depict a portfolio nobody held.
     """
 
     windows: tuple[WindowResult, ...]
@@ -213,8 +218,21 @@ class WalkForwardReport:
         return out[0].start, out[-1].end
 
 
-StrategyFitter = Callable[[Session, int, date, date], Strategy]
-"""Chooses a strategy from a training period. Receives only that period."""
+StrategyFitter = Callable[[MarketData, int, date, date], Strategy]
+"""Chooses a strategy from a training period.
+
+Receives a `MarketData` reader bounded at the training period's close, not a
+database session. The difference is the whole guarantee. An earlier version
+passed the session and claimed the fitter could not look ahead because the
+evaluation dates were not among its arguments — which was true and irrelevant,
+since `session.query(Candle).all()` returns everything. Measured against
+Samsung: every fitter call could read all 488 bars, including the 60 reserved
+as a holdout.
+
+The reader it gets now carries the run's snapshot and a ceiling at
+`train_end`, so the evaluation period, the holdout and any later backfill are
+unreachable rather than merely unmentioned. The dates are still passed,
+because a fitter needs to know what period it is fitting."""
 
 
 def walk_forward(
@@ -239,10 +257,10 @@ def walk_forward(
 
     Args:
         strategy: used for both sides when `fit` is None.
-        fit: given the training period, returns the strategy to evaluate with.
-            It is handed the training dates and nothing else — the evaluation
-            period is not passed, so a fitter cannot see what it will be
-            judged on even if it wanted to.
+        fit: given the training period, returns the strategy to evaluate
+            with. It is handed a reader bounded at `train_end`, so the
+            evaluation period and the holdout cannot be read at all — not
+            merely omitted from its arguments.
     """
     instrument = session.get(Instrument, request.instrument_id)
     if instrument is None:
@@ -263,11 +281,21 @@ def walk_forward(
 
     results: list[WindowResult] = []
     for window in split.windows:
-        chosen = (
-            fit(session, request.instrument_id, window.train_start, window.train_end)
-            if fit is not None
-            else strategy
-        )
+        if fit is None:
+            chosen = strategy
+        else:
+            # Bounded at the training period's close: everything after it —
+            # the evaluation window, the holdout, a later backfill — cannot be
+            # read, rather than merely not being mentioned.
+            training_view = PitReader(session, data_snapshot_at=snapshot).bounded(
+                calendar.session_close(window.train_end)
+            )
+            chosen = fit(
+                training_view,
+                request.instrument_id,
+                window.train_start,
+                window.train_end,
+            )
         for sample, lo, hi in (
             (SampleType.IN_SAMPLE, window.train_start, window.train_end),
             (SampleType.OUT_OF_SAMPLE, window.eval_start, window.eval_end),

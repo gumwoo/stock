@@ -20,6 +20,12 @@ It is also the only place in `app.backtest` permitted to hold a session. CI
 forbids `engine`, `metrics`, `walkforward` and `execution` from importing
 SQLAlchemy at all, so a strategy that wants data has no route but this one.
 
+**A reader can be given a ceiling.** `bounded(not_after)` returns one that
+refuses to be positioned past an instant, which is how anything that must not
+see beyond a point — a parameter fitter, above all — is handed data. Giving it
+a session instead would make every guarantee here advisory, since it could
+query whatever it liked.
+
 **Reading and filling are different questions.** `bars` returns only completed
 bars, because a strategy must not see a close that has not happened.
 `opening_price` returns one price from a bar that is still open, because an
@@ -61,7 +67,7 @@ class PitReader:
     for the whole run and is what makes a re-run reproducible.
     """
 
-    __slots__ = ("_asof", "_session", "_snapshot")
+    __slots__ = ("_asof", "_not_after", "_session", "_snapshot")
 
     def __init__(
         self,
@@ -69,10 +75,19 @@ class PitReader:
         *,
         data_snapshot_at: datetime,
         asof: datetime | None = None,
+        not_after: datetime | None = None,
     ) -> None:
         self._session = session
         self._snapshot = ensure_utc(data_snapshot_at, field="data_snapshot_at")
         self._asof = ensure_utc(asof, field="asof") if asof is not None else None
+        self._not_after = (
+            ensure_utc(not_after, field="not_after") if not_after is not None else None
+        )
+        if self._asof is not None and self._not_after is not None and self._asof > self._not_after:
+            raise PitViolationError(
+                f"asof {self._asof.isoformat()} is past this reader's ceiling "
+                f"{self._not_after.isoformat()}"
+            )
 
     @property
     def asof(self) -> datetime:
@@ -84,6 +99,33 @@ class PitReader:
     def data_snapshot_at(self) -> datetime:
         return self._snapshot
 
+    @property
+    def not_after(self) -> datetime | None:
+        """The latest instant this reader will ever answer for, if bounded."""
+        return self._not_after
+
+    def bounded(self, not_after: datetime) -> PitReader:
+        """A reader that cannot be positioned past `not_after`.
+
+        For handing data to something that must not see beyond a point — a
+        parameter fitter, above all. Passing a raw session instead would make
+        every guarantee in this module advisory: the caller could query
+        whatever it liked, including the holdout.
+
+        Ceilings only tighten. Bounding an already-bounded reader keeps the
+        earlier limit if it was stricter, so a nested caller cannot widen its
+        own view by rebounding.
+        """
+        ceiling = ensure_utc(not_after, field="not_after")
+        if self._not_after is not None:
+            ceiling = min(ceiling, self._not_after)
+        return PitReader(
+            self._session,
+            data_snapshot_at=self._snapshot,
+            asof=self._asof,
+            not_after=ceiling,
+        )
+
     def at(self, asof: datetime) -> PitReader:
         """A reader positioned at a new simulation instant, same snapshot.
 
@@ -91,6 +133,12 @@ class PitReader:
         across a step cannot silently start answering for a later moment.
         """
         moment = ensure_utc(asof, field="asof")
+        if self._not_after is not None and moment > self._not_after:
+            raise PitViolationError(
+                f"simulation instant {moment.isoformat()} is past this reader's "
+                f"ceiling {self._not_after.isoformat()}; it was bounded so that "
+                "what lies beyond could not be read at all"
+            )
         if moment > self._snapshot:
             # Simulating past the snapshot is not a point-in-time question any
             # more: beyond it the two filters stop agreeing about what exists,
@@ -99,7 +147,12 @@ class PitReader:
                 f"simulation instant {moment.isoformat()} is after the data snapshot "
                 f"{self._snapshot.isoformat()}; the run would read data it did not have"
             )
-        return PitReader(self._session, data_snapshot_at=self._snapshot, asof=moment)
+        return PitReader(
+            self._session,
+            data_snapshot_at=self._snapshot,
+            asof=moment,
+            not_after=self._not_after,
+        )
 
     # --- prices -----------------------------------------------------------
 

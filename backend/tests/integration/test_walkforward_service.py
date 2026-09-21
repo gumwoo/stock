@@ -25,6 +25,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.backtest.engine import CostModel, MarketData, Signal
+from app.backtest.pit_repository import PitViolationError, snapshot_now
 from app.backtest.strategies import BuyAndHold, MovingAverageCross
 from app.backtest.walkforward import SampleType, WalkForwardError
 from app.config import get_settings
@@ -165,7 +166,7 @@ class TestNothingWasFitted:
     def test_supplying_a_fitter_reports_fitted_true(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument
 
-        def fit(session: Session, iid: int, lo: date, hi: date) -> MovingAverageCross:
+        def fit(view: MarketData, iid: int, lo: date, hi: date) -> MovingAverageCross:
             return MovingAverageCross(short=10, long=30)
 
         report = svc.walk_forward(
@@ -181,11 +182,25 @@ class TestNothingWasFitted:
 
 
 class TestTheFitterCannotSeeAhead:
+    """Not "was not told about", but "cannot read".
+
+    The first version passed the fitter a raw SQLAlchemy session and argued it
+    could not look ahead because the evaluation dates were not among its
+    arguments. True, and irrelevant: a query returns everything. Measured
+    against Samsung, every fitter call could read all 488 bars, including the
+    60 reserved as a holdout — so the isolation the generator provides was
+    defeated entirely through this path.
+
+    A fitter is the one place in a walk-forward where someone would look
+    ahead, which is why it now gets the narrowest view in the system rather
+    than the widest.
+    """
+
     def test_it_receives_only_the_training_period(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument
         seen: list[tuple[date, date]] = []
 
-        def fit(session: Session, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
             seen.append((lo, hi))
             return BuyAndHold()
 
@@ -213,7 +228,7 @@ class TestTheFitterCannotSeeAhead:
             def evaluate(self, data: MarketData, instrument_id: int) -> Signal:
                 return Signal.HOLD
 
-        def fit(session: Session, instrument_id: int, lo: date, hi: date) -> NeverTrades:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> NeverTrades:
             return NeverTrades()
 
         report = svc.walk_forward(
@@ -226,6 +241,133 @@ class TestTheFitterCannotSeeAhead:
         )
 
         assert all(w.trades == 0 for w in report.windows)
+
+    def test_it_cannot_read_a_bar_from_after_the_training_period(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """A distinctive bar planted past every training window."""
+        s, iid = instrument
+        candle_repo.save_revisions(s, [_row(iid, HISTORY[-1], Decimal("999"))])
+        s.commit()
+
+        latest: list[Decimal] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
+            latest.append(bars[-1].close)
+            assert bars[-1].ts.date() <= hi
+            return BuyAndHold()
+
+        svc.walk_forward(
+            s,
+            BuyAndHold(),
+            request_for(iid),
+            train_sessions=120,
+            eval_sessions=60,
+            holdout_sessions=60,
+            fit=fit,
+        )
+
+        assert latest
+        assert Decimal("999") not in latest
+
+    def test_positioning_past_the_training_end_raises(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """Reaching for it is refused, not quietly answered with less."""
+        s, iid = instrument
+        refused: list[bool] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            try:
+                view.at(US.session_close(HISTORY[-1]))
+                refused.append(False)
+            except PitViolationError:
+                refused.append(True)
+            return BuyAndHold()
+
+        svc.walk_forward(
+            s,
+            BuyAndHold(),
+            request_for(iid),
+            train_sessions=120,
+            eval_sessions=60,
+            holdout_sessions=60,
+            fit=fit,
+        )
+
+        assert refused and all(refused)
+
+    def test_it_cannot_widen_its_own_view_by_rebounding(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """Ceilings only tighten."""
+        s, iid = instrument
+        results: list[bool] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            wider = view.bounded(US.session_close(HISTORY[-1]))  # type: ignore[attr-defined]
+            try:
+                wider.at(US.session_close(HISTORY[-1]))
+                results.append(False)
+            except PitViolationError:
+                results.append(True)
+            return BuyAndHold()
+
+        svc.walk_forward(
+            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60, fit=fit
+        )
+
+        assert results and all(results)
+
+    def test_a_later_backfill_is_invisible_to_the_fitter(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """The snapshot binds here too, not only inside the simulation."""
+        s, iid = instrument
+        snapshot = snapshot_now(s)
+        s.commit()
+
+        early = HISTORY[10]
+        candle_repo.save_revisions(s, [_row(iid, early, Decimal("777"))])
+        s.commit()
+
+        seen: list[Decimal] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
+            seen.extend(b.close for b in bars if b.ts.date() == early)
+            return BuyAndHold()
+
+        svc.walk_forward(
+            s,
+            BuyAndHold(),
+            request_for(iid),
+            train_sessions=120,
+            eval_sessions=60,
+            fit=fit,
+            data_snapshot_at=snapshot,
+        )
+
+        assert seen
+        assert Decimal("777") not in seen
+
+
+class TestFoldsAreIndependentRuns:
+    """The dates tile; the portfolios do not continue across them."""
+
+    def test_each_window_is_measured_on_its_own(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report = svc.walk_forward(
+            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60
+        )
+
+        out = report.of(SampleType.OUT_OF_SAMPLE)
+        assert len(out) > 1
+        # Buy-and-hold never sells, so a window inheriting a position would
+        # have no cash and record no fills of its own.
+        assert all(w.performance is not None for w in out)
+        assert all(w.sessions == 60 for w in out)
 
 
 class TestHoldoutIsNeverRun:
