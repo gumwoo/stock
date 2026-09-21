@@ -24,11 +24,13 @@ from app.collectors.dart_fundamental import (
     ACCOUNT_MAP,
     INSTANTANEOUS,
     PER_SHARE,
+    DartFundamentalCollector,
     _parse_amount,
     filed_date_from_receipt,
     fiscal_period_bounds,
     report_period_end,
 )
+from app.core.calendar import Market, MarketCalendar
 
 
 class TestFiscalPeriodBounds:
@@ -114,9 +116,24 @@ class TestAccountMapping:
             assert concept in REQUIRED_MONTHS, f"{concept} is not a concept the engine reads"
 
     def test_mapping_is_on_taxonomy_ids_not_korean_labels(self) -> None:
-        """Labels vary between filers; the IFRS ids do not."""
+        """Labels vary between filers; the taxonomy ids do not.
+
+        Three namespaces, not two. IFRS renamed its prefix from `ifrs` to
+        `ifrs-full` with the 2018 edition and DART returns whichever the filing
+        used, so both spellings are legitimate ids — see
+        `TestBothIfrsNamespaces` for why that matters.
+        """
         for account_id in ACCOUNT_MAP:
-            assert account_id.startswith(("ifrs-full_", "dart_")), account_id
+            assert account_id.startswith(("ifrs-full_", "ifrs_", "dart_")), account_id
+
+    def test_every_ifrs_concept_is_mapped_under_both_prefixes(self) -> None:
+        """Adding one spelling and forgetting the other is the original bug."""
+        for account_id, concept in list(ACCOUNT_MAP.items()):
+            if not account_id.startswith("ifrs"):
+                continue
+            local = account_id.split("_", 1)[1]
+            assert ACCOUNT_MAP.get(f"ifrs_{local}") == concept
+            assert ACCOUNT_MAP.get(f"ifrs-full_{local}") == concept
 
     def test_balances_are_marked_instantaneous(self) -> None:
         """So a balance is never given a span and divided by a flow."""
@@ -264,3 +281,113 @@ class TestFilingPagination:
         )
 
         assert all(r.period_of_report is not None for r in rows)
+
+
+LEGACY = [
+    {
+        "account_id": "ifrs_Revenue",
+        "rcept_no": "20160330003536",
+        "currency": "KRW",
+        "thstrm_amount": "200,653,482",
+        "frmtrm_amount": "206,205,987",
+        "bfefrmtrm_amount": "228,692,667",
+    },
+    {
+        "account_id": "ifrs_ProfitLoss",
+        "rcept_no": "20160330003536",
+        "currency": "KRW",
+        "thstrm_amount": "19,060,144",
+        "frmtrm_amount": "23,394,358",
+        "bfefrmtrm_amount": "30,474,764",
+    },
+    {
+        "account_id": "ifrs_BasicEarningsLossPerShare",
+        "rcept_no": "20160330003536",
+        "currency": "KRW",
+        "thstrm_amount": "126,305",
+        "frmtrm_amount": "153,105",
+        "bfefrmtrm_amount": "197,841",
+    },
+    {
+        "account_id": "ifrs_Assets",
+        "rcept_no": "20160330003536",
+        "currency": "KRW",
+        "thstrm_amount": "242,179,521",
+        "frmtrm_amount": "230,422,958",
+        "bfefrmtrm_amount": "214,075,018",
+    },
+]
+
+
+class TestBothIfrsNamespaces:
+    """A filing's prefix is a fact about when it was filed, not about what it says.
+
+    IFRS moved from `ifrs` to `ifrs-full` with its 2018 taxonomy, and DART's
+    full-statement endpoint returns whichever spelling the filing used. Asked
+    directly for Samsung, business years 2015 through 2018 come back under
+    `ifrs_` and 2019 onwards under `ifrs-full_`.
+
+    Mapping only the newer spelling recognised one concept in nine for every
+    year before 2019 — and the survivor was `dart_OperatingIncomeLoss`, a DART
+    extension that never moved. So every year still returned rows. Nothing was
+    empty, nothing errored, and four years of Korean fundamentals held a single
+    figure that the scorer cannot anchor on, which a ten-year backtest then ran
+    straight through.
+
+    The values below are the shape DART actually returns, with the amounts
+    shortened.
+    """
+
+    def rows(self, items: list[dict[str, object]], year: int = 2015) -> list[object]:
+        collector = DartFundamentalCollector()
+        rows, _ = collector._to_rows(
+            items,  # type: ignore[arg-type]
+            instrument_id=1,
+            business_year=year,
+            fiscal_end_month=12,
+            calendar=MarketCalendar(Market.KR),
+        )
+        return list(rows)
+
+    def test_legacy_ids_become_the_same_concepts(self) -> None:
+        produced = {r.concept for r in self.rows(LEGACY)}  # type: ignore[attr-defined]
+
+        assert produced == {
+            "Revenues",
+            "NetIncomeLoss",
+            "EarningsPerShareBasic",
+            "Assets",
+        }
+
+    def test_the_two_spellings_produce_identical_rows(self) -> None:
+        """Only the id differs, so only the id may differ in the result."""
+        modern = [
+            {**item, "account_id": item["account_id"].replace("ifrs_", "ifrs-full_")}
+            for item in LEGACY
+        ]
+
+        old = sorted(
+            (r.concept, r.period_end, r.value, r.unit)  # type: ignore[attr-defined]
+            for r in self.rows(LEGACY)
+        )
+        new = sorted(
+            (r.concept, r.period_end, r.value, r.unit)  # type: ignore[attr-defined]
+            for r in self.rows(modern)
+        )
+
+        assert old == new
+
+    def test_the_comparative_columns_still_reach_back_two_years(self) -> None:
+        """The legacy path must keep the property the whole collector rests on:
+        one report carries three years."""
+        ends = sorted(
+            {r.period_end for r in self.rows(LEGACY)}  # type: ignore[attr-defined]
+        )
+
+        assert ends == [date(2013, 12, 31), date(2014, 12, 31), date(2015, 12, 31)]
+
+    def test_a_prefix_we_do_not_know_is_still_ignored(self) -> None:
+        """Accepting both spellings is not accepting anything that looks close."""
+        unknown = [{**LEGACY[0], "account_id": "entity00126380_Revenue"}]
+
+        assert self.rows(unknown) == []
