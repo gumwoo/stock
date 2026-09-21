@@ -19,8 +19,8 @@ not a differently-scoped answer that looks like the one requested.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -32,6 +32,7 @@ from app.backtest.engine import BacktestResult, CostModel, MarketData, Strategy
 from app.backtest.execution import ExecutionModel
 from app.backtest.metrics import Performance, summarise
 from app.backtest.pit_repository import PitReader, coverage, snapshot_now
+from app.backtest.strategies import StrategyDefinition
 from app.backtest.walkforward import SampleType
 from app.core.calendar import MarketCalendar
 from app.core.types import Interval
@@ -167,7 +168,7 @@ def execute(
     )
 
 
-StrategyFitter = Callable[[MarketData, int, date, date], Strategy]
+StrategyFitter = Callable[[MarketData, int, date, date], StrategyDefinition]
 """Chooses a strategy from a training period.
 
 Receives a `MarketData` reader confined to that period at both ends, not a
@@ -181,41 +182,55 @@ The ceiling makes the evaluation period, the holdout and any later backfill
 unreachable rather than merely unmentioned; the floor is what makes a rolling
 split actually roll. The dates are still passed, because a fitter needs to
 know what period it is fitting.
+
+It returns a `StrategyDefinition` rather than a live strategy, so what each
+fold actually chose is recorded alongside the fold's result. A run that stores
+only the fitter's name cannot answer why window 3 behaved as it did.
 """
 
 
 @dataclass(frozen=True, slots=True)
 class StrategySpec:
-    """What was run, named well enough to be stored and compared.
+    """What was run, in a form that can be stored and rebuilt.
 
-    A `Strategy` is a live object: two of them cannot be compared, and neither
-    can be written to a row. `version` is what persists and what a later
-    reader matches on, so it must change whenever the behaviour does — moving
-    a moving average from 20/60 to 10/30 produces different trades from
-    identical data, which makes it a different strategy and not a tweak.
+    Exactly one of `definition` and `fit` is given. A fixed rule and a rule
+    chosen per window are different experiments, and a run is one of them
+    throughout rather than whichever the caller passed most recently.
 
-    Exactly one of `strategy` and `fit` is given. A fixed rule and a rule
-    chosen per window are different experiments, and a run must be one of
-    them throughout rather than whichever the caller passed most recently.
+    For a fixed run the version comes *from* the definition rather than beside
+    it. An earlier version let a caller write both, and they could disagree
+    without anything failing: a spec could run 10/30 while recording 20/60,
+    and two specs sharing one version could behave differently. Neither broke
+    a backtest; both broke the reproducibility a stored run exists to provide.
     """
 
-    version: str
-    strategy: Strategy | None = None
+    definition: StrategyDefinition | None = None
     fit: StrategyFitter | None = None
-    params: Mapping[str, object] = field(default_factory=dict)
+    fitter_version: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.version.strip():
-            raise ValueError("a strategy spec needs a version")
-        if (self.strategy is None) == (self.fit is None):
+        if (self.definition is None) == (self.fit is None):
             raise ValueError(
-                "give exactly one of strategy or fit: a fixed rule and a fitted "
+                "give exactly one of definition or fit: a fixed rule and a fitted "
                 "one are different experiments"
+            )
+        if self.fit is not None and not (self.fitter_version or "").strip():
+            raise ValueError(
+                "a fitted run needs a fitter_version: the fitter is what chose "
+                "the parameters, so it is the thing that has to be reproducible"
             )
 
     @property
     def fitted(self) -> bool:
         return self.fit is not None
+
+    @property
+    def version(self) -> str:
+        """What a stored row records, and what a later reader matches on."""
+        if self.definition is not None:
+            return self.definition.version
+        assert self.fitter_version is not None  # guaranteed above
+        return self.fitter_version
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +241,7 @@ class WindowResult:
     sample_type: SampleType
     start: date
     end: date
+    chosen: StrategyDefinition
     performance: Performance | None
     sessions: int
     trades: int
@@ -320,8 +336,8 @@ def walk_forward(
     results: list[WindowResult] = []
     for window in split.windows:
         if spec.fit is None:
-            chosen = spec.strategy
-            assert chosen is not None  # guaranteed by StrategySpec
+            definition = spec.definition
+            assert definition is not None  # guaranteed by StrategySpec
         else:
             # Confined to the training period at both ends. The ceiling keeps
             # the evaluation window, the holdout and any later backfill
@@ -333,12 +349,13 @@ def walk_forward(
                 not_before=calendar.session_open(window.train_start),
                 not_after=calendar.session_close(window.train_end),
             )
-            chosen = spec.fit(
+            definition = spec.fit(
                 training_view,
                 request.instrument_id,
                 window.train_start,
                 window.train_end,
             )
+        chosen = definition.build()
         for sample, lo, hi in (
             (SampleType.IN_SAMPLE, window.train_start, window.train_end),
             (SampleType.OUT_OF_SAMPLE, window.eval_start, window.eval_end),
@@ -357,6 +374,7 @@ def walk_forward(
                     sample_type=sample,
                     start=lo,
                     end=hi,
+                    chosen=definition,
                     performance=summarise(result.equity_curve, result.trades),
                     sessions=result.sessions,
                     trades=len(result.trades),
@@ -436,7 +454,7 @@ def evaluate_holdout(
         sessions[0] if report.anchored else sessions[max(0, opening - report.train_sessions)]
     )
 
-    chosen = report.spec.strategy
+    definition = report.spec.definition
     if report.spec.fit is not None:
         # Same confinement as every other fitting: it may read up to the last
         # session before the holdout opens and no further.
@@ -444,10 +462,11 @@ def evaluate_holdout(
             not_before=calendar.session_open(final_train_start),
             not_after=calendar.session_close(final_train_end),
         )
-        chosen = report.spec.fit(
+        definition = report.spec.fit(
             training_view, request.instrument_id, final_train_start, final_train_end
         )
-    assert chosen is not None  # guaranteed by StrategySpec
+    assert definition is not None  # guaranteed by StrategySpec
+    chosen = definition.build()
 
     outcome = execute(
         session,
@@ -463,6 +482,7 @@ def evaluate_holdout(
         sample_type=SampleType.HOLDOUT,
         start=report.holdout_start,
         end=report.holdout_end,
+        chosen=definition,
         performance=summarise(result.equity_curve, result.trades),
         sessions=result.sessions,
         trades=len(result.trades),

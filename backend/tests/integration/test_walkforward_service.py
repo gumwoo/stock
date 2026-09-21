@@ -25,9 +25,14 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.backtest.engine import CostModel, MarketData, Signal
+from app.backtest.engine import CostModel, MarketData
 from app.backtest.pit_repository import PitViolationError, snapshot_now
-from app.backtest.strategies import BuyAndHold, MovingAverageCross
+from app.backtest.strategies import (
+    StrategyDefinition,
+    UnknownStrategyError,
+    buy_and_hold,
+    moving_average_cross,
+)
 from app.backtest.walkforward import SampleType, WalkForwardError
 from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
@@ -98,12 +103,12 @@ def instrument(db: object) -> Iterator[tuple[Session, int]]:
         s.commit()
 
 
-def fixed(strategy: object = None) -> StrategySpec:
-    return StrategySpec(version="test-fixed@v1", strategy=strategy or BuyAndHold())
+def fixed(definition: StrategyDefinition | None = None) -> StrategySpec:
+    return StrategySpec(definition=definition or buy_and_hold())
 
 
 def fitted(fit: object) -> StrategySpec:
-    return StrategySpec(version="test-fitted@v1", fit=fit)  # type: ignore[arg-type]
+    return StrategySpec(fit=fit, fitter_version="test-fitter@v1")  # type: ignore[arg-type]
 
 
 def request_for(iid: int) -> RunRequest:
@@ -142,7 +147,7 @@ class TestTheReport:
         s, iid = instrument
         report = svc.walk_forward(
             s,
-            fixed(MovingAverageCross(short=10, long=30)),
+            fixed(moving_average_cross(short=10, long=30)),
             request_for(iid),
             train_sessions=120,
             eval_sessions=60,
@@ -175,8 +180,8 @@ class TestNothingWasFitted:
     def test_supplying_a_fitter_reports_fitted_true(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument
 
-        def fit(view: MarketData, iid: int, lo: date, hi: date) -> MovingAverageCross:
-            return MovingAverageCross(short=10, long=30)
+        def fit(view: MarketData, iid: int, lo: date, hi: date) -> StrategyDefinition:
+            return moving_average_cross(short=10, long=30)
 
         report = svc.walk_forward(
             s,
@@ -208,9 +213,9 @@ class TestTheFitterCannotSeeAhead:
         s, iid = instrument
         seen: list[tuple[date, date]] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             seen.append((lo, hi))
-            return BuyAndHold()
+            return buy_and_hold()
 
         report = svc.walk_forward(
             s,
@@ -231,28 +236,28 @@ class TestTheFitterCannotSeeAhead:
         """Otherwise the fitter is decorative.
 
         There is no longer a second strategy to confuse it with — a spec holds
-        a fixed rule or a fitter, never both — so this asserts the fitter's
-        output is what the engine consults, against a fixed run that behaves
-        visibly differently.
+        a fixed definition or a fitter, never both — so this asserts the
+        fitter's output is what the engine consults, against a fixed run that
+        behaves visibly differently.
         """
         s, iid = instrument
 
-        class AlwaysAbstains:
-            def evaluate(self, data: MarketData, instrument_id: int) -> Signal:
-                return Signal.ABSTAIN
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
+            return moving_average_cross(short=10, long=30)
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> AlwaysAbstains:
-            return AlwaysAbstains()
-
-        abstaining = svc.walk_forward(
+        crossing = svc.walk_forward(
             s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60
         )
-        judging = svc.walk_forward(
+        holding = svc.walk_forward(
             s, fixed(), request_for(iid), train_sessions=120, eval_sessions=60
         )
 
-        assert all(w.abstained == w.sessions for w in abstaining.windows)
-        assert all(w.abstained == 0 for w in judging.windows)
+        # The crossover has no 30-bar history at the very start and abstains;
+        # buy-and-hold judges from the first session.
+        assert crossing.of(SampleType.IN_SAMPLE)[0].abstained == 29
+        assert holding.of(SampleType.IN_SAMPLE)[0].abstained == 0
+        assert all(w.chosen.kind == "moving_average_cross" for w in crossing.windows)
+        assert all(w.chosen.kind == "buy_and_hold" for w in holding.windows)
 
     def test_it_cannot_read_a_bar_from_after_the_training_period(
         self, instrument: tuple[Session, int]
@@ -264,11 +269,11 @@ class TestTheFitterCannotSeeAhead:
 
         latest: list[Decimal] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
             latest.append(bars[-1].close)
             assert bars[-1].ts.date() <= hi
-            return BuyAndHold()
+            return buy_and_hold()
 
         svc.walk_forward(
             s,
@@ -289,13 +294,13 @@ class TestTheFitterCannotSeeAhead:
         s, iid = instrument
         refused: list[bool] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             try:
                 view.at(US.session_close(HISTORY[-1]))
                 refused.append(False)
             except PitViolationError:
                 refused.append(True)
-            return BuyAndHold()
+            return buy_and_hold()
 
         svc.walk_forward(
             s,
@@ -315,7 +320,7 @@ class TestTheFitterCannotSeeAhead:
         s, iid = instrument
         results: list[bool] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             wider = view.windowed(  # type: ignore[attr-defined]
                 not_before=US.session_open(HISTORY[0]),
                 not_after=US.session_close(HISTORY[-1]),
@@ -325,7 +330,7 @@ class TestTheFitterCannotSeeAhead:
                 results.append(False)
             except PitViolationError:
                 results.append(True)
-            return BuyAndHold()
+            return buy_and_hold()
 
         svc.walk_forward(s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60)
 
@@ -345,10 +350,10 @@ class TestTheFitterCannotSeeAhead:
 
         seen: list[Decimal] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
             seen.extend(b.close for b in bars if b.ts.date() == early)
-            return BuyAndHold()
+            return buy_and_hold()
 
         svc.walk_forward(
             s,
@@ -392,11 +397,11 @@ class TestRollingTrainingActuallyRolls:
         earliest: list[date] = []
         saw_555: list[bool] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
             earliest.append(bars[0].ts.date())
             saw_555.append(any(b.close == Decimal("555") for b in bars))
-            return BuyAndHold()
+            return buy_and_hold()
 
         report = svc.walk_forward(
             s,
@@ -418,10 +423,10 @@ class TestRollingTrainingActuallyRolls:
         s, iid = instrument
         starts: list[tuple[date, date]] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
             starts.append((lo, bars[0].ts.date()))
-            return BuyAndHold()
+            return buy_and_hold()
 
         svc.walk_forward(s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60)
 
@@ -436,10 +441,10 @@ class TestRollingTrainingActuallyRolls:
         s, iid = instrument
         counts: list[int] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
             counts.append(len(bars))
-            return BuyAndHold()
+            return buy_and_hold()
 
         svc.walk_forward(s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60)
 
@@ -452,10 +457,10 @@ class TestRollingTrainingActuallyRolls:
         s, iid = instrument
         starts: list[date] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
             starts.append(bars[0].ts.date())
-            return BuyAndHold()
+            return buy_and_hold()
 
         svc.walk_forward(
             s,
@@ -473,13 +478,13 @@ class TestRollingTrainingActuallyRolls:
         s, iid = instrument
         refused: list[bool] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             try:
                 view.at(US.session_close(HISTORY[0]))
                 refused.append(False)
             except PitViolationError:
                 refused.append(True)
-            return BuyAndHold()
+            return buy_and_hold()
 
         svc.walk_forward(s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60)
 
@@ -634,9 +639,9 @@ class TestTheFinalHoldoutEvaluation:
         s, iid = instrument
         calls: list[int] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             calls.append(1)
-            return BuyAndHold()
+            return buy_and_hold()
 
         report = self._report(s, iid, spec=fitted(fit))
         during_walk_forward = len(calls)
@@ -651,10 +656,10 @@ class TestTheFinalHoldoutEvaluation:
         s, iid = instrument
         seen: list[tuple[date, date, date]] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
             seen.append((lo, hi, bars[-1].ts.date()))
-            return BuyAndHold()
+            return buy_and_hold()
 
         report = self._report(s, iid, spec=fitted(fit))
         assert report.holdout_start is not None
@@ -673,14 +678,14 @@ class TestTheFinalHoldoutEvaluation:
         holdout_end: list[date] = []
         refused: list[bool] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             if holdout_end:
                 try:
                     view.at(US.session_close(holdout_end[0]))
                     refused.append(False)
                 except PitViolationError:
                     refused.append(True)
-            return BuyAndHold()
+            return buy_and_hold()
 
         report = self._report(s, iid, spec=fitted(fit))
         assert report.holdout_end is not None
@@ -696,10 +701,10 @@ class TestTheFinalHoldoutEvaluation:
         s, iid = instrument
         lengths: list[int] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
             lengths.append(len(bars))
-            return BuyAndHold()
+            return buy_and_hold()
 
         report = self._report(s, iid, spec=fitted(fit))
         lengths.clear()
@@ -715,10 +720,10 @@ class TestTheFinalHoldoutEvaluation:
         s, iid = instrument
         starts: list[date] = []
 
-        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
             bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
             starts.append(bars[0].ts.date())
-            return BuyAndHold()
+            return buy_and_hold()
 
         report = self._report(s, iid, spec=fitted(fit), anchored=True)
         starts.clear()
@@ -729,31 +734,102 @@ class TestTheFinalHoldoutEvaluation:
 
 
 class TestTheSpecIsTheExperiment:
-    """A run is a fixed rule or a fitted one, throughout."""
+    """A run is a fixed rule or a fitted one, throughout — and it is rebuildable.
 
-    def test_both_strategy_and_fitter_is_refused(self) -> None:
+    An earlier spec carried a version, free-form params and a live strategy
+    object as three independent fields, so all three could disagree:
+
+        StrategySpec(
+            version="ma-cross@v1",
+            strategy=MovingAverageCross(short=10, long=30),
+            params={"short": 20, "long": 60},
+        )
+
+    ran 10/30 and would have stored 20/60. Two specs could also share a
+    version and behave differently. Neither broke a backtest; both broke the
+    reproducibility a stored run exists to provide.
+    """
+
+    def test_both_a_definition_and_a_fitter_is_refused(self) -> None:
         with pytest.raises(ValueError, match="exactly one"):
-            StrategySpec(version="v1", strategy=BuyAndHold(), fit=lambda *a: BuyAndHold())
+            StrategySpec(definition=buy_and_hold(), fit=lambda *a: buy_and_hold())
 
     def test_neither_is_refused(self) -> None:
         with pytest.raises(ValueError, match="exactly one"):
-            StrategySpec(version="v1")
+            StrategySpec()
 
-    def test_a_version_is_required(self) -> None:
-        """It is what persists, and what a later reader matches on."""
-        with pytest.raises(ValueError, match="needs a version"):
-            StrategySpec(version="   ", strategy=BuyAndHold())
+    def test_a_fitted_run_needs_a_fitter_version(self) -> None:
+        """The fitter chose the parameters, so it is the reproducible thing."""
+        with pytest.raises(ValueError, match="fitter_version"):
+            StrategySpec(fit=lambda *a: buy_and_hold())
+
+    def test_a_fixed_version_comes_from_the_definition(self) -> None:
+        """Not written beside it, so the two cannot disagree."""
+        spec = StrategySpec(definition=moving_average_cross(short=10, long=30))
+
+        assert spec.version == spec.definition.version  # type: ignore[union-attr]
+        assert spec.version == "ma-10-30@v1"
+
+    def test_params_are_the_constructors_arguments(self) -> None:
+        """So what a row says and what runs cannot drift apart silently."""
+        definition = moving_average_cross(short=10, long=30)
+        built = definition.build()
+
+        assert definition.params == {"short": 10, "long": 30}
+        assert (built.short, built.long) == (10, 30)  # type: ignore[union-attr]
+
+    def test_a_definition_that_cannot_be_built_is_refused(self) -> None:
+        with pytest.raises(UnknownStrategyError, match="no strategy kind"):
+            StrategyDefinition(kind="does_not_exist", version="v1").build()
+
+    def test_a_misspelled_parameter_fails_rather_than_defaulting(self) -> None:
+        """Falling back to a default would run something the row does not say."""
+        with pytest.raises(UnknownStrategyError, match="cannot build"):
+            StrategyDefinition(
+                kind="moving_average_cross",
+                version="v1",
+                params={"shrot": 10, "long": 30},
+            ).build()
 
     def test_the_report_carries_the_whole_experiment(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument
-        spec = StrategySpec(
-            version="ma-10-30@v1",
-            strategy=MovingAverageCross(short=10, long=30),
-            params={"short": 10, "long": 30},
+        report = svc.walk_forward(
+            s,
+            fixed(moving_average_cross(short=10, long=30)),
+            request_for(iid),
+            train_sessions=120,
+            eval_sessions=60,
         )
-        report = svc.walk_forward(s, spec, request_for(iid), train_sessions=120, eval_sessions=60)
 
         assert report.spec.version == "ma-10-30@v1"
-        assert report.spec.params == {"short": 10, "long": 30}
         assert report.request == request_for(iid)
         assert report.eval_sessions == 60
+
+    def test_every_window_records_what_actually_ran(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report = svc.walk_forward(
+            s,
+            fixed(moving_average_cross(short=10, long=30)),
+            request_for(iid),
+            train_sessions=120,
+            eval_sessions=60,
+        )
+
+        assert all(w.chosen.params == {"short": 10, "long": 30} for w in report.windows)
+
+    def test_a_fitter_records_each_folds_own_choice(self, instrument: tuple[Session, int]) -> None:
+        """A run storing only the fitter's name cannot say why window 3
+        behaved as it did."""
+        s, iid = instrument
+        lengths = iter([10, 15, 20, 25, 30, 35, 40, 45])
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> StrategyDefinition:
+            return moving_average_cross(short=next(lengths), long=60)
+
+        report = svc.walk_forward(
+            s, fitted(fit), request_for(iid), train_sessions=120, eval_sessions=60
+        )
+
+        chosen = [w.chosen.params["short"] for w in report.of(SampleType.OUT_OF_SAMPLE)]
+        assert len(set(chosen)) == len(chosen)
+        assert report.spec.version == "test-fitter@v1"
