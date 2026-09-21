@@ -26,6 +26,7 @@ window-by-window from the definitions its own rows hold.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -46,34 +47,72 @@ class ReproduceError(Exception):
     """The comparison could not be attempted."""
 
 
+# Every figure a window row records. Compared as a list rather than one by
+# one, so a measurement added to the table is checked from the moment it is
+# stored — the same reason `experiment_fields` exists on the run header.
+MEASUREMENTS: tuple[str, ...] = (
+    "sessions",
+    "observations",
+    "total_return",
+    "cagr",
+    "max_drawdown",
+    "sharpe",
+    "win_rate",
+    "profit_factor",
+    "trades",
+    "abstained",
+    "without_data",
+    "unfilled",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class WindowComparison:
-    """One stored measurement against its re-execution."""
+    """One stored measurement against its re-execution, in full.
+
+    An earlier version compared the total return and the trade count, and
+    called the result "reproduced". Everything else in the row could be
+    anything at all:
+
+        UPDATE backtest_window SET sharpe = 999, max_drawdown = 0.99,
+               abstained = 999, unfilled = 999, without_data = 999,
+               observations = 1, sessions = 1, cagr = 42, win_rate = 1,
+               profit_factor = 77;
+
+        reproduced = True   mismatches = 0
+
+    The caveat columns matter most there. A run whose abstentions or
+    stale-marked sessions were wrong is a run whose numbers describe a
+    different experiment, and those are exactly the fields a summary would
+    never show.
+    """
 
     window_index: int
     sample_type: SampleType
     start: date
     end: date
-    stored_return: float | None
-    replayed_return: float | None
-    stored_trades: int
-    replayed_trades: int
+    stored: Mapping[str, float | int | None]
+    replayed: Mapping[str, float | int | None]
+
+    @property
+    def differences(self) -> tuple[str, ...]:
+        return tuple(
+            name for name in MEASUREMENTS if not _same(self.stored[name], self.replayed[name])
+        )
 
     @property
     def matches(self) -> bool:
-        return (
-            _same(self.stored_return, self.replayed_return)
-            and self.stored_trades == self.replayed_trades
-        )
+        return not self.differences
 
     def describe(self) -> str:
+        where = f"{self.sample_type} #{self.window_index} {self.start}..{self.end}"
         if self.matches:
-            return f"{self.sample_type} #{self.window_index} {self.start}..{self.end} matches"
-        return (
-            f"{self.sample_type} #{self.window_index} {self.start}..{self.end}: "
-            f"return {_show(self.stored_return)} -> {_show(self.replayed_return)}, "
-            f"trades {self.stored_trades} -> {self.replayed_trades}"
+            return f"{where} matches"
+        changes = ", ".join(
+            f"{name} {_show(self.stored[name])} -> {_show(self.replayed[name])}"
+            for name in self.differences
         )
+        return f"{where}: {changes}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +128,7 @@ class Reproduction:
 
     @property
     def reproduced(self) -> bool:
-        """Whether every stored measurement came back identical."""
+        """Whether every stored measurement of every window came back identical."""
         return bool(self.windows) and all(w.matches for w in self.windows)
 
     @property
@@ -180,16 +219,30 @@ def _replay(session: Session, run: BacktestRun, window: BacktestWindow) -> Windo
         require_complete_sessions=run.require_complete_sessions,
     )
     performance: Performance | None = summarise(outcome.result.equity_curve, outcome.result.trades)
+    result = outcome.result
+
+    replayed: dict[str, float | int | None] = {
+        "sessions": result.sessions,
+        "observations": performance.observations if performance else 0,
+        "total_return": performance.total_return if performance else None,
+        "cagr": performance.cagr if performance else None,
+        "max_drawdown": performance.max_drawdown if performance else None,
+        "sharpe": performance.sharpe if performance else None,
+        "win_rate": performance.win_rate if performance else None,
+        "profit_factor": performance.profit_factor if performance else None,
+        "trades": len(result.trades),
+        "abstained": len(result.abstained_sessions),
+        "without_data": len(result.sessions_without_data),
+        "unfilled": len(result.unfilled),
+    }
 
     return WindowComparison(
         window_index=window.window_index,
         sample_type=window.sample_type,
         start=window.period_start,
         end=window.period_end,
-        stored_return=_as_float(window.total_return),
-        replayed_return=performance.total_return if performance else None,
-        stored_trades=window.trades,
-        replayed_trades=len(outcome.result.trades),
+        stored={name: _as_float(getattr(window, name)) for name in MEASUREMENTS},
+        replayed={name: _as_float(value) for name, value in replayed.items()},
     )
 
 

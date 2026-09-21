@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
 from app.core.types import Interval, SampleType
 from app.models import Base, Instrument
+from app.models.backtest import BacktestWindow
 from app.repositories import backtest_repo, candle_repo
 from app.repositories.backtest_repo import CodeVersion
 from app.repositories.candle_repo import CandleRow
@@ -168,16 +169,50 @@ class TestAStoredRunComesBackTheSame:
 
 
 class TestItCanTellWhenSomethingChanged:
-    """Without this, agreeing with everything would look like success."""
+    """Without this, agreeing with everything would look like success.
 
-    def test_an_altered_return_is_caught(self, instrument: tuple[Session, int]) -> None:
+    An earlier version compared the total return and the trade count only, so
+    every other figure in the row could be anything at all:
+
+        UPDATE backtest_window SET sharpe = 999, max_drawdown = 0.99,
+               abstained = 999, unfilled = 999, without_data = 999,
+               observations = 1, sessions = 1, cagr = 42, win_rate = 1,
+               profit_factor = 77;
+
+        reproduced = True   mismatches = 0
+
+    The caveat columns matter most. A run whose abstentions or stale-marked
+    sessions were wrong describes a different experiment, and those are the
+    figures a summary would never show.
+    """
+
+    @pytest.mark.parametrize(
+        ("column", "value"),
+        [
+            ("total_return", "0.99"),
+            ("trades", "77"),
+            ("sharpe", "999"),
+            ("max_drawdown", "0.99"),
+            ("cagr", "42"),
+            ("win_rate", "1"),
+            ("profit_factor", "77"),
+            ("sessions", "1"),
+            ("observations", "1"),
+            ("abstained", "999"),
+            ("without_data", "999"),
+            ("unfilled", "999"),
+        ],
+    )
+    def test_altering_any_stored_measurement_is_caught(
+        self, instrument: tuple[Session, int], column: str, value: str
+    ) -> None:
         s, iid = instrument
         _, run = store(s, iid)
 
         s.execute(
             text(
-                "UPDATE backtest_window SET total_return = total_return + 0.5 "
-                "WHERE run_id = :r AND window_index = 0 AND sample_type = 'OUT_OF_SAMPLE'"
+                f"UPDATE backtest_window SET {column} = {value} "
+                "WHERE run_id = :r AND window_index = 0 AND sample_type = 'IN_SAMPLE'"
             ),
             {"r": run.id},
         )
@@ -186,20 +221,27 @@ class TestItCanTellWhenSomethingChanged:
         result = rs.reproduce(s, run.id)
 
         assert not result.reproduced
-        assert len(result.mismatches) == 1
-        assert result.mismatches[0].sample_type is SampleType.OUT_OF_SAMPLE
+        assert column in result.mismatches[0].differences
 
-    def test_an_altered_trade_count_is_caught(self, instrument: tuple[Session, int]) -> None:
-        s, iid = instrument
-        _, run = store(s, iid)
+    def test_every_stored_measurement_is_compared(self, instrument: tuple[Session, int]) -> None:
+        """The guard that keeps this from decaying: a figure added to the
+        window table must be compared, not forgotten."""
+        stored = {c.name for c in BacktestWindow.__table__.columns}
+        identity = {
+            "id",
+            "run_id",
+            "window_index",
+            "sample_type",
+            "period_start",
+            "period_end",
+            "chosen_kind",
+            "chosen_version",
+            "chosen_params",
+            "chosen_fingerprint",
+            "ingested_at",
+        }
 
-        s.execute(
-            text("UPDATE backtest_window SET trades = trades + 3 WHERE run_id = :r"),
-            {"r": run.id},
-        )
-        s.commit()
-
-        assert not rs.reproduce(s, run.id).reproduced
+        assert stored - identity - set(rs.MEASUREMENTS) == set()
 
     def test_an_altered_recorded_strategy_is_caught(self, instrument: tuple[Session, int]) -> None:
         """Replaying from the row means a wrong row replays wrongly."""
@@ -232,6 +274,7 @@ class TestItCanTellWhenSomethingChanged:
 
         described = rs.reproduce(s, run.id).mismatches[0].describe()
 
+        assert "total_return" in described
         assert "+0.990000" in described
         assert "->" in described
 
@@ -350,3 +393,45 @@ class TestTheCommitIsCapturedWhenTheRunStarts:
         second = backtest_repo.resolve_commit()
 
         assert first is second
+
+
+class TestTheCodeVersionSettlesAtImport:
+    """Resolving lazily left a window where the answer could change.
+
+    Start the process on commit A, check out B, then run the first backtest:
+    the row would say B while the objects executing came from A. Python
+    imported the modules once, so the truthful value is the one at import.
+    """
+
+    def test_it_is_the_same_object_every_time(self) -> None:
+        assert backtest_repo.resolve_commit() is backtest_repo.resolve_commit()
+
+    def test_an_injected_sha_is_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """How a container should carry this. A deployed image has no `.git`,
+        and provenance that depends on one disappears where it matters most."""
+        monkeypatch.setenv("GIT_SHA", "e" * 40)
+        monkeypatch.setenv("GIT_DIRTY", "1")
+
+        resolved = backtest_repo._resolve_at_import()
+
+        assert isinstance(resolved, CodeVersion)
+        assert resolved.sha == "e" * 40
+        assert resolved.dirty is True
+
+    def test_a_missing_repository_is_an_error_not_a_placeholder(self, tmp_path: object) -> None:
+        """'unknown' in that column looks like a value."""
+        with pytest.raises(backtest_repo.ProvenanceError, match="cannot resolve"):
+            backtest_repo.resolve_commit(tmp_path)  # type: ignore[arg-type]
+
+    def test_a_failure_is_carried_rather_than_breaking_the_import(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unimportable module is worse than a run that cannot be stored."""
+        monkeypatch.delenv("GIT_SHA", raising=False)
+        monkeypatch.setattr(
+            backtest_repo,
+            "_read_git",
+            lambda root: (_ for _ in ()).throw(backtest_repo.ProvenanceError("no git here")),
+        )
+
+        assert isinstance(backtest_repo._resolve_at_import(), backtest_repo.ProvenanceError)

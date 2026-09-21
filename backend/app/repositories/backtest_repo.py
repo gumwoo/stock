@@ -12,6 +12,7 @@ check.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -58,41 +59,7 @@ class RunProvenance:
     started_at: datetime
 
 
-# Resolved once per process. See `resolve_commit` for why that is not merely
-# an optimisation.
-_RESOLVED: dict[Path, CodeVersion] = {}
-
-
-def resolve_commit(repo_root: Path | None = None) -> CodeVersion:
-    """The commit the code being run comes from, as of process start.
-
-    **Cached for the life of the process, deliberately.** The obvious reading
-    is that a run should resolve its commit when it starts, since resolving at
-    persist time would record whatever HEAD happened to be once a long run
-    finished. That is true as far as it goes, but it stops one step short:
-    Python imported these modules before any run began, so editing or checking
-    out files afterwards does not change the code that is executing. A worker
-    that has been up for an hour is still running what it loaded.
-
-    So the honest value is the one at import, and caching it is what makes the
-    column mean "the code that ran" rather than "the code on disk when
-    somebody asked". It is also 72ms cheaper per call, which is the lesser
-    reason.
-
-    Raises rather than returning a placeholder. "unknown" in this column would
-    be indistinguishable from a real value at a glance and would quietly
-    destroy the one axis the strategy definition and the data snapshot cannot
-    cover: a change to the code behind the strategy kind.
-
-    A dirty working tree is reported alongside the sha rather than smuggled
-    into it. A run made from uncommitted edits is not reproducible from the
-    commit alone, and the row must not imply otherwise — but the sha column
-    holds a sha, so the flag is its own field.
-    """
-    root = repo_root or Path(__file__).resolve().parents[3]
-    if root in _RESOLVED:
-        return _RESOLVED[root]
-
+def _read_git(root: Path) -> CodeVersion:
     try:
         sha = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
@@ -117,10 +84,60 @@ def resolve_commit(repo_root: Path | None = None) -> CodeVersion:
 
     if not sha:
         raise ProvenanceError(f"git reported no HEAD commit in {root}")
+    return CodeVersion(sha=sha, dirty=bool(dirty))
 
-    version = CodeVersion(sha=sha, dirty=bool(dirty))
-    _RESOLVED[root] = version
-    return version
+
+def _resolve_at_import() -> CodeVersion | ProvenanceError:
+    """Settle the code version as the process loads, not on first use.
+
+    Python imports these modules once; editing or checking out files afterwards
+    does not change the code that is executing. Resolving lazily left a window
+    where it could: start the process on commit A, check out B, then run the
+    first backtest, and the row would say B while the objects came from A.
+
+    `GIT_SHA` skips the filesystem entirely, which is how a container should
+    carry this — a deployed image has no `.git`, and provenance that depends on
+    one is provenance that disappears exactly where it matters most.
+
+    Failure is stored rather than raised: an unimportable module would be a
+    worse outcome than a run that cannot be stored, and the error surfaces at
+    `resolve_commit()` where it can be acted on.
+    """
+    injected = os.getenv("GIT_SHA", "").strip()
+    if injected:
+        return CodeVersion(sha=injected[:40], dirty=os.getenv("GIT_DIRTY", "").strip() == "1")
+    try:
+        return _read_git(Path(__file__).resolve().parents[3])
+    except ProvenanceError as exc:
+        return exc
+
+
+_AT_IMPORT: CodeVersion | ProvenanceError = _resolve_at_import()
+
+
+def resolve_commit(repo_root: Path | None = None) -> CodeVersion:
+    """The code this process is running, settled when it loaded.
+
+    Raises rather than returning a placeholder. "unknown" in that column would
+    be indistinguishable from a real value at a glance and would quietly
+    destroy the one axis a strategy definition and a data snapshot cannot
+    cover: a change to the code behind the strategy kind.
+
+    A dirty working tree is reported alongside the sha rather than smuggled
+    into it. A run made from uncommitted edits is not reproducible from the
+    commit alone, and the row must not imply otherwise — but the sha column
+    holds a sha, so the flag is its own field.
+
+    Args:
+        repo_root: read that repository now instead of using the value settled
+            at import. For tests and for tooling that asks about a checkout
+            other than the running one; a run's provenance should not use it.
+    """
+    if repo_root is not None:
+        return _read_git(repo_root)
+    if isinstance(_AT_IMPORT, ProvenanceError):
+        raise _AT_IMPORT
+    return _AT_IMPORT
 
 
 def save_run(
