@@ -149,6 +149,15 @@ reintroduces look-ahead bias without failing a single test.
   fix needs a historical fiscal calendar, which DART does not expose directly;
   due with the Korean universe expansion, alongside `max_gap_days` becoming a
   fiscal-calendar policy rather than a fixed 430 days.
+- Three sessions in Samsung's two-year history have no bar although
+  `exchange_calendars` (4.13.2) says KRX traded: 2025-09-19, 2026-06-03 and
+  2026-07-17. The middle one falls on a Korean local-election Wednesday, which
+  KRX closes for, so at least some of these are gaps in the calendar's holiday
+  data rather than gaps in ours. Backtests refuse such sessions by default and
+  name them; `require_complete_sessions=False` accepts them, marking each at
+  the last price that printed. Resolving it means either a newer calendar
+  release or a KRX temporary-holiday overlay, which is due with the Korean
+  universe expansion rather than now.
 - DART fundamentals request consolidated statements (`fs_div=CFS`) only. A
   company that files no consolidated statements therefore yields no facts at
   all, which the absence logic correctly reports as

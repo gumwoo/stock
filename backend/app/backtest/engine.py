@@ -22,6 +22,15 @@ price at the execution instant — a suspension, a halt, data we never collected
 — the order is dropped and counted. Carrying it forward to the next session
 would be inventing a trade the strategy never placed, and substituting a
 nearby price would be inventing the price.
+
+**Nothing fills outside the window.** A decision on the final session would
+otherwise execute on the session after it, which is outside the period the run
+claims to cover: the equity curve stops at the window's end while a position
+was acquired past it, so the result's own time axis disagrees with itself. The
+window ends at the last session's close, and an execution instant beyond that
+is recorded as unfilled rather than being reached for. Whether the data exists
+is beside the point — it usually does, since a backtest window is normally cut
+out of a longer history.
 """
 
 from __future__ import annotations
@@ -152,11 +161,24 @@ class BacktestResult:
     trades: list[ClosedTrade]
     unfilled: list[UnfilledOrder]
     abstained_sessions: list[date] = field(default_factory=list)
+    sessions_without_data: list[date] = field(default_factory=list)
     sessions: int = 0
 
     @property
     def final_equity(self) -> Decimal:
         return self.equity_curve[-1].value if self.equity_curve else Decimal("0")
+
+    @property
+    def simulated_full_period(self) -> bool:
+        """Whether every session in the window produced a bar of its own.
+
+        False means some sessions were marked at a stale price, or had no
+        price at all. Reporting a return over a period that was partly empty
+        is the same class of error as a Sharpe ratio from four observations:
+        the figure is arithmetically fine and describes something other than
+        what it claims.
+        """
+        return not self.sessions_without_data
 
 
 @dataclass(slots=True)
@@ -194,6 +216,12 @@ def run(
     """
     cost_model = costs if costs is not None else CostModel()
     sessions = calendar.sessions_between(start, end)
+    if not sessions:
+        raise ValueError(f"no trading sessions between {start} and {end}")
+
+    # The last instant this run is allowed to act on. A fill after it belongs
+    # to a period the run does not claim to cover.
+    window_end = calendar.session_close(sessions[-1])
 
     cash = starting_cash
     position = _Position()
@@ -202,6 +230,7 @@ def run(
     trades: list[ClosedTrade] = []
     unfilled: list[UnfilledOrder] = []
     abstained: list[date] = []
+    without_data: list[date] = []
 
     for day in sessions:
         decision_at = calendar.session_close(day)
@@ -209,10 +238,22 @@ def run(
 
         # Mark to market first, so the curve reflects the portfolio the
         # strategy is about to judge rather than the one it produces.
-        close = _latest_close(view, instrument_id, interval, decision_at)
-        if close is not None:
-            cash_plus_stock = cash + close * position.quantity
-            curve.append(EquityPoint(day=day, value=cash_plus_stock))
+        mark = _latest_bar(view, instrument_id, interval, decision_at)
+        if mark is None:
+            # Nothing has ever printed by this session, so there is no value to
+            # record. The window reaches back past the data.
+            without_data.append(day)
+        else:
+            if mark.ts != calendar.session_open(day):
+                # The session itself produced no bar — a halt, a suspension, a
+                # stretch the collector missed. The portfolio is still worth
+                # something and the honest mark is the last price the market
+                # actually printed, so the curve continues. But the session is
+                # recorded, because "we marked this day at a stale price" and
+                # "this day traded" are different facts and only the caller
+                # can decide whether the difference matters.
+                without_data.append(day)
+            curve.append(EquityPoint(day=day, value=cash + mark.close * position.quantity))
 
         signal = strategy.evaluate(view, instrument_id)
 
@@ -236,6 +277,18 @@ def run(
             model=execution_model,
             bar_minutes=bar_minutes,
         )
+
+        if execution_at > window_end:
+            unfilled.append(
+                UnfilledOrder(
+                    instrument_id=instrument_id,
+                    decision_at=decision_at,
+                    execution_at=execution_at,
+                    buying=buying,
+                    reason="execution instant falls outside the backtest window",
+                )
+            )
+            continue
 
         quoted = data.at(execution_at).opening_price(instrument_id, interval)
         if quoted is None or quoted <= 0:
@@ -305,18 +358,20 @@ def run(
         trades=trades,
         unfilled=unfilled,
         abstained_sessions=abstained,
+        sessions_without_data=without_data,
         sessions=len(sessions),
     )
 
 
-def _latest_close(
+def _latest_bar(
     data: MarketData, instrument_id: int, interval: Interval, asof: datetime
-) -> Decimal | None:
-    """The most recent completed close, for marking the portfolio.
+) -> Bar | None:
+    """The most recent completed bar, for marking the portfolio.
 
     Reading it through `bars` rather than by timestamp is deliberate: on a day
     the instrument did not trade, the portfolio is still worth something, and
-    the honest value is the last price the market actually printed.
+    the honest value is the last price the market actually printed. The caller
+    compares `ts` against the session to tell that case from a normal one.
     """
     recent = data.bars(instrument_id, interval, limit=1)
     if not recent:
@@ -330,7 +385,7 @@ def _latest_close(
             f"market data returned a bar completing {bar.available_at.isoformat()}, "
             f"after the simulation instant {asof.isoformat()}"
         )
-    return bar.close
+    return bar
 
 
 def _affordable_quantity(cash: Decimal, price: Decimal, costs: CostModel) -> int:

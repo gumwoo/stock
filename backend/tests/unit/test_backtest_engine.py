@@ -32,6 +32,12 @@ IID = 1
 # Ten consecutive sessions, so every date below is a real trading day.
 DAYS = US.sessions_between(date(2025, 11, 3), date(2025, 11, 14))
 
+# The session after the window. Priced in every fixture on purpose: a backtest
+# window is normally cut out of a longer history, so the data beyond `end`
+# exists. A test whose fake simply lacks tomorrow proves nothing about whether
+# the engine respects the window.
+BEYOND = US.sessions_between(date(2025, 11, 17), date(2025, 11, 17))[0]
+
 
 def _bar(day: date, price: str) -> Bar:
     value = Decimal(price)
@@ -97,7 +103,7 @@ class ScriptedStrategy:
 
 
 def flat_prices(value: str = "100") -> dict[date, str]:
-    return dict.fromkeys(DAYS, value)
+    return dict.fromkeys([*DAYS, BEYOND], value)
 
 
 def execute(
@@ -158,13 +164,39 @@ class TestFillsHappenAfterTheDecision:
         assert all(f.execution_at > f.decision_at for f in result.fills)
 
     def test_a_decision_on_the_last_session_cannot_fill(self) -> None:
-        """There is no next open inside the run, so the order is dropped."""
+        """Even though the price for the next session exists.
+
+        This test used to pass for the wrong reason: the fake had no data past
+        the window, so the fill failed on missing data rather than on the
+        window. Against a real database — where a backtest period is cut out
+        of a longer history — a decision on the final session filled on the
+        session after it, outside the period the run claims to cover, and the
+        equity curve never saw the position.
+        """
+        prices = flat_prices()
+        assert prices[BEYOND], "the fixture must price the session after the window"
+
         script = [Signal.HOLD] * (len(DAYS) - 1) + [Signal.ENTER]
-        result, _ = execute(script, flat_prices())
+        result, _ = execute(script, prices)
 
         assert result.fills == []
         assert len(result.unfilled) == 1
-        assert "no opening price" in result.unfilled[0].reason
+        assert "outside the backtest window" in result.unfilled[0].reason
+
+    def test_no_fill_lands_after_the_window_ends(self) -> None:
+        script = [Signal.ENTER, Signal.EXIT] * len(DAYS)
+        result, _ = execute(script, flat_prices())
+
+        assert result.fills
+        assert all(f.execution_at <= US.session_close(DAYS[-1]) for f in result.fills)
+
+    def test_the_curve_and_the_fills_share_one_time_axis(self) -> None:
+        """The symptom that made this visible: they disagreed."""
+        script = [Signal.HOLD] * (len(DAYS) - 1) + [Signal.ENTER]
+        result, _ = execute(script, flat_prices())
+
+        last_day = result.equity_curve[-1].day
+        assert all(f.execution_at.date() <= last_day for f in result.fills)
 
     def test_the_entry_price_is_the_next_open_not_the_decision_close(self) -> None:
         """The number that would differ if the engine read the wrong bar."""
