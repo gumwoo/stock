@@ -324,6 +324,19 @@ changed on the strength of them.
   `require_complete_sessions=False` accepts them, marking each at the last
   price that printed. Resolving it properly needs a newer calendar release or
   KRX's own holiday record, which is due with the Korean universe expansion.
+- **A semantic correction should relabel rather than delete, and one did not.**
+  Migration `c3e8a51d7f04` removed the Korean net income and equity rows
+  because they held the including-NCI totals under parent-only names. The
+  values were wrong; deleting them was still the wrong operation. The coverage
+  gate does not refuse the resulting state — it asks whether the scorer can
+  anchor, and revenue and EPS were untouched — so a run made before
+  recollecting produces a different number under the same strategy name:
+  +502.43% became +597.76% on Samsung. Reproduction catches it for a run
+  already stored, because `ingested_at` can hide rows that arrived late and can
+  do nothing about rows that stopped existing, but nothing catches a fresh run.
+  A gate cannot refuse an absence it has no record of. Future corrections
+  relabel, so the row keeps saying what it holds and what an earlier run saw
+  stays on disk. Pinned in `tests/integration/test_semantic_correction.py`.
 - **DART returns the current version of a report, not the version as filed.**
   `fnlttSinglAcntAll` answers with whatever the latest correction says, and the
   receipt number it carries is the correction's — so that is the date we can

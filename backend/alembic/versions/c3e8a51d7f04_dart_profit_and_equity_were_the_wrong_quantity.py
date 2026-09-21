@@ -23,9 +23,34 @@ refills them from `ProfitLossAttributableToOwnersOfParent` and
 
     python -m app.cli collect --source dart --period max
 
-afterwards. Until then Korean instruments have no net income or equity, which
-the backtest's coverage gate refuses rather than scores around — the intended
-behaviour, and the reason deleting is safe to do before recollecting.
+afterwards, and do not run a backtest before you have.
+
+An earlier draft of this note claimed the coverage gate refuses until the data
+is back. **It does not**, and the claim was checked only after it was written.
+The gate asks whether the scorer can anchor; `Revenues` and
+`EarningsPerShareBasic` are untouched, so it can. The engine then degrades as
+designed — return on equity drops out, four ratios remain, P/E still satisfies
+the profitability requirement, and a factor is produced. Measured on Samsung
+over ten years, the same strategy returns +502.43% with these rows and
++597.76% without them: a 95-point difference that reads as a better strategy
+and is a thinner dataset.
+
+What does catch it is reproduction, and only for a run already stored. The
+`ingested_at` axis exists so a later backfill cannot change an old result; it
+can hide rows that arrived after a snapshot and can do nothing about rows that
+stopped existing, because a filter cannot restore them. A stored run therefore
+fails to reproduce, loudly. A new run started in this state is simply wrong.
+
+Both halves are pinned in `tests/integration/test_semantic_correction.py`.
+
+**Deleting was the wrong operation even though the values were wrong.** A gate
+cannot refuse an absence it has no record of: once the rows are gone, nothing
+says `NetIncomeLoss` was ever expected here. A semantic correction should
+relabel instead — the row keeps saying what it actually holds, the scorer stops
+reading it, and what an earlier run saw is still on disk. This migration is
+kept as applied rather than rewritten, because rewriting a migration other
+databases may have run would be a second silent divergence; the rule it teaches
+is recorded in the README.
 
 Only DART rows are touched. SEC rows were always the us-gaap elements and were
 never affected.
