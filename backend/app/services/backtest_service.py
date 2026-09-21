@@ -19,16 +19,20 @@ not a differently-scoped answer that looks like the one requested.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
 from app.backtest import engine as bt
+from app.backtest import walkforward as wf
 from app.backtest.engine import BacktestResult, CostModel, Strategy
 from app.backtest.execution import ExecutionModel
+from app.backtest.metrics import Performance, summarise
 from app.backtest.pit_repository import PitReader, coverage, snapshot_now
+from app.backtest.walkforward import SampleType
 from app.core.calendar import MarketCalendar
 from app.core.types import Interval
 from app.models import Instrument
@@ -160,4 +164,141 @@ def execute(
         data_snapshot_at=snapshot,
         coverage_start=first,
         coverage_end=last,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class WindowResult:
+    """One window's two measurements, and what stood behind them."""
+
+    index: int
+    sample_type: SampleType
+    start: date
+    end: date
+    performance: Performance | None
+    sessions: int
+    trades: int
+    abstained: int
+    without_data: int
+    unfilled: int
+
+
+@dataclass(frozen=True, slots=True)
+class WalkForwardReport:
+    """Every window, in and out of sample, with the caveats attached.
+
+    `fitted` is the one to read first. When no fitting step was supplied, the
+    same strategy ran on both sides of every split, and the in-sample figures
+    are simply "how it did over those months" — not the period a rule was
+    tuned on. An IN/OUT gap then says nothing about overfitting, and the UI
+    must not present it as if it did. The flag is here so that claim cannot be
+    made by accident.
+    """
+
+    windows: tuple[WindowResult, ...]
+    fitted: bool
+    data_snapshot_at: datetime
+    holdout_start: date | None = None
+    holdout_end: date | None = None
+
+    def of(self, sample: SampleType) -> tuple[WindowResult, ...]:
+        return tuple(w for w in self.windows if w.sample_type is sample)
+
+    @property
+    def evaluation_span(self) -> tuple[date, date] | None:
+        """How much history the out-of-sample figures speak for."""
+        out = self.of(SampleType.OUT_OF_SAMPLE)
+        if not out:
+            return None
+        return out[0].start, out[-1].end
+
+
+StrategyFitter = Callable[[Session, int, date, date], Strategy]
+"""Chooses a strategy from a training period. Receives only that period."""
+
+
+def walk_forward(
+    session: Session,
+    strategy: Strategy,
+    request: RunRequest,
+    *,
+    train_sessions: int,
+    eval_sessions: int,
+    step_sessions: int | None = None,
+    anchored: bool = False,
+    holdout_sessions: int = 0,
+    fit: StrategyFitter | None = None,
+    data_snapshot_at: datetime | None = None,
+    require_complete_sessions: bool = True,
+) -> WalkForwardReport:
+    """Run rolling train/evaluate splits across the requested period.
+
+    One snapshot covers every window. Taking a fresh one per window would let
+    a collection landing mid-run widen the data under the later windows only,
+    which is the sort of difference that reads as the strategy improving.
+
+    Args:
+        strategy: used for both sides when `fit` is None.
+        fit: given the training period, returns the strategy to evaluate with.
+            It is handed the training dates and nothing else — the evaluation
+            period is not passed, so a fitter cannot see what it will be
+            judged on even if it wanted to.
+    """
+    instrument = session.get(Instrument, request.instrument_id)
+    if instrument is None:
+        raise BacktestWindowError(f"no instrument {request.instrument_id}")
+
+    snapshot = data_snapshot_at if data_snapshot_at is not None else snapshot_now(session)
+    calendar = MarketCalendar(instrument.market)
+    sessions = calendar.sessions_between(request.start, request.end)
+
+    split = wf.generate(
+        sessions,
+        train_sessions=train_sessions,
+        eval_sessions=eval_sessions,
+        step_sessions=step_sessions,
+        anchored=anchored,
+        holdout_sessions=holdout_sessions,
+    )
+
+    results: list[WindowResult] = []
+    for window in split.windows:
+        chosen = (
+            fit(session, request.instrument_id, window.train_start, window.train_end)
+            if fit is not None
+            else strategy
+        )
+        for sample, lo, hi in (
+            (SampleType.IN_SAMPLE, window.train_start, window.train_end),
+            (SampleType.OUT_OF_SAMPLE, window.eval_start, window.eval_end),
+        ):
+            outcome = execute(
+                session,
+                chosen,
+                replace(request, start=lo, end=hi),
+                data_snapshot_at=snapshot,
+                require_complete_sessions=require_complete_sessions,
+            )
+            result = outcome.result
+            results.append(
+                WindowResult(
+                    index=window.index,
+                    sample_type=sample,
+                    start=lo,
+                    end=hi,
+                    performance=summarise(result.equity_curve, result.trades),
+                    sessions=result.sessions,
+                    trades=len(result.trades),
+                    abstained=len(result.abstained_sessions),
+                    without_data=len(result.sessions_without_data),
+                    unfilled=len(result.unfilled),
+                )
+            )
+
+    return WalkForwardReport(
+        windows=tuple(results),
+        fitted=fit is not None,
+        data_snapshot_at=snapshot,
+        holdout_start=split.holdout_start,
+        holdout_end=split.holdout_end,
     )
