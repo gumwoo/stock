@@ -11,10 +11,15 @@ contributed — so "why was this 59.7?" is answerable from stored rows alone.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
-from enum import StrEnum
+from enum import Enum, StrEnum
+from types import MappingProxyType
+from typing import Any
 
 
 class Engine(StrEnum):
@@ -261,3 +266,112 @@ class ScoredSignal:
     def effective_weight_total(self) -> float:
         """Sum of applied weights. Below 1.0 means some factor sat out."""
         return sum(f.effective_weight for f in self.factors)
+
+
+class UnknownStrategyError(Exception):
+    """A definition names a kind or parameter this build cannot produce."""
+
+
+# What a strategy parameter may be. Narrow on purpose: these values go into a
+# JSONB column and come back out to rebuild a strategy, so anything that does
+# not survive that round trip cannot be allowed in. A nested structure would
+# also need its own deep-freeze and canonical ordering, and no strategy needs
+# one.
+_ALLOWED_PARAMS = (str, int, float, bool, type(None))
+
+
+def _canonical_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    """A JSON-safe copy with stable ordering.
+
+    Copying is the point. `frozen=True` freezes the dataclass's own fields,
+    not the dict one of them points at, so a caller holding the original could
+    change a definition after it had already been run:
+
+        params = {"short": 10, "long": 30}
+        definition = StrategyDefinition(..., params=params)
+        ...                                   # runs 10/30
+        params["short"] = 20                  # now builds 20/30
+
+    Same object, same version, different behaviour — which is the very thing
+    the definition exists to make impossible.
+    """
+    out: dict[str, Any] = {}
+    for key in sorted(params):
+        value = params[key]
+        if isinstance(value, Enum):
+            # A StrEnum survives JSON as its value and rebuilds from it.
+            value = value.value
+        if not isinstance(value, _ALLOWED_PARAMS):
+            raise UnknownStrategyError(
+                f"parameter {key!r} is {type(value).__name__}; a definition must "
+                "survive being stored and read back, so parameters are limited to "
+                "strings, numbers, booleans and null"
+            )
+        if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+            raise UnknownStrategyError(f"parameter {key!r} is {value}, which JSON cannot hold")
+        out[key] = value
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyDefinition:
+    """Everything needed to rebuild a strategy, and nothing else.
+
+    This is what a `backtest_run` row holds, which is why it lives in `core`
+    rather than beside the strategies: the persistence layer has to name a
+    stored strategy without reaching up into the engines that run it.
+    Constructing the running object is `app.backtest.strategies.build`, and
+    that function is the only way — so the definition that was stored, the one
+    that will be replayed and the one that actually ran are the same by
+    construction rather than by discipline.
+
+    `version` must change whenever behaviour does. 20/60 and 10/30 produce
+    different trades from identical data, so they are different strategies;
+    the params make that visible even when someone forgets, since they are
+    stored too and compared on replay.
+    """
+
+    kind: str
+    version: str
+    params: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.kind.strip():
+            raise UnknownStrategyError("a strategy definition needs a kind")
+        if not self.version.strip():
+            raise UnknownStrategyError("a strategy definition needs a version")
+        object.__setattr__(self, "params", MappingProxyType(_canonical_params(self.params)))
+
+    @property
+    def canonical(self) -> str:
+        """The stored form, byte-for-byte stable.
+
+        Ordering is fixed, so the same definition produces the same string on
+        any machine and in any process. Two runs can then be compared by what
+        they ran rather than by what they were called.
+        """
+        return json.dumps(
+            {"kind": self.kind, "version": self.version, "params": dict(self.params)},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+
+    @property
+    def fingerprint(self) -> str:
+        """A short digest of `canonical`, for indexing and comparison.
+
+        Strategy identity is kind + version + params, never version alone. A
+        version is written by a person and nothing stops two definitions
+        sharing one while behaving differently; the params are what actually
+        determine behaviour, so they are part of the identity. `git_commit_sha`
+        covers the third axis — a change to the code behind the kind.
+        """
+        return hashlib.sha256(self.canonical.encode("utf-8")).hexdigest()[:16]
+
+    def describe(self) -> str:
+        """One line for a report or a log."""
+        if not self.params:
+            return f"{self.kind}@{self.version}"
+        inner = " ".join(f"{k}={v}" for k, v in sorted(self.params.items()))
+        return f"{self.kind}@{self.version} ({inner})"

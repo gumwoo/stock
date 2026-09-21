@@ -25,13 +25,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.backtest import strategies
 from app.backtest.engine import CostModel, MarketData
 from app.backtest.strategies import (
-    StrategyDefinition,
     buy_and_hold,
     moving_average_cross,
 )
 from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
-from app.core.types import Interval, SampleType
+from app.core.types import Interval, SampleType, StrategyDefinition
 from app.models import Base, Instrument
 from app.models.backtest import BacktestWindow
 from app.repositories import backtest_repo, candle_repo

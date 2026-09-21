@@ -22,11 +22,12 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.backtest import strategies
 from app.backtest.engine import CostModel, MarketData
-from app.backtest.strategies import StrategyDefinition, buy_and_hold, moving_average_cross
+from app.backtest.strategies import buy_and_hold, moving_average_cross
 from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
-from app.core.types import Interval, SampleType
+from app.core.types import Interval, SampleType, StrategyDefinition
 from app.models import Base, Instrument
 from app.models.backtest import BacktestRun
 from app.repositories import backtest_repo, candle_repo
@@ -144,11 +145,13 @@ class TestTheThreeAxes:
         s, iid = instrument
         _, run = run_and_store(s, iid)
 
-        rebuilt = StrategyDefinition(
-            kind=run.strategy_kind,  # type: ignore[attr-defined]
-            version=run.strategy_version,  # type: ignore[attr-defined]
-            params=run.strategy_params,  # type: ignore[attr-defined]
-        ).build()
+        rebuilt = strategies.build(
+            StrategyDefinition(
+                kind=run.strategy_kind,  # type: ignore[attr-defined]
+                version=run.strategy_version,  # type: ignore[attr-defined]
+                params=run.strategy_params,  # type: ignore[attr-defined]
+            )
+        )
 
         assert (rebuilt.short, rebuilt.long) == (10, 30)  # type: ignore[union-attr]
 

@@ -23,8 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.backtest.strategies import StrategyDefinition
-from app.core.types import SampleType
+from app.core.types import SampleType, StrategyDefinition
 from app.models.backtest import BacktestRun, BacktestWindow
 
 

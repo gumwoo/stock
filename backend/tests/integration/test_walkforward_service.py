@@ -25,10 +25,10 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.backtest import strategies
 from app.backtest.engine import CostModel, MarketData
 from app.backtest.pit_repository import PitViolationError, snapshot_now
 from app.backtest.strategies import (
-    StrategyDefinition,
     UnknownStrategyError,
     buy_and_hold,
     moving_average_cross,
@@ -36,7 +36,7 @@ from app.backtest.strategies import (
 from app.backtest.walkforward import SampleType, WalkForwardError
 from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
-from app.core.types import Interval
+from app.core.types import Interval, StrategyDefinition
 from app.models import Base, Instrument
 from app.repositories import candle_repo
 from app.repositories.candle_repo import CandleRow
@@ -783,23 +783,25 @@ class TestTheSpecIsTheExperiment:
     def test_params_are_the_constructors_arguments(self) -> None:
         """So what a row says and what runs cannot drift apart silently."""
         definition = moving_average_cross(short=10, long=30)
-        built = definition.build()
+        built = strategies.build(definition)
 
         assert definition.params == {"short": 10, "long": 30}
         assert (built.short, built.long) == (10, 30)  # type: ignore[union-attr]
 
     def test_a_definition_that_cannot_be_built_is_refused(self) -> None:
         with pytest.raises(UnknownStrategyError, match="no strategy kind"):
-            StrategyDefinition(kind="does_not_exist", version="v1").build()
+            strategies.build(StrategyDefinition(kind="does_not_exist", version="v1"))
 
     def test_a_misspelled_parameter_fails_rather_than_defaulting(self) -> None:
         """Falling back to a default would run something the row does not say."""
         with pytest.raises(UnknownStrategyError, match="cannot build"):
-            StrategyDefinition(
-                kind="moving_average_cross",
-                version="v1",
-                params={"shrot": 10, "long": 30},
-            ).build()
+            strategies.build(
+                StrategyDefinition(
+                    kind="moving_average_cross",
+                    version="v1",
+                    params={"shrot": 10, "long": 30},
+                )
+            )
 
     def test_the_report_carries_the_whole_experiment(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument

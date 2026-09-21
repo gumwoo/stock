@@ -28,19 +28,22 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.backtest import engine as bt
+from app.backtest import strategies
 from app.backtest import walkforward as wf
 from app.backtest.engine import BacktestResult, CostModel, MarketData, Strategy
 from app.backtest.execution import ExecutionModel
 from app.backtest.metrics import Performance, summarise
 from app.backtest.pit_repository import PitReader, coverage, snapshot_now
-from app.backtest.strategies import StrategyDefinition
 from app.backtest.walkforward import SampleType
-from app.core.calendar import MarketCalendar
+from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
-from app.core.types import Interval
+from app.core.types import Bar, Interval, StrategyDefinition
+from app.engines.fundamental import FundamentalSnapshot
 from app.models import Instrument
 from app.models.backtest import BacktestRun, BacktestWindow
+from app.models.fundamental import FundamentalSource
 from app.repositories import backtest_repo
+from app.services import fundamental_service
 
 
 class BacktestWindowError(Exception):
@@ -69,6 +72,73 @@ class RunOutcome:
     data_snapshot_at: datetime
     coverage_start: date
     coverage_end: date
+
+
+class ScoringReader:
+    """A `PitReader` that can also answer for fundamentals.
+
+    The reader lives in the repository layer and the snapshot is built by a
+    service, so the two cannot meet there without a cycle. They meet here,
+    which is also the only layer that holds both a session and a strategy.
+
+    Every lookup is bound by the reader's own instant and snapshot, so a
+    strategy that asks about financials is under exactly the same
+    point-in-time rules as one that asks about prices.
+    """
+
+    __slots__ = ("_reader", "_session", "_source")
+
+    def __init__(
+        self, session: Session, reader: PitReader, source: FundamentalSource | None
+    ) -> None:
+        self._session = session
+        self._reader = reader
+        self._source = source
+
+    @property
+    def asof(self) -> datetime:
+        return self._reader.asof
+
+    def at(self, asof: datetime) -> ScoringReader:
+        return ScoringReader(self._session, self._reader.at(asof), self._source)
+
+    def bars(self, instrument_id: int, interval: Interval, *, limit: int = 250) -> list[Bar]:
+        return self._reader.bars(instrument_id, interval, limit=limit)
+
+    def opening_price(self, instrument_id: int, interval: Interval) -> Decimal | None:
+        return self._reader.opening_price(instrument_id, interval)
+
+    def fundamentals(
+        self, instrument_id: int, *, price: float, currency: str
+    ) -> FundamentalSnapshot:
+        return fundamental_service.build_snapshot(
+            self._session,
+            instrument_id,
+            asof=self._reader.asof,
+            price=price,
+            currency=currency,
+            ingested_before=self._reader.data_snapshot_at,
+            source=self._source,
+        )
+
+
+# Which source's filings each market's fundamentals come from. A dollar series
+# and a won series must never merge, so the source travels with every lookup.
+FUNDAMENTAL_SOURCE: dict[Market, FundamentalSource] = {
+    Market.KR: FundamentalSource.DART,
+    Market.US: FundamentalSource.SEC,
+}
+
+CURRENCY: dict[Market, str] = {Market.KR: "KRW", Market.US: "USD"}
+
+
+def reader_for(session: Session, instrument: Instrument, snapshot: datetime) -> ScoringReader:
+    """The data a strategy sees, for this instrument, under this snapshot."""
+    return ScoringReader(
+        session,
+        PitReader(session, data_snapshot_at=snapshot),
+        FUNDAMENTAL_SOURCE.get(instrument.market),
+    )
 
 
 def execute(
@@ -137,7 +207,7 @@ def execute(
         )
     result = bt.run(
         strategy,
-        PitReader(session, data_snapshot_at=snapshot),
+        reader_for(session, instrument, snapshot),
         instrument_id=request.instrument_id,
         calendar=calendar,
         start=request.start,
@@ -367,7 +437,7 @@ def walk_forward(
                 window.train_start,
                 window.train_end,
             )
-        chosen = definition.build()
+        chosen = strategies.build(definition)
         for sample, lo, hi in (
             (SampleType.IN_SAMPLE, window.train_start, window.train_end),
             (SampleType.OUT_OF_SAMPLE, window.eval_start, window.eval_end),
@@ -480,7 +550,7 @@ def evaluate_holdout(
             training_view, request.instrument_id, final_train_start, final_train_end
         )
     assert definition is not None  # guaranteed by StrategySpec
-    chosen = definition.build()
+    chosen = strategies.build(definition)
 
     outcome = execute(
         session,

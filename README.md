@@ -140,7 +140,8 @@ reintroduces look-ahead bias without failing a single test.
 ### Backtests
 
 ```bash
-python -m app.cli backtest run --symbol 005930     # walk forward, store it
+python -m app.cli backtest run --symbol 005930 --strategy score   # the system's own rule
+python -m app.cli backtest run --symbol 005930     # default: a moving-average harness
 python -m app.cli backtest show --run 1            # what it recorded
 python -m app.cli backtest holdout --run 1         # the final measurement, once
 python -m app.cli backtest reproduce --run 1       # run it again and compare
@@ -158,6 +159,15 @@ The Backtest screen shows the same runs with in-sample and out-of-sample in
 adjacent columns, and **Run info** opens every coordinate a reproduction would
 need — strategy, fingerprints, commit, data snapshot, costs and split.
 
+- With only the technical factor participating, the current policy cannot
+  reach BUY_INTEREST. The threshold scales to the participating weight — 70 at
+  full weight becomes 42 at technical's 0.6 — which needs a technical score of
+  70, and the engine tops out near 62 on the strongest trend that can be
+  constructed. An instrument with no filings can therefore hold or exit but
+  never enter. The thresholds are deliberate and BUY_INTEREST is meant to be
+  rare, but in practice the rule is gated on having financials at all. Pinned
+  as a test so a change to a weight or threshold fails loudly rather than
+  silently altering what the system can say.
 ### Known limitations
 
 - `yfinance` ticker mapping assumes KOSPI (`.KS`). KOSDAQ needs `.KQ`, which

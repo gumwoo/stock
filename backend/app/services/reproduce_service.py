@@ -34,11 +34,11 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from app.backtest import strategies
 from app.backtest.engine import CostModel
 from app.backtest.execution import ExecutionModel
 from app.backtest.metrics import Performance, summarise
-from app.backtest.strategies import StrategyDefinition, UnknownStrategyError
-from app.core.types import SampleType
+from app.core.types import SampleType, StrategyDefinition, UnknownStrategyError
 from app.models.backtest import BacktestRun, BacktestWindow
 from app.repositories import backtest_repo
 from app.services import backtest_service as svc
@@ -407,7 +407,7 @@ def _replay(session: Session, run: BacktestRun, window: BacktestWindow) -> Windo
         params=window.chosen_params,
     )
     try:
-        strategy = definition.build()
+        strategy = strategies.build(definition)
     except UnknownStrategyError as exc:
         raise ReproduceError(
             f"run {run.id} window {window.window_index} ran {definition.describe()}, "

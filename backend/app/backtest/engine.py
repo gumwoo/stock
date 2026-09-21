@@ -54,6 +54,7 @@ from app.backtest.execution import (
 from app.backtest.metrics import ClosedTrade, EquityPoint
 from app.core.calendar import MarketCalendar
 from app.core.types import Bar, Interval
+from app.engines.fundamental import FundamentalSnapshot
 
 # One basis point. Costs are quoted in bps because that is how brokers quote
 # them, and because a fraction written as 0.00015 invites a misplaced zero.
@@ -94,6 +95,25 @@ class MarketData(Protocol):
     def bars(self, instrument_id: int, interval: Interval, *, limit: int = ...) -> list[Bar]: ...
 
     def opening_price(self, instrument_id: int, interval: Interval) -> Decimal | None: ...
+
+
+class ScoringData(MarketData, Protocol):
+    """Market data plus the fundamentals a scoring rule needs.
+
+    Separate from `MarketData` because most strategies never ask. A rule that
+    reads prices alone should not be handed a door into the filing history it
+    has no use for, and a fixture standing in for market data should not have
+    to fake one.
+
+    The snapshot comes back already pinned to one fiscal period and carrying
+    each absence's reason, exactly as the live scorer receives it — the point
+    of running the real rule in a backtest is lost if the two are fed
+    differently shaped inputs.
+    """
+
+    def fundamentals(
+        self, instrument_id: int, *, price: float, currency: str
+    ) -> FundamentalSnapshot: ...
 
 
 class Strategy(Protocol):

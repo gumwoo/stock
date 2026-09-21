@@ -12,7 +12,6 @@ only ever sees a `PriceSeries` and an `asof`.
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
@@ -22,10 +21,8 @@ from app.collectors.base import CollectorStatusLookup
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.core.types import (
-    Availability,
     Engine,
     Factor,
-    MissingFactorPolicy,
     ScoredSignal,
     SignalReason,
 )
@@ -38,29 +35,19 @@ from app.scoring.availability import (
     SessionFreshnessRule,
     SourceCheckFreshnessRule,
     evaluate_freshness,
-    resolve_availability,
 )
-from app.scoring.combine import ExecutionTimingError, Thresholds, build_signal
+from app.scoring.combine import ExecutionTimingError, build_signal
+from app.scoring.policy import (
+    POLICY,
+    REQUIRED,
+    STRATEGY_VERSION,
+    THRESHOLDS,
+    WEIGHTS,
+    apply_freshness,
+)
 from app.services import fundamental_service
 
 logger = logging.getLogger(__name__)
-
-STRATEGY_VERSION = "v0.2-technical-fundamental"
-
-# The base judgement layer. Sentiment is deliberately absent: it is an
-# event overlay with a different half-life, not a weighted factor, so it
-# never enters this sum. Portfolio joins in Phase 5. Weights move into
-# strategy_config once there is more than one strategy to version.
-WEIGHTS: dict[Engine, float] = {
-    Engine.TECHNICAL: 0.6,
-    Engine.FUNDAMENTAL: 0.4,
-}
-
-# Only technical is required. Fundamentals are genuinely unavailable for
-# instruments SEC does not cover — every Korean listing, until DART is
-# wired — and abstaining on all of them would make the system useless
-# exactly where it is most needed.
-REQUIRED: frozenset[Engine] = frozenset({Engine.TECHNICAL})
 
 # How stale a fundamental source check may be before the factor sits out.
 # Judged on when the source was last reached, not on the age of the filing:
@@ -143,9 +130,9 @@ def score_instrument(
         now=now,
     )
 
-    policy = MissingFactorPolicy.ABSTAIN
+    policy = POLICY
     factors = tuple(
-        _apply_freshness(f, policy=policy, required=f.engine in REQUIRED)
+        apply_freshness(f, policy=policy, required=f.engine in REQUIRED)
         for f in (technical, fundamental)
     )
     # Evidence from a factor that has just been stood down would claim more
@@ -183,39 +170,7 @@ def score_instrument(
         strategy_version=STRATEGY_VERSION,
         policy=policy,
         required_factors=REQUIRED,
-        thresholds=Thresholds(),
-    )
-
-
-def _apply_freshness(factor: Factor, *, policy: MissingFactorPolicy, required: bool) -> Factor:
-    """Let the freshness verdict actually reduce the factor's weight.
-
-    Engines report what they could compute; they do not judge whether the data
-    behind it is current enough to use. That decision belongs here, where the
-    strategy's policy lives.
-
-    Without this step the whole freshness chain was computed and then ignored —
-    a factor could be marked STALE and still contribute at full weight, which
-    made the provenance shown in the UI a decoration rather than a control.
-    """
-    if factor.availability is Availability.UNAVAILABLE:
-        return factor
-
-    verdict = resolve_availability(
-        factor.engine,
-        provenance=factor.provenance,
-        requested_weight=factor.requested_weight,
-        policy=policy,
-        is_required=required,
-    )
-    if verdict.availability is Availability.AVAILABLE:
-        return factor
-
-    return replace(
-        factor,
-        availability=verdict.availability,
-        effective_weight=verdict.effective_weight,
-        availability_reason=verdict.reason,
+        thresholds=THRESHOLDS,
     )
 
 

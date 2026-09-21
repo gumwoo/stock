@@ -25,13 +25,13 @@ import json
 
 import pytest
 
+from app.backtest import strategies
 from app.backtest.strategies import (
-    StrategyDefinition,
     UnknownStrategyError,
     buy_and_hold,
     moving_average_cross,
 )
-from app.core.types import Interval
+from app.core.types import Interval, StrategyDefinition
 
 
 def ma(**params: object) -> StrategyDefinition:
@@ -48,7 +48,7 @@ class TestItCannotBeChangedAfterTheFact:
         params["short"] = 20
 
         assert definition.params["short"] == 10
-        assert definition.build().short == 10  # type: ignore[union-attr]
+        assert strategies.build(definition).short == 10  # type: ignore[union-attr]
 
     def test_the_stored_mapping_cannot_be_written_to(self) -> None:
         definition = moving_average_cross(short=10, long=30)
@@ -60,10 +60,10 @@ class TestItCannotBeChangedAfterTheFact:
         """The whole point, stated as the outcome."""
         params: dict[str, object] = {"short": 10, "long": 30}
         definition = ma(**params)
-        first = definition.build()
+        first = strategies.build(definition)
 
         params["short"] = 20
-        second = definition.build()
+        second = strategies.build(definition)
 
         assert first == second
 
@@ -143,17 +143,17 @@ class TestIdentity:
 
 class TestBuilding:
     def test_a_definition_rebuilds_the_strategy_it_describes(self) -> None:
-        built = moving_average_cross(short=10, long=30).build()
+        built = strategies.build(moving_average_cross(short=10, long=30))
 
         assert (built.short, built.long) == (10, 30)  # type: ignore[union-attr]
 
     def test_an_unknown_kind_raises(self) -> None:
         with pytest.raises(UnknownStrategyError, match="no strategy kind"):
-            StrategyDefinition(kind="nope", version="v1").build()
+            strategies.build(StrategyDefinition(kind="nope", version="v1"))
 
     def test_a_misspelled_parameter_raises_rather_than_defaulting(self) -> None:
         with pytest.raises(UnknownStrategyError, match="cannot build"):
-            ma(shrot=10, long=30).build()
+            strategies.build(ma(shrot=10, long=30))
 
     def test_an_invalid_combination_raises_at_definition_time(self) -> None:
         """A helper catches it before a run starts, not partway through."""

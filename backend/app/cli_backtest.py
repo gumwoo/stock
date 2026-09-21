@@ -29,21 +29,29 @@ from sqlalchemy.orm import Session
 from app.backtest.engine import CostModel
 from app.backtest.execution import ExecutionModel
 from app.backtest.pit_repository import coverage, snapshot_now
-from app.backtest.strategies import StrategyDefinition, buy_and_hold, moving_average_cross
+from app.backtest.strategies import (
+    buy_and_hold,
+    moving_average_cross,
+    technical_fundamental,
+)
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
-from app.core.types import Interval, SampleType
+from app.core.types import Interval, SampleType, StrategyDefinition
 from app.db import session_scope
 from app.models import Instrument
 from app.models.backtest import BacktestRun
 from app.repositories import backtest_repo, instrument_repo
 from app.services import backtest_service as svc
 from app.services import reproduce_service as rs
-from app.services.backtest_service import RunRequest, StrategySpec
+from app.services.backtest_service import CURRENCY, RunRequest, StrategySpec
 
 STRATEGIES = {
-    "ma": lambda short, long: moving_average_cross(short=short, long=long),
-    "hold": lambda short, long: buy_and_hold(),
+    # The system's own rule. The others are harnesses: they exercise the
+    # machinery and say nothing about whether this system's judgement is any
+    # good, which is what `score` is for.
+    "score": lambda short, long, currency: technical_fundamental(currency=currency),
+    "ma": lambda short, long, currency: moving_average_cross(short=short, long=long),
+    "hold": lambda short, long, currency: buy_and_hold(),
 }
 
 
@@ -80,7 +88,9 @@ def cmd_run(
     with_holdout: bool,
 ) -> int:
     """Walk forward over everything stored for this instrument, and persist it."""
-    definition: StrategyDefinition = STRATEGIES[strategy](short, long)
+    with session_scope() as probe:
+        currency = CURRENCY.get(_resolve(probe, symbol).market, "KRW")
+    definition: StrategyDefinition = STRATEGIES[strategy](short, long, currency)
 
     with session_scope() as session:
         instrument = _resolve(session, symbol)

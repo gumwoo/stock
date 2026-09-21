@@ -33,143 +33,14 @@ can choose which moment to read.
 
 from __future__ import annotations
 
-import hashlib
-import json
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from enum import Enum
-from types import MappingProxyType
+from dataclasses import dataclass
 from typing import Any
 
 from app.backtest.engine import MarketData, Signal, Strategy
+from app.backtest.scoring_strategy import TechnicalFundamental
 from app.core.indicators import simple_moving_average
-from app.core.types import Interval
-
-
-class UnknownStrategyError(Exception):
-    """A definition names a kind or parameter this build cannot produce."""
-
-
-# What a parameter may be. Narrow on purpose: these values go into a JSONB
-# column and come back out to rebuild a strategy, so anything that does not
-# survive that round trip cannot be allowed in. A nested structure would also
-# need its own deep-freeze and its own canonical ordering, and no strategy
-# here needs one.
-_ALLOWED = (str, int, float, bool, type(None))
-
-
-def _canonical(params: Mapping[str, Any]) -> dict[str, Any]:
-    """A JSON-safe copy with stable ordering.
-
-    Copying is the point. `frozen=True` freezes the dataclass's own fields,
-    not the dict one of them points at, so a caller holding the original could
-    change a definition after it had already been run:
-
-        params = {"short": 10, "long": 30}
-        definition = StrategyDefinition(..., params=params)
-        ...                                   # runs 10/30
-        params["short"] = 20                  # now builds 20/30
-
-    Same object, same version, different behaviour — which is the very thing
-    the definition exists to make impossible.
-    """
-    out: dict[str, Any] = {}
-    for key in sorted(params):
-        value = params[key]
-        if isinstance(value, Enum):
-            # A StrEnum survives JSON as its value and rebuilds from it.
-            value = value.value
-        if not isinstance(value, _ALLOWED):
-            raise UnknownStrategyError(
-                f"parameter {key!r} is {type(value).__name__}; a definition must "
-                "survive being stored and read back, so parameters are limited to "
-                "strings, numbers, booleans and null"
-            )
-        if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
-            raise UnknownStrategyError(f"parameter {key!r} is {value}, which JSON cannot hold")
-        out[key] = value
-    return out
-
-
-@dataclass(frozen=True, slots=True)
-class StrategyDefinition:
-    """Everything needed to rebuild a strategy, and nothing else.
-
-    This is what a `backtest_run` row holds. `build()` is the only way to get
-    a running strategy from it, so the definition that was stored, the one
-    that will be replayed and the one that actually ran are the same object by
-    construction rather than by discipline.
-
-    `version` must change whenever behaviour does. 20/60 and 10/30 produce
-    different trades from identical data, so they are different strategies;
-    the params make that visible even when someone forgets, since they are
-    stored too and compared on replay.
-    """
-
-    kind: str
-    version: str
-    params: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.kind.strip():
-            raise UnknownStrategyError("a strategy definition needs a kind")
-        if not self.version.strip():
-            raise UnknownStrategyError("a strategy definition needs a version")
-        object.__setattr__(self, "params", MappingProxyType(_canonical(self.params)))
-
-    @property
-    def canonical(self) -> str:
-        """The stored form, byte-for-byte stable.
-
-        Ordering is fixed, so the same definition produces the same string on
-        any machine and in any process. Two runs can then be compared by what
-        they ran rather than by what they were called.
-        """
-        return json.dumps(
-            {"kind": self.kind, "version": self.version, "params": dict(self.params)},
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        )
-
-    @property
-    def fingerprint(self) -> str:
-        """A short digest of `canonical`, for indexing and comparison.
-
-        Strategy identity is kind + version + params, never version alone. A
-        version is written by a person and nothing stops two definitions
-        sharing one while behaving differently; the params are what actually
-        determine behaviour, so they are part of the identity. `git_commit_sha`
-        covers the third axis — a change to the code behind the kind.
-        """
-        return hashlib.sha256(self.canonical.encode("utf-8")).hexdigest()[:16]
-
-    def build(self) -> Strategy:
-        """Construct the running strategy. Raises rather than guessing."""
-        try:
-            factory = _KINDS[self.kind]
-        except KeyError:
-            known = ", ".join(sorted(_KINDS))
-            raise UnknownStrategyError(
-                f"no strategy kind {self.kind!r}; this build knows {known}"
-            ) from None
-        try:
-            built: Strategy = factory(**dict(self.params))
-        except TypeError as exc:
-            # A misspelled or missing parameter must fail loudly. Falling back
-            # to a default would run something other than what the row says,
-            # which is the failure this class exists to prevent.
-            raise UnknownStrategyError(
-                f"cannot build {self.kind} from {dict(self.params)}: {exc}"
-            ) from exc
-        return built
-
-    def describe(self) -> str:
-        """One line for a report or a log."""
-        if not self.params:
-            return f"{self.kind}@{self.version}"
-        inner = " ".join(f"{k}={v}" for k, v in sorted(self.params.items()))
-        return f"{self.kind}@{self.version} ({inner})"
+from app.core.types import Interval, StrategyDefinition, UnknownStrategyError
+from app.scoring.policy import STRATEGY_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +103,36 @@ class BuyAndHold:
 _KINDS: dict[str, Any] = {
     "moving_average_cross": MovingAverageCross,
     "buy_and_hold": BuyAndHold,
+    "technical_fundamental": TechnicalFundamental,
 }
+
+
+def build(definition: StrategyDefinition) -> Strategy:
+    """Construct the running strategy a definition describes.
+
+    A function rather than a method on the definition, because the registry is
+    a property of this layer while the definition is a plain value. Keeping
+    them apart is what lets `app.models` and `app.repositories` name a stored
+    strategy without reaching up into the engines that run it.
+
+    Raises rather than guessing. A misspelled or missing parameter falling
+    back to a default would run something other than what the row says, which
+    is the failure the definition exists to prevent.
+    """
+    try:
+        factory = _KINDS[definition.kind]
+    except KeyError:
+        known = ", ".join(sorted(_KINDS))
+        raise UnknownStrategyError(
+            f"no strategy kind {definition.kind!r}; this build knows {known}"
+        ) from None
+    try:
+        built: Strategy = factory(**dict(definition.params))
+    except TypeError as exc:
+        raise UnknownStrategyError(
+            f"cannot build {definition.kind} from {dict(definition.params)}: {exc}"
+        ) from exc
+    return built
 
 
 def moving_average_cross(
@@ -249,3 +149,25 @@ def moving_average_cross(
 
 def buy_and_hold(*, version: str = "buy-and-hold@v1") -> StrategyDefinition:
     return StrategyDefinition(kind="buy_and_hold", version=version, params={})
+
+
+def technical_fundamental(
+    *,
+    buy_interest: float = 70.0,
+    caution: float = 35.0,
+    currency: str = "KRW",
+    version: str | None = None,
+) -> StrategyDefinition:
+    """The system's own rule, as a stored definition.
+
+    The version defaults to the shared policy's, because that is what decides
+    the score — a change to the weights or the engines is a change to this
+    strategy even though none of these parameters moved. The thresholds are
+    parameters because turning a score into a position is this strategy's
+    decision rather than the scorer's.
+    """
+    return StrategyDefinition(
+        kind="technical_fundamental",
+        version=version or f"{STRATEGY_VERSION}+{buy_interest:g}/{caution:g}",
+        params={"buy_interest": buy_interest, "caution": caution, "currency": currency},
+    )
