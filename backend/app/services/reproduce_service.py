@@ -26,6 +26,7 @@ window-by-window from the definitions its own rows hold.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -202,6 +203,58 @@ def check_integrity(run: BacktestRun, windows: Sequence[BacktestWindow]) -> tupl
             )
 
     measured = [w for w in windows if w.sample_type is not SampleType.HOLDOUT]
+
+    # What the header says it ran, against what the windows say they ran.
+    # Both fingerprints can be recomputed and still disagree with each other:
+    # rewrite the header's strategy, recompute its digest, and every check
+    # above passes while the header describes a different experiment from the
+    # one the rows record.
+    ran = {
+        (w.chosen_kind, w.chosen_version, json.dumps(w.chosen_params, sort_keys=True))
+        for w in measured
+    }
+    if run.fitter_version is None:
+        # A fixed run ran one strategy, and the header is that strategy.
+        if len(ran) > 1:
+            findings.append(
+                f"the run records no fitter, so every window ran one strategy — but "
+                f"its windows ran {len(ran)} different ones"
+            )
+        elif ran:
+            kind, version, params = next(iter(ran))
+            if (kind, version, params) != (
+                run.strategy_kind,
+                run.strategy_version,
+                json.dumps(run.strategy_params, sort_keys=True),
+            ):
+                findings.append(
+                    f"the run header ran {run.strategy_kind}@{run.strategy_version} "
+                    f"{run.strategy_params}, but every window ran {kind}@{version} {params}"
+                )
+    else:
+        # A fitted run has no single strategy, so its header is a placeholder
+        # over the fitter. Inventing a `fitter_version` on a fixed run would
+        # relabel it as one whose parameters were chosen — which is the flag
+        # that decides whether an in/out gap means anything at all.
+        expected_kinds = {k for k, _, _ in ran}
+        expected_kind = next(iter(expected_kinds)) if len(expected_kinds) == 1 else "mixed"
+        out_of_sample = sum(1 for w in measured if w.sample_type is SampleType.OUT_OF_SAMPLE)
+        expected = {"fitted": True, "windows": out_of_sample}
+        if run.strategy_version != run.fitter_version:
+            findings.append(
+                f"the run records fitter {run.fitter_version} but its header version is "
+                f"{run.strategy_version}; a fitted run is headed by its fitter"
+            )
+        if run.strategy_kind != expected_kind:
+            findings.append(
+                f"the run header names kind {run.strategy_kind}, but its windows ran "
+                f"{expected_kind}"
+            )
+        if run.strategy_params != expected:
+            findings.append(
+                f"the run header's placeholder is {run.strategy_params}, but its windows "
+                f"describe {expected}"
+            )
     trace = svc.fit_trace_fingerprint_of(
         (
             w.window_index,
@@ -264,16 +317,23 @@ def reproduce(session: Session, run_id: int) -> Reproduction:
     therefore replays the same strategy throughout and a fitted one replays
     each fold's choice — which is as far as a stored row can go, since the
     fitter itself is code.
+
+    **The holdout is replayed too.** Evaluating it is a once-only act; this is
+    not that. Nothing is chosen here and no fitter runs — the row's own
+    strategy is re-executed over the row's own period to check the figures
+    were recorded correctly. Leaving it out meant the final verdict of an
+    experiment was the one number nobody checked:
+
+        UPDATE backtest_window SET total_return = 99, sharpe = 999,
+               trades = 999 WHERE sample_type = 'HOLDOUT';
+
+        reproduced = True
     """
     run = backtest_repo.get_run(session, run_id)
     if run is None:
         raise ReproduceError(f"no backtest run {run_id}")
 
-    stored = [
-        w
-        for w in backtest_repo.windows_of(session, run_id)
-        if w.sample_type is not SampleType.HOLDOUT
-    ]
+    stored = backtest_repo.windows_of(session, run_id)
     if not stored:
         raise ReproduceError(
             f"run {run_id} has no window rows; there is nothing to compare against"

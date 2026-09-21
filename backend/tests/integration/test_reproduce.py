@@ -12,6 +12,8 @@ that silently agreed with everything would look exactly like success.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
@@ -136,18 +138,6 @@ class TestAStoredRunComesBackTheSame:
         result = rs.reproduce(s, run.id)
 
         assert len(result.windows) == len(report.windows)
-
-    def test_the_holdout_is_not_replayed(self, instrument: tuple[Session, int]) -> None:
-        """It is a measurement taken once; re-running it is not reproducing
-        the walk-forward, and its row is not part of the experiment."""
-        s, iid = instrument
-        report, run = store(s, iid)
-        svc.evaluate_and_persist_holdout(s, run, report)
-        s.commit()
-
-        result = rs.reproduce(s, run.id)
-
-        assert all(w.sample_type is not SampleType.HOLDOUT for w in result.windows)
 
     def test_a_fitted_run_replays_each_folds_own_choice(
         self, instrument: tuple[Session, int]
@@ -633,3 +623,156 @@ class TestTheRowsMustBeTheOnesThatWereWritten:
         assert result.integrity
         assert result.windows == ()
         assert not result.reproduced
+
+
+class TestTheHoldoutIsCheckedToo:
+    """The final verdict of an experiment was the one figure nobody checked.
+
+        UPDATE backtest_window SET total_return = 99, sharpe = 999,
+               trades = 999 WHERE sample_type = 'HOLDOUT';
+
+        reproduced = True
+
+    Replaying it is not re-evaluating it. Nothing is chosen and no fitter
+    runs: the row's own strategy is re-executed over the row's own period to
+    check the figures were recorded correctly, which is a different act from
+    taking the measurement.
+    """
+
+    def test_a_stored_holdout_is_replayed(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report, run = store(s, iid)
+        svc.evaluate_and_persist_holdout(s, run, report)
+        s.commit()
+
+        result = rs.reproduce(s, run.id)
+
+        assert any(w.sample_type is SampleType.HOLDOUT for w in result.windows)
+        assert result.reproduced
+
+    def test_altering_its_figures_is_caught(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report, run = store(s, iid)
+        svc.evaluate_and_persist_holdout(s, run, report)
+        s.commit()
+
+        s.execute(
+            text(
+                "UPDATE backtest_window SET total_return = 99, sharpe = 999, trades = 999 "
+                "WHERE run_id = :r AND sample_type = 'HOLDOUT'"
+            ),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert result.mismatches[0].sample_type is SampleType.HOLDOUT
+
+    def test_a_run_without_one_is_unaffected(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        result = rs.reproduce(s, run.id)
+
+        assert result.reproduced
+        assert all(w.sample_type is not SampleType.HOLDOUT for w in result.windows)
+
+
+class TestTheHeaderMustDescribeTheWindows:
+    """Both fingerprints can be recomputed and still disagree with each other.
+
+    Rewrite the header's strategy, recompute its digest, and every earlier
+    check passes while the header describes a different experiment from the
+    one the rows record. Probed live: `reproduced=True`.
+    """
+
+    def test_a_relabelled_header_is_caught(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        params = {"short": 20, "long": 60}
+        canonical = json.dumps(
+            {"kind": "moving_average_cross", "version": "ma-20-60@v1", "params": params},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        s.execute(
+            text(
+                "UPDATE backtest_run SET strategy_version = 'ma-20-60@v1', "
+                "strategy_params = cast(:p as jsonb), strategy_fingerprint = :f "
+                "WHERE id = :r"
+            ),
+            {
+                "p": json.dumps(params),
+                "f": hashlib.sha256(canonical.encode()).hexdigest()[:16],
+                "r": run.id,
+            },
+        )
+        s.commit()
+        s.expire_all()
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert any("every window ran" in finding for finding in result.integrity)
+
+    def test_a_fixed_run_relabelled_as_fitted_is_caught(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """`fitted` decides whether an in/out gap means anything about
+        overfitting, so inventing a fitter changes what the run claims."""
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        s.execute(
+            text("UPDATE backtest_run SET fitter_version = 'never-happened@v1' WHERE id = :r"),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert any("fitter" in finding for finding in result.integrity)
+
+    def test_a_fitted_run_stripped_of_its_fitter_is_caught(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """The other direction: a run whose folds each chose differently
+        cannot claim to have run one fixed rule."""
+        s, iid = instrument
+        shorts = iter([10, 15, 20, 25, 30, 35])
+
+        def fit(view: MarketData, i: int, lo: date, hi: date) -> StrategyDefinition:
+            return moving_average_cross(short=next(shorts), long=40)
+
+        _, run = store(s, iid, StrategySpec(fit=fit, fitter_version="grid@v1"))
+
+        s.execute(
+            text("UPDATE backtest_run SET fitter_version = NULL WHERE id = :r"),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert any("different ones" in finding for finding in result.integrity)
+
+    def test_a_genuine_fitted_run_passes(self, instrument: tuple[Session, int]) -> None:
+        """Otherwise the checks above pass by rejecting every fitted run."""
+        s, iid = instrument
+        shorts = iter([10, 15, 20, 25, 30, 35])
+
+        def fit(view: MarketData, i: int, lo: date, hi: date) -> StrategyDefinition:
+            return moving_average_cross(short=next(shorts), long=40)
+
+        _, run = store(s, iid, StrategySpec(fit=fit, fitter_version="grid@v1"))
+
+        assert rs.reproduce(s, run.id).reproduced
