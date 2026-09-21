@@ -264,16 +264,14 @@ class TestFillsUseADifferentDoorFromReads:
         at_open = US.session_open(date(2025, 11, 13))
         view = PitReader(s, data_snapshot_at=snapshot).at(at_open)
 
-        assert view.opening_price_at(iid, Interval.DAY_1, at_open) == Decimal("140")
+        assert view.opening_price(iid, Interval.DAY_1) == Decimal("140")
 
     def test_it_returns_a_price_not_a_bar(self, planted: tuple[Session, int, datetime]) -> None:
         """So a caller cannot reach past it to a close that does not exist."""
         s, iid, snapshot = planted
         at_open = US.session_open(date(2025, 11, 13))
         price = (
-            PitReader(s, data_snapshot_at=snapshot)
-            .at(at_open)
-            .opening_price_at(iid, Interval.DAY_1, at_open)
+            PitReader(s, data_snapshot_at=snapshot).at(at_open).opening_price(iid, Interval.DAY_1)
         )
         assert isinstance(price, Decimal)
 
@@ -283,7 +281,39 @@ class TestFillsUseADifferentDoorFromReads:
         s, iid, snapshot = planted
         saturday = US.session_open(date(2025, 11, 13)) + timedelta(days=2)
         view = PitReader(s, data_snapshot_at=snapshot).at(saturday)
-        assert view.opening_price_at(iid, Interval.DAY_1, saturday) is None
+        assert view.opening_price(iid, Interval.DAY_1) is None
+
+    def test_a_future_fill_price_cannot_be_read_from_an_earlier_instant(
+        self, planted: tuple[Session, int, datetime]
+    ) -> None:
+        """The hole this closes.
+
+        Standing at Thursday's close, the fill door once answered for Friday's
+        open: it bound `ingested_at` and never checked the simulation clock,
+        so transaction time held while simulation time was bypassed — in the
+        one method built to be the door.
+
+        It now takes no timestamp at all. The reader's own instant is the only
+        one it can answer for, so the wrong question has no way to be asked.
+        """
+        s, iid, snapshot = planted
+        thursday_close = US.session_close(date(2025, 11, 12))
+        friday_open = US.session_open(date(2025, 11, 13))
+
+        standing_at_close = PitReader(s, data_snapshot_at=snapshot).at(thursday_close)
+        assert standing_at_close.opening_price(iid, Interval.DAY_1) is None
+
+        # The price is real and reachable — from the instant it belongs to.
+        assert PitReader(s, data_snapshot_at=snapshot).at(friday_open).opening_price(
+            iid, Interval.DAY_1
+        ) == Decimal("140")
+
+    def test_the_fill_door_takes_no_timestamp(self) -> None:
+        """An argument that is never validated is worse than no argument."""
+        import inspect
+
+        params = inspect.signature(PitReader.opening_price).parameters
+        assert list(params) == ["self", "instrument_id", "interval"]
 
     def test_the_snapshot_still_binds_the_fill_price(
         self, planted: tuple[Session, int, datetime]
@@ -295,7 +325,7 @@ class TestFillsUseADifferentDoorFromReads:
         s.commit()
 
         view = PitReader(s, data_snapshot_at=snapshot).at(at_open)
-        assert view.opening_price_at(iid, Interval.DAY_1, at_open) == Decimal("140")
+        assert view.opening_price(iid, Interval.DAY_1) == Decimal("140")
 
 
 class TestFundamentalsGoThroughTheSameDoor:

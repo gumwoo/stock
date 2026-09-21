@@ -127,7 +127,7 @@ def earliest_execution(
     # Sharing a wall-clock timestamp is not the same-close leak. The ordering
     # BAR_CLOSE -> DECISION -> NEXT_BAR_OPEN is real, and the price taken is
     # the next bar's open, never the close that produced the decision — which
-    # `PitReader.opening_price_at` is what actually enforces.
+    # `PitReader.opening_price` is what actually enforces.
     if not calendar.is_open_at(moment):
         return calendar.next_tradable_open(moment)
 

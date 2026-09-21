@@ -22,7 +22,7 @@ SQLAlchemy at all, so a strategy that wants data has no route but this one.
 
 **Reading and filling are different questions.** `bars` returns only completed
 bars, because a strategy must not see a close that has not happened.
-`opening_price_at` returns one price from a bar that is still open, because an
+`opening_price` returns one price from a bar that is still open, because an
 opening price is knowable the moment it prints and a fill at the next
 session's open is a real trade. Collapsing the two leaves no correct answer: a
 Friday-open fill either cannot be simulated, or is simulated by reading
@@ -148,10 +148,8 @@ class PitReader:
             for r in rows
         ]
 
-    def opening_price_at(
-        self, instrument_id: int, interval: Interval, execution_at: datetime
-    ) -> Decimal | None:
-        """The price a fill at `execution_at` would get, or None.
+    def opening_price(self, instrument_id: int, interval: Interval) -> Decimal | None:
+        """The price a fill at *this reader's instant* would get, or None.
 
         Separate from `bars` on purpose, and the separation is the point.
 
@@ -167,14 +165,22 @@ class PitReader:
         makes this safe where reading the whole bar would not be. It returns a
         single `Decimal` so a caller cannot reach past it to `.close`.
 
-        `ingested_at <= data_snapshot_at` still applies: reproducibility is not
-        relaxed here, only bar completion.
+        **It takes no timestamp.** An earlier version accepted the execution
+        instant as an argument, and that argument was never checked against
+        the simulation clock: standing at Thursday's close, a caller could ask
+        for Friday's open and get it, because only `ingested_at` was bound.
+        Transaction time held while simulation time was simply bypassed — in
+        the one method built to be the door. Reading the clock the reader
+        already carries makes the wrong question unaskable, which is the whole
+        reason this is a class. The engine positions the reader at the fill
+        instant (`reader.at(execution_at).opening_price(...)`) and the
+        position is then the only thing it can be asked about.
         """
         return candle_repo.opening_price(
             self._session,
             instrument_id,
             interval,
-            ensure_utc(execution_at, field="execution_at"),
+            self.asof,
             ingested_before=self._snapshot,
         )
 
