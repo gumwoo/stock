@@ -12,6 +12,8 @@ attempt however that attempt arrives.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
@@ -575,3 +577,125 @@ class TestTheIdentityCheckIsComplete:
         s.commit()
 
         assert stored.sample_type is SampleType.HOLDOUT
+
+
+class TestAFittedRunIsIdentifiedByWhatItChose:
+    """A fitted run has no single strategy, so its header cannot describe it.
+
+    The header carries a placeholder — kind, fitter version, window count — so
+    two fitters sharing a version produce identical headers however
+    differently they behave:
+
+        stored   win 0 MA 10/30 · win 1 MA 15/40 · win 2 MA 20/50
+        impostor win 0 MA 20/60 · win 1 MA 20/60 · win 2 MA 20/60
+
+        both header as moving_average_cross@ma-grid@v1 {fitted: true, ...}
+
+    and the second was accepted as the first's conclusion. The per-window rows
+    already hold the choices; the header now holds a digest of them, so the
+    identity check sees the difference without reading row by row.
+    """
+
+    @staticmethod
+    def _grid() -> object:
+        choices = iter([(10, 30), (15, 40), (20, 50), (10, 30), (15, 40), (20, 50)])
+
+        def fit(view: MarketData, iid: int, lo: date, hi: date) -> StrategyDefinition:
+            short, long = next(choices)
+            return moving_average_cross(short=short, long=long)
+
+        return fit
+
+    @staticmethod
+    def _constant(view: MarketData, iid: int, lo: date, hi: date) -> StrategyDefinition:
+        return moving_average_cross(short=20, long=60)
+
+    def _walk(self, s: Session, iid: int, fit: object, snapshot: object = None):
+        return svc.walk_forward(
+            s,
+            StrategySpec(fit=fit, fitter_version="ma-grid@v1"),  # type: ignore[arg-type]
+            request_for(iid),
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
+            holdout_sessions=HOLDOUT,
+            data_snapshot_at=snapshot,  # type: ignore[arg-type]
+        )
+
+    def test_two_fitters_sharing_a_version_have_different_traces(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        s, iid = instrument
+        varying = self._walk(s, iid, self._grid())
+        constant = self._walk(s, iid, self._constant, varying.data_snapshot_at)
+
+        assert svc.fit_trace_fingerprint(varying) != svc.fit_trace_fingerprint(constant)
+
+    def test_their_headers_would_otherwise_be_identical(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """Which is why the trace had to be added rather than relied upon."""
+        s, iid = instrument
+        varying = self._walk(s, iid, self._grid())
+        constant = self._walk(s, iid, self._constant, varying.data_snapshot_at)
+
+        without_trace = {
+            k: v for k, v in svc.experiment_fields(varying).items() if k != "fit_trace_fingerprint"
+        }
+        other = {
+            k: v for k, v in svc.experiment_fields(constant).items() if k != "fit_trace_fingerprint"
+        }
+        assert without_trace == other
+
+    def test_a_different_fitter_is_refused(self, instrument: tuple[Session, int]) -> None:
+        """The live failure."""
+        s, iid = instrument
+        varying = self._walk(s, iid, self._grid())
+        run = svc.persist(s, varying, code=CODE)
+        s.commit()
+
+        constant = self._walk(s, iid, self._constant, varying.data_snapshot_at)
+
+        with pytest.raises(svc.HoldoutError, match="fit_trace_fingerprint"):
+            svc.evaluate_and_persist_holdout(s, run, constant)
+
+    def test_the_run_that_produced_it_is_still_accepted(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        s, iid = instrument
+        varying = self._walk(s, iid, self._grid())
+        run = svc.persist(s, varying, code=CODE)
+        s.commit()
+
+        stored = svc.evaluate_and_persist_holdout(s, run, varying)
+        s.commit()
+
+        assert stored.sample_type is SampleType.HOLDOUT
+
+    def test_the_trace_is_recoverable_from_the_stored_windows(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """What makes the migration's backfill a recovery rather than a guess,
+        and what would let a stored run be re-verified later."""
+        s, iid = instrument
+        varying = self._walk(s, iid, self._grid())
+        run = svc.persist(s, varying, code=CODE)
+        s.commit()
+
+        rows = [
+            w
+            for w in backtest_repo.windows_of(s, run.id)
+            if w.sample_type is not SampleType.HOLDOUT
+        ]
+        trace = "\n".join(
+            f"{w.window_index}|{w.sample_type}|{w.period_start}|{w.period_end}|"
+            + json.dumps(
+                {"kind": w.chosen_kind, "version": w.chosen_version, "params": w.chosen_params},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            for w in rows
+        )
+        recomputed = hashlib.sha256(trace.encode("utf-8")).hexdigest()[:16]
+
+        assert recomputed == run.fit_trace_fingerprint

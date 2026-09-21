@@ -19,6 +19,7 @@ not a differently-scoped answer that looks like the one requested.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -495,6 +496,32 @@ def evaluate_holdout(
     )
 
 
+def fit_trace_fingerprint(report: WalkForwardReport) -> str:
+    """A digest of what every window actually ran, in order.
+
+    The run header cannot describe a fitted experiment. Each window chose its
+    own definition, so the header carries a placeholder — the kind, the
+    fitter's version and a window count — and two fitters sharing a version
+    produce identical headers however differently they behave:
+
+        stored   win 0 MA 10/30 · win 1 MA 15/40 · win 2 MA 20/50 · …
+        impostor win 0 MA 20/60 · win 1 MA 20/60 · win 2 MA 20/60 · …
+
+        both header as moving_average_cross@ma-grid@v1 {fitted: true,
+        windows: 5}
+
+    The per-window rows already record the choices; this puts them in the
+    header too, as one value, so the identity check sees them without needing
+    to read back and compare row by row. A fixed run gets one as well — there
+    the choices are constant, and the digest then pins the window boundaries,
+    which costs nothing and keeps the column uniform.
+    """
+    trace = "\n".join(
+        f"{w.index}|{w.sample_type}|{w.start}|{w.end}|{w.chosen.canonical}" for w in report.windows
+    )
+    return hashlib.sha256(trace.encode("utf-8")).hexdigest()[:16]
+
+
 def experiment_fields(report: WalkForwardReport) -> dict[str, object]:
     """Every stored coordinate that makes a run the experiment it is.
 
@@ -525,6 +552,7 @@ def experiment_fields(report: WalkForwardReport) -> dict[str, object]:
         "strategy_params": dict(definition.params),
         "strategy_fingerprint": definition.fingerprint,
         "fitter_version": report.spec.fitter_version,
+        "fit_trace_fingerprint": fit_trace_fingerprint(report),
         "data_snapshot_at": report.data_snapshot_at,
         "interval": request.interval,
         "period_start": request.start,

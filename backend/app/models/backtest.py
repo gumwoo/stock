@@ -90,6 +90,15 @@ class BacktestRun(Base):
         "overfitting check.",
     )
 
+    fit_trace_fingerprint: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        doc="Digest of what every window actually ran, in order. A fitted run "
+        "has no single strategy, so its header is a placeholder that two "
+        "fitters sharing a version produce identically however differently "
+        "they behave; this is the field that tells them apart.",
+    )
+
     # --- which code -------------------------------------------------------
     git_commit_sha: Mapped[str] = mapped_column(
         String(40),
