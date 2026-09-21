@@ -13,6 +13,7 @@ check.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,9 @@ from app.models.backtest import BacktestRun, BacktestWindow
 
 class ProvenanceError(Exception):
     """A run cannot be stored because its coordinates are incomplete."""
+
+
+_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 class HoldoutAlreadyRecordedError(Exception):
@@ -105,7 +109,13 @@ def _resolve_at_import() -> CodeVersion | ProvenanceError:
     """
     injected = os.getenv("GIT_SHA", "").strip()
     if injected:
-        return CodeVersion(sha=injected[:40], dirty=os.getenv("GIT_DIRTY", "").strip() == "1")
+        if not _SHA.fullmatch(injected):
+            # Truncating or accepting it would put something that is not a
+            # commit into a column whose whole purpose is naming one.
+            return ProvenanceError(
+                f"GIT_SHA is {injected!r}, which is not a 40-character commit sha"
+            )
+        return CodeVersion(sha=injected, dirty=os.getenv("GIT_DIRTY", "").strip() == "1")
     try:
         return _read_git(Path(__file__).resolve().parents[3])
     except ProvenanceError as exc:

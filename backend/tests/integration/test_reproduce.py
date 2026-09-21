@@ -20,8 +20,13 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.backtest import strategies
 from app.backtest.engine import CostModel, MarketData
-from app.backtest.strategies import StrategyDefinition, buy_and_hold, moving_average_cross
+from app.backtest.strategies import (
+    StrategyDefinition,
+    buy_and_hold,
+    moving_average_cross,
+)
 from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
 from app.core.types import Interval, SampleType
@@ -296,18 +301,22 @@ class TestWhatItRefusesToAttempt:
             rs.reproduce(s, run.id)
 
     def test_a_strategy_this_build_cannot_construct_raises(
-        self, instrument: tuple[Session, int]
+        self, instrument: tuple[Session, int], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A run that referenced a kind since removed cannot be checked, and
-        saying so is different from saying it failed to reproduce."""
+        saying so is different from saying it failed to reproduce.
+
+        The kind is removed from this build rather than rewritten in the row:
+        rewriting it would make the row internally inconsistent, and the
+        integrity step would — correctly — report tampering instead. This is
+        the other case, a faithful record of a rule the code no longer has.
+        """
         s, iid = instrument
         _, run = store(s, iid)
 
-        s.execute(
-            text("UPDATE backtest_window SET chosen_kind = 'retired_rule' WHERE run_id = :r"),
-            {"r": run.id},
-        )
-        s.commit()
+        kinds = dict(strategies._KINDS)
+        kinds.pop("moving_average_cross")
+        monkeypatch.setattr(strategies, "_KINDS", kinds)
 
         with pytest.raises(rs.ReproduceError, match="cannot construct"):
             rs.reproduce(s, run.id)
@@ -435,3 +444,192 @@ class TestTheCodeVersionSettlesAtImport:
         )
 
         assert isinstance(backtest_repo._resolve_at_import(), backtest_repo.ProvenanceError)
+
+
+class TestTheRowsMustBeTheOnesThatWereWritten:
+    """Re-running proves the engine agrees with the rows. Not that the rows
+    are the ones that were stored.
+
+    Replaying a tampered row and comparing against that row's own figures
+    agrees with itself perfectly. Probed against the live database before the
+    integrity step existed — every one of these reported success:
+
+        run.strategy_params changed, fingerprint stale   reproduced=True
+        run.fit_trace_fingerprint no longer matches      reproduced=True
+        one window row deleted                           reproduced=True
+        run.holdout_start/end changed after the fact     reproduced=True
+
+    The deletion is the one that should worry anybody: drop the window that
+    did worst and the run still reports as reproduced.
+    """
+
+    def test_a_consistently_rewritten_window_is_still_caught(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """The case a metric comparison cannot see.
+
+        The recorded strategy and every figure are replaced together, so the
+        row is self-consistent and replays to exactly what it claims. Only the
+        run header remembers which experiment this was.
+        """
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        rewritten = svc.walk_forward(
+            s,
+            StrategySpec(definition=moving_average_cross(short=20, long=50)),
+            RunRequest(
+                instrument_id=iid,
+                start=HISTORY[0],
+                end=HISTORY[-1],
+                starting_cash=Decimal("100000"),
+                costs=CostModel(Decimal("5"), Decimal("7"), Decimal("0")),
+            ),
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
+            holdout_sessions=HOLDOUT,
+        )
+        other = svc.persist(s, rewritten, code=CODE)
+        s.commit()
+
+        # Move the second run's window rows onto the first run, so they are
+        # internally consistent and replay correctly — but are not what the
+        # first run's header describes.
+        s.execute(text("DELETE FROM backtest_window WHERE run_id = :r"), {"r": run.id})
+        s.execute(
+            text("UPDATE backtest_window SET run_id = :r WHERE run_id = :o"),
+            {"r": run.id, "o": other.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert any("fit trace" in finding for finding in result.integrity)
+
+    def test_a_deleted_window_is_caught(self, instrument: tuple[Session, int]) -> None:
+        """Dropping the worst fold must not leave a run that reproduces."""
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        s.execute(
+            text(
+                "DELETE FROM backtest_window WHERE run_id = :r AND window_index = 1 "
+                "AND sample_type = 'OUT_OF_SAMPLE'"
+            ),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert any("fit trace" in finding for finding in result.integrity)
+
+    def test_a_moved_window_period_is_caught(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        s.execute(
+            text(
+                "UPDATE backtest_window SET period_start = period_start - 7, "
+                "period_end = period_end - 7 WHERE run_id = :r AND window_index = 0 "
+                "AND sample_type = 'IN_SAMPLE'"
+            ),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        assert not rs.reproduce(s, run.id).reproduced
+
+    def test_a_stale_header_fingerprint_is_caught(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        s.execute(
+            text(
+                "UPDATE backtest_run SET strategy_params = "
+                '\'{"short": 99, "long": 200}\'::jsonb WHERE id = :r'
+            ),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert any("strategy fingerprint" in finding for finding in result.integrity)
+
+    def test_a_stale_window_fingerprint_is_caught(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        s.execute(
+            text(
+                "UPDATE backtest_window SET chosen_fingerprint = 'deadbeefdeadbeef' "
+                "WHERE run_id = :r AND window_index = 0"
+            ),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        assert not rs.reproduce(s, run.id).reproduced
+
+    def test_moved_holdout_dates_are_caught(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        s.execute(
+            text(
+                "UPDATE backtest_run SET holdout_start = '2020-01-02', "
+                "holdout_end = '2020-03-01' WHERE id = :r"
+            ),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert any("holdout" in finding for finding in result.integrity)
+
+    def test_an_untouched_run_has_no_findings(self, instrument: tuple[Session, int]) -> None:
+        """Otherwise every check above passes by failing everything."""
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        result = rs.reproduce(s, run.id)
+
+        assert result.integrity == ()
+        assert result.reproduced
+
+    def test_findings_stop_the_replay_rather_than_being_lost_to_it(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """A tampered period used to raise out of the replay before the
+        findings could be reported at all."""
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        s.execute(
+            text(
+                "UPDATE backtest_window SET period_start = '2019-01-02', "
+                "period_end = '2019-03-01' WHERE run_id = :r AND window_index = 0 "
+                "AND sample_type = 'IN_SAMPLE'"
+            ),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        result = rs.reproduce(s, run.id)
+
+        assert result.integrity
+        assert result.windows == ()
+        assert not result.reproduced

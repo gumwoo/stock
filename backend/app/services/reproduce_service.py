@@ -26,7 +26,7 @@ window-by-window from the definitions its own rows hold.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -121,6 +121,7 @@ class Reproduction:
 
     run_id: int
     windows: tuple[WindowComparison, ...]
+    integrity: tuple[str, ...]
     code_matches: bool
     stored_commit: str
     current_commit: str
@@ -128,8 +129,14 @@ class Reproduction:
 
     @property
     def reproduced(self) -> bool:
-        """Whether every stored measurement of every window came back identical."""
-        return bool(self.windows) and all(w.matches for w in self.windows)
+        """Whether this is the stored experiment, re-run, coming back the same.
+
+        Both halves are needed. The measurements agreeing says the engine
+        still produces what the rows describe; the integrity findings being
+        empty says those rows are the ones that were written. Replaying a
+        tampered row against its own figures satisfies the first on its own.
+        """
+        return not self.integrity and bool(self.windows) and all(w.matches for w in self.windows)
 
     @property
     def mismatches(self) -> tuple[WindowComparison, ...]:
@@ -137,15 +144,116 @@ class Reproduction:
 
     def summary(self) -> str:
         head = (
-            f"run #{self.run_id}: {len(self.windows) - len(self.mismatches)}"
-            f"/{len(self.windows)} windows reproduced"
+            f"run #{self.run_id}: {len(self.windows) - len(self.mismatches)} of {len(self.windows)} windows reproduced"
+            if self.windows
+            else f"run #{self.run_id}: not compared"
         )
         notes = []
+        if self.integrity:
+            notes.append(f"{len(self.integrity)} integrity findings")
         if not self.code_matches:
             notes.append(f"code differs ({self.stored_commit[:8]} -> {self.current_commit[:8]})")
         if self.stored_was_dirty:
             notes.append("stored run had uncommitted changes, so its commit is not the whole code")
         return head + (f" — {'; '.join(notes)}" if notes else "")
+
+
+def check_integrity(run: BacktestRun, windows: Sequence[BacktestWindow]) -> tuple[str, ...]:
+    """What the stored rows claim about each other, verified.
+
+    Re-running a backtest proves the engine still produces what the rows say.
+    It cannot prove the rows are the ones that were written — replaying from a
+    tampered row and comparing against that row's own figures agrees with
+    itself perfectly. Probed against the live database before this existed:
+
+        run.strategy_params changed, fingerprint stale  -> reproduced=True
+        run.fit_trace_fingerprint no longer matches     -> reproduced=True
+        one window row deleted                          -> reproduced=True
+        run.holdout_start/end changed after the fact    -> reproduced=True
+
+    The third is the one that should worry anybody: drop the window that did
+    worst and the run still reports as reproduced.
+
+    Every check here is a claim one row makes about another, so none of them
+    needs the market data or the engine — which is also why they run first.
+    """
+    findings: list[str] = []
+
+    header = StrategyDefinition(
+        kind=run.strategy_kind, version=run.strategy_version, params=run.strategy_params
+    )
+    if header.fingerprint != run.strategy_fingerprint:
+        findings.append(
+            f"the run header's strategy fingerprint is {run.strategy_fingerprint}, but "
+            f"its kind, version and params digest to {header.fingerprint}"
+        )
+
+    for window in windows:
+        chosen = StrategyDefinition(
+            kind=window.chosen_kind,
+            version=window.chosen_version,
+            params=window.chosen_params,
+        )
+        if chosen.fingerprint != window.chosen_fingerprint:
+            findings.append(
+                f"window {window.window_index} ({window.sample_type}) records fingerprint "
+                f"{window.chosen_fingerprint} for a strategy that digests to "
+                f"{chosen.fingerprint}"
+            )
+
+    measured = [w for w in windows if w.sample_type is not SampleType.HOLDOUT]
+    trace = svc.fit_trace_fingerprint_of(
+        (
+            w.window_index,
+            w.sample_type,
+            w.period_start,
+            w.period_end,
+            StrategyDefinition(
+                kind=w.chosen_kind, version=w.chosen_version, params=w.chosen_params
+            ).canonical,
+        )
+        for w in measured
+    )
+    if trace != run.fit_trace_fingerprint:
+        findings.append(
+            f"the run header's fit trace is {run.fit_trace_fingerprint}, but its "
+            f"{len(measured)} window rows digest to {trace} — they are not the windows "
+            "this run recorded, whether one was altered, removed or added"
+        )
+
+    for window in windows:
+        if window.period_start < run.period_start or window.period_end > run.period_end:
+            findings.append(
+                f"window {window.window_index} ({window.sample_type}) covers "
+                f"{window.period_start}..{window.period_end}, outside the run's "
+                f"{run.period_start}..{run.period_end}"
+            )
+
+    if (run.holdout_start is None) != (run.holdout_end is None):
+        findings.append("the run reserves half a holdout: one of its two dates is missing")
+    elif run.holdout_start is not None and run.holdout_end is not None:
+        if run.holdout_start < run.period_start or run.holdout_end > run.period_end:
+            findings.append(
+                f"the reserved holdout {run.holdout_start}..{run.holdout_end} falls outside "
+                f"the run's period {run.period_start}..{run.period_end}"
+            )
+        if measured and run.holdout_start <= max(w.period_end for w in measured):
+            findings.append(
+                f"the reserved holdout opens {run.holdout_start}, on or before a measured "
+                f"window ends — a holdout no window may reach cannot overlap one"
+            )
+
+    holdouts = [w for w in windows if w.sample_type is SampleType.HOLDOUT]
+    if len(holdouts) > 1:
+        findings.append(f"the run has {len(holdouts)} holdout rows; it may have one")
+    for holdout in holdouts:
+        if (holdout.period_start, holdout.period_end) != (run.holdout_start, run.holdout_end):
+            findings.append(
+                f"the holdout row covers {holdout.period_start}..{holdout.period_end}, but "
+                f"the run reserved {run.holdout_start}..{run.holdout_end}"
+            )
+
+    return tuple(findings)
 
 
 def reproduce(session: Session, run_id: int) -> Reproduction:
@@ -171,12 +279,28 @@ def reproduce(session: Session, run_id: int) -> Reproduction:
             f"run {run_id} has no window rows; there is nothing to compare against"
         )
 
-    comparisons = tuple(_replay(session, run, window) for window in stored)
     current = backtest_repo.resolve_commit()
+    integrity = check_integrity(run, backtest_repo.windows_of(session, run_id))
+    if integrity:
+        # The rows are not the ones that were written, so replaying them
+        # answers a question nobody asked — and a tampered period would raise
+        # out of the replay before these findings could be reported at all.
+        return Reproduction(
+            run_id=run_id,
+            windows=(),
+            integrity=integrity,
+            code_matches=current.sha == run.git_commit_sha,
+            stored_commit=run.git_commit_sha,
+            current_commit=current.sha,
+            stored_was_dirty=run.git_dirty,
+        )
+
+    comparisons = tuple(_replay(session, run, window) for window in stored)
 
     return Reproduction(
         run_id=run_id,
         windows=comparisons,
+        integrity=integrity,
         code_matches=current.sha == run.git_commit_sha,
         stored_commit=run.git_commit_sha,
         current_commit=current.sha,

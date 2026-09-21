@@ -20,7 +20,7 @@ not a differently-scoped answer that looks like the one requested.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -526,9 +526,19 @@ def fit_trace_fingerprint(report: WalkForwardReport) -> str:
     the choices are constant, and the digest then pins the window boundaries,
     which costs nothing and keeps the column uniform.
     """
-    trace = "\n".join(
-        f"{w.index}|{w.sample_type}|{w.start}|{w.end}|{w.chosen.canonical}" for w in report.windows
+    return fit_trace_fingerprint_of(
+        (w.index, w.sample_type, w.start, w.end, w.chosen.canonical) for w in report.windows
     )
+
+
+def fit_trace_fingerprint_of(rows: Iterable[tuple[object, ...]]) -> str:
+    """The digest itself, over rows in whatever form the caller holds them.
+
+    Split out so a stored run can be digested from its own window rows and
+    compared against its header — the only way to tell that the rows are the
+    ones the header was written for.
+    """
+    trace = "\n".join("|".join(str(part) for part in row) for row in rows)
     return hashlib.sha256(trace.encode("utf-8")).hexdigest()[:16]
 
 
