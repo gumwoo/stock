@@ -499,10 +499,15 @@ class TestTheIdentityCheckIsComplete:
         report, _ = run_and_store(s, iid)
 
         stored = {c.name for c in BacktestRun.__table__.columns}
+        # When and where the run happened, rather than which experiment it was.
         provenance = {"id", "git_commit_sha", "git_dirty", "started_at", "ingested_at"}
+        # Written after the run, so not something a report could be compared
+        # against: the holdout does not exist when the run is stored.
+        # `test_reproduce` checks this one against the holdout row itself.
+        written_later = {"holdout_strategy_fingerprint"}
         compared = set(svc.experiment_fields(report))  # type: ignore[arg-type]
 
-        assert stored - provenance - compared == set()
+        assert stored - provenance - written_later - compared == set()
 
     def test_a_different_strategy_is_refused(self, instrument: tuple[Session, int]) -> None:
         """The live failure, with everything else held equal."""

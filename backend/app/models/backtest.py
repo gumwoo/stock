@@ -90,6 +90,15 @@ class BacktestRun(Base):
         "overfitting check.",
     )
 
+    holdout_strategy_fingerprint: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+        doc="Which strategy the holdout was finally evaluated with, written "
+        "when that measurement is stored. A fitted run's final refit need not "
+        "match any fold's choice, so the fit trace cannot anchor it; without "
+        "this the holdout row could be rewritten to a different strategy and "
+        "still replay to its own figures. Null until a holdout exists.",
+    )
     fit_trace_fingerprint: Mapped[str] = mapped_column(
         String(16),
         nullable=False,

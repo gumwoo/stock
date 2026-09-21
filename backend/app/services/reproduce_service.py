@@ -297,6 +297,38 @@ def check_integrity(run: BacktestRun, windows: Sequence[BacktestWindow]) -> tupl
             )
 
     holdouts = [w for w in windows if w.sample_type is SampleType.HOLDOUT]
+
+    # Which strategy the final measurement used. A fitted run's last refit
+    # need not match any fold's choice, so the fit trace does not cover it;
+    # a fixed run's must be the header's strategy, and either way the run
+    # records the fingerprint when the holdout is stored. Without it the
+    # holdout row could be rewritten to a different strategy, its figures
+    # recomputed to match, and the whole run still report as reproduced.
+    if holdouts and run.holdout_strategy_fingerprint is None:
+        findings.append(
+            "the run has a holdout measurement but records no strategy for it, so "
+            "nothing ties that measurement to this experiment"
+        )
+    for holdout in holdouts:
+        if (
+            run.holdout_strategy_fingerprint is not None
+            and holdout.chosen_fingerprint != run.holdout_strategy_fingerprint
+        ):
+            findings.append(
+                f"the holdout row ran {holdout.chosen_kind}@{holdout.chosen_version} "
+                f"({holdout.chosen_fingerprint}), but the run records its holdout as "
+                f"{run.holdout_strategy_fingerprint}"
+            )
+        if run.fitter_version is None and holdout.chosen_fingerprint != run.strategy_fingerprint:
+            findings.append(
+                f"the run records no fitter, so its holdout ran the header's strategy — "
+                f"but the holdout row ran {holdout.chosen_kind}@{holdout.chosen_version}"
+            )
+    if not holdouts and run.holdout_strategy_fingerprint is not None:
+        findings.append(
+            f"the run records a holdout strategy ({run.holdout_strategy_fingerprint}) "
+            "but has no holdout measurement"
+        )
     if len(holdouts) > 1:
         findings.append(f"the run has {len(holdouts)} holdout rows; it may have one")
     for holdout in holdouts:

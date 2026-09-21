@@ -776,3 +776,148 @@ class TestTheHeaderMustDescribeTheWindows:
         _, run = store(s, iid, StrategySpec(fit=fit, fitter_version="grid@v1"))
 
         assert rs.reproduce(s, run.id).reproduced
+
+
+class TestTheHoldoutStrategyIsAnchored:
+    """The fit trace covers the measured windows and deliberately not the
+    holdout, because a fitted run's final refit need not match any fold's
+    choice. That left the holdout's own strategy tied to nothing:
+
+        fixed run, holdout swapped to buy_and_hold   reproduced=True
+        fitted run, holdout swapped to buy_and_hold  reproduced=True
+
+    Rewrite the holdout row to another strategy, recompute its fingerprint and
+    its twelve measurements, and it replays to exactly what it now claims —
+    leaving the experiment's final verdict a measurement of something it never
+    ran.
+    """
+
+    @staticmethod
+    def _swap(s: Session, run_id: int, definition: StrategyDefinition) -> None:
+        s.execute(
+            text(
+                "UPDATE backtest_window SET chosen_kind = :k, chosen_version = :v, "
+                "chosen_params = cast(:p as jsonb), chosen_fingerprint = :f "
+                "WHERE run_id = :r AND sample_type = 'HOLDOUT'"
+            ),
+            {
+                "k": definition.kind,
+                "v": definition.version,
+                "p": json.dumps(dict(definition.params)),
+                "f": definition.fingerprint,
+                "r": run_id,
+            },
+        )
+        s.commit()
+        s.expire_all()
+
+    def test_the_run_records_which_strategy_took_the_measurement(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        s, iid = instrument
+        report, run = store(s, iid)
+        svc.evaluate_and_persist_holdout(s, run, report)
+        s.commit()
+
+        holdout = backtest_repo.holdout_of(s, run.id)
+
+        assert holdout is not None
+        assert run.holdout_strategy_fingerprint == holdout.chosen_fingerprint
+
+    def test_it_is_null_until_a_holdout_is_taken(self, instrument: tuple[Session, int]) -> None:
+        """A run has no holdout until one is evaluated, deliberately."""
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        assert run.holdout_strategy_fingerprint is None
+        assert rs.reproduce(s, run.id).reproduced
+
+    def test_a_swapped_fixed_holdout_is_caught(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report, run = store(s, iid)
+        svc.evaluate_and_persist_holdout(s, run, report)
+        s.commit()
+
+        self._swap(s, run.id, buy_and_hold())
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert any("holdout row ran" in finding for finding in result.integrity)
+
+    def test_a_swapped_fitted_holdout_is_caught(self, instrument: tuple[Session, int]) -> None:
+        """The case the fit trace cannot cover."""
+        s, iid = instrument
+        shorts = iter([10, 15, 20, 25, 30, 35])
+
+        def fit(view: MarketData, i: int, lo: date, hi: date) -> StrategyDefinition:
+            return moving_average_cross(short=next(shorts), long=40)
+
+        report, run = store(s, iid, StrategySpec(fit=fit, fitter_version="grid@v1"))
+        svc.evaluate_and_persist_holdout(s, run, report)
+        s.commit()
+
+        self._swap(s, run.id, buy_and_hold())
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert any("holdout row ran" in finding for finding in result.integrity)
+
+    def test_a_fixed_run_whose_holdout_differs_from_its_header_is_caught(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """Even with the anchor rewritten to agree with the tampered row."""
+        s, iid = instrument
+        report, run = store(s, iid)
+        svc.evaluate_and_persist_holdout(s, run, report)
+        s.commit()
+
+        swapped = buy_and_hold()
+        self._swap(s, run.id, swapped)
+        s.execute(
+            text("UPDATE backtest_run SET holdout_strategy_fingerprint = :f WHERE id = :r"),
+            {"f": swapped.fingerprint, "r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        result = rs.reproduce(s, run.id)
+
+        assert not result.reproduced
+        assert any("ran the header's strategy" in finding for finding in result.integrity)
+
+    def test_a_holdout_with_no_recorded_strategy_is_caught(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        s, iid = instrument
+        report, run = store(s, iid)
+        svc.evaluate_and_persist_holdout(s, run, report)
+        s.commit()
+
+        s.execute(
+            text("UPDATE backtest_run SET holdout_strategy_fingerprint = NULL WHERE id = :r"),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        assert not rs.reproduce(s, run.id).reproduced
+
+    def test_a_recorded_strategy_with_no_holdout_is_caught(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        s, iid = instrument
+        _, run = store(s, iid)
+
+        s.execute(
+            text(
+                "UPDATE backtest_run SET holdout_strategy_fingerprint = 'deadbeefdeadbeef' "
+                "WHERE id = :r"
+            ),
+            {"r": run.id},
+        )
+        s.commit()
+        s.expire_all()
+
+        assert not rs.reproduce(s, run.id).reproduced

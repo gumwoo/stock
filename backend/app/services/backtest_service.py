@@ -650,7 +650,15 @@ def evaluate_and_persist_holdout(
     """
     _assert_same_experiment(run, report)
     result = evaluate_holdout(session, report)
-    return _save_window(session, run, result)
+    stored = _save_window(session, run, result)
+
+    # Anchor which strategy the final measurement used. A fitted run's last
+    # refit need not match any fold's choice, so the fit trace cannot cover
+    # it, and without this the holdout row can be rewritten to a different
+    # strategy and still replay to its own figures.
+    run.holdout_strategy_fingerprint = result.chosen.fingerprint
+    session.flush()
+    return stored
 
 
 def _assert_same_experiment(run: BacktestRun, report: WalkForwardReport) -> None:
