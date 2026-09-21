@@ -36,8 +36,11 @@ from app.repositories import candle_repo
 from app.repositories import fundamental_repo as frepo
 from app.repositories.candle_repo import CandleRow
 from app.repositories.fundamental_repo import FundamentalContext, FundamentalRow
+from tests.conftest import fake_cik
 
 pytestmark = pytest.mark.integration
+
+CIK = fake_cik(__name__)
 
 US = MarketCalendar(Market.US)
 
@@ -93,7 +96,7 @@ def planted(engine: object) -> Iterator[tuple[Session, int, datetime]]:
     """Honest history, plus one bar from the future."""
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
-        inst = Instrument(market=Market.US, name="LEAK TEST CORP", us_cik="9999999996")
+        inst = Instrument(market=Market.US, name="LEAK TEST CORP", us_cik=CIK)
         s.add(inst)
         s.flush()
         iid = inst.instrument_id

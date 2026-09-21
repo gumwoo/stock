@@ -40,8 +40,12 @@ from app.repositories.fundamental_repo import (
     FundamentalContext,
     FundamentalRow,
 )
+from tests.conftest import fake_cik
 
 pytestmark = pytest.mark.integration
+
+CIK = fake_cik(__name__)
+CIK_SECOND = fake_cik(__name__ + ".second")
 
 US = MarketCalendar(Market.US)
 
@@ -80,7 +84,7 @@ def company(engine: object) -> Iterator[tuple[Session, int]]:
     """The real shape of the problem: a register older than the value source."""
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
-        inst = Instrument(market=Market.US, name="ABSENCE TEST CORP", us_cik="9999999997")
+        inst = Instrument(market=Market.US, name="ABSENCE TEST CORP", us_cik=CIK)
         s.add(inst)
         s.flush()
         iid = inst.instrument_id
@@ -232,7 +236,7 @@ class TestTheOnlyClaimAboutTheWorld:
         """With no register there is no evidence, so no claim is permitted."""
         factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
         with factory() as s:
-            inst = Instrument(market=Market.US, name="NO REGISTER CORP", us_cik="9999999996")
+            inst = Instrument(market=Market.US, name="NO REGISTER CORP", us_cik=CIK_SECOND)
             s.add(inst)
             s.flush()
             iid = inst.instrument_id

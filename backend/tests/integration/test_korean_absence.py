@@ -40,8 +40,11 @@ from app.repositories.fundamental_repo import (
     FundamentalContext,
     FundamentalRow,
 )
+from tests.conftest import fake_corp_code
 
 pytestmark = pytest.mark.integration
+
+CIK = fake_corp_code(__name__)
 
 KRX = MarketCalendar(Market.KR)
 
@@ -77,7 +80,7 @@ def filer(engine: object) -> Iterator[tuple[Session, int]]:
     """
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
-        inst = Instrument(market=Market.KR, name="한국부재테스트", kr_corp_code="99999997")
+        inst = Instrument(market=Market.KR, name="한국부재테스트", kr_corp_code=CIK)
         s.add(inst)
         s.flush()
         iid = inst.instrument_id

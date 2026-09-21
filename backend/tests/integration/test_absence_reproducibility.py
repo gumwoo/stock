@@ -37,8 +37,11 @@ from app.repositories.fundamental_repo import (
     FundamentalContext,
     FundamentalRow,
 )
+from tests.conftest import fake_cik
 
 pytestmark = pytest.mark.integration
+
+CIK = fake_cik(__name__)
 
 US = MarketCalendar(Market.US)
 
@@ -73,7 +76,7 @@ def company(engine: object) -> Iterator[tuple[Session, int]]:
     """One fact held since 2024, so value coverage begins before the question."""
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
-        inst = Instrument(market=Market.US, name="REPRO TEST CORP", us_cik="9999999995")
+        inst = Instrument(market=Market.US, name="REPRO TEST CORP", us_cik=CIK)
         s.add(inst)
         s.flush()
         iid = inst.instrument_id

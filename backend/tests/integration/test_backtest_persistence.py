@@ -31,11 +31,22 @@ from app.repositories.backtest_repo import CodeVersion
 from app.repositories.candle_repo import CandleRow
 from app.services import backtest_service as svc
 from app.services.backtest_service import RunRequest, StrategySpec
+from tests.conftest import fake_cik
 
 pytestmark = pytest.mark.integration
 
+CIK = fake_cik(__name__)
+CIK_SECOND = fake_cik(__name__ + ".second")
+
 US = MarketCalendar(Market.US)
-HISTORY = US.sessions_between(date(2024, 1, 2), date(2025, 12, 31))
+HISTORY = US.sessions_between(date(2024, 1, 2), date(2024, 12, 31))
+
+# One year and 60/30 windows rather than two years and 120/60. Same properties
+# — three windows still tile, still roll, still reserve a holdout — at roughly
+# a quarter of the simulation work, which these tests were spending minutes on.
+TRAIN = 60
+EVAL = 30
+HOLDOUT = 30
 CODE = CodeVersion(sha="a" * 40, dirty=False)
 
 
@@ -71,7 +82,7 @@ def db() -> Iterator[object]:
 def instrument(db: object) -> Iterator[tuple[Session, int]]:
     factory = sessionmaker(bind=db, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
-        inst = Instrument(market=Market.US, name="PERSIST TEST CORP", us_cik="9999999992")
+        inst = Instrument(market=Market.US, name="PERSIST TEST CORP", us_cik=CIK)
         s.add(inst)
         s.flush()
         iid = inst.instrument_id
@@ -106,9 +117,9 @@ def run_and_store(
         s,
         spec or StrategySpec(definition=moving_average_cross(short=10, long=30)),
         request_for(iid),
-        train_sessions=120,
-        eval_sessions=60,
-        holdout_sessions=60,
+        train_sessions=TRAIN,
+        eval_sessions=EVAL,
+        holdout_sessions=HOLDOUT,
         **kwargs,  # type: ignore[arg-type]
     )
     run = svc.persist(s, report, code=CODE)
@@ -153,8 +164,8 @@ class TestTheThreeAxes:
             s,
             StrategySpec(definition=buy_and_hold()),
             request_for(iid),
-            train_sessions=120,
-            eval_sessions=60,
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
         )
         run = svc.persist(s, report, code=CodeVersion(sha="b" * 40, dirty=True))
         s.commit()
@@ -194,8 +205,8 @@ class TestCostsAreExpanded:
                 end=HISTORY[-1],
                 starting_cash=Decimal("100000"),
             ),
-            train_sessions=120,
-            eval_sessions=60,
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
         )
         run = svc.persist(s, report, code=CODE)
         s.commit()
@@ -270,7 +281,22 @@ class TestWindowsAreRowsNotAverages:
         assert any(w.profit_factor is None for w in windows)
 
 
-class TestTheHoldoutIsWrittenOnce:
+class TestTheHoldoutBelongsToItsRun:
+    """Two ways a run could end up with a holdout that is not its own.
+
+    Reproduced live before the fix, on a stored Apple run:
+
+        holdout rows on run #36: 2
+          index=5  2026-06-25..2026-09-18  return +0.219
+          index=6  2026-06-26..2026-09-18  return -0.211
+
+    The second was Samsung's, from a different experiment entirely. It fit
+    because the slot constraint keyed on window index as well as sample type,
+    so a holdout at a different index was a different slot, and because
+    storing one checked that it *was* a holdout rather than that it was *this
+    run's* holdout.
+    """
+
     def test_walk_forward_persistence_writes_no_holdout(
         self, instrument: tuple[Session, int]
     ) -> None:
@@ -284,7 +310,7 @@ class TestTheHoldoutIsWrittenOnce:
         s, iid = instrument
         report, run = run_and_store(s, iid)
 
-        stored = svc.persist_holdout(s, run, svc.evaluate_holdout(s, report))  # type: ignore[arg-type]
+        stored = svc.evaluate_and_persist_holdout(s, run, report)  # type: ignore[arg-type]
         s.commit()
 
         assert stored.sample_type is SampleType.HOLDOUT
@@ -293,27 +319,137 @@ class TestTheHoldoutIsWrittenOnce:
     def test_a_second_one_is_refused(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument
         report, run = run_and_store(s, iid)
-        final = svc.evaluate_holdout(s, report)  # type: ignore[arg-type]
 
-        svc.persist_holdout(s, run, final)
+        svc.evaluate_and_persist_holdout(s, run, report)  # type: ignore[arg-type]
         s.commit()
 
         with pytest.raises(backtest_repo.HoldoutAlreadyRecordedError):
-            svc.persist_holdout(s, run, final)
+            svc.evaluate_and_persist_holdout(s, run, report)  # type: ignore[arg-type]
 
-    def test_only_one_row_survives_the_attempt(self, instrument: tuple[Session, int]) -> None:
+    def test_a_second_one_at_a_different_index_is_also_refused(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """The slot constraint alone allowed this; a partial unique index
+        on (run_id) where HOLDOUT is what actually forbids it."""
         s, iid = instrument
         report, run = run_and_store(s, iid)
-        final = svc.evaluate_holdout(s, report)  # type: ignore[arg-type]
+        first = svc.evaluate_holdout(s, report)  # type: ignore[arg-type]
 
-        svc.persist_holdout(s, run, final)
+        backtest_repo.save_window(
+            s,
+            run,  # type: ignore[arg-type]
+            window_index=first.index,
+            sample_type=SampleType.HOLDOUT,
+            period_start=first.start,
+            period_end=first.end,
+            chosen=first.chosen,
+            sessions=first.sessions,
+            observations=0,
+            total_return=None,
+            cagr=None,
+            max_drawdown=None,
+            sharpe=None,
+            win_rate=None,
+            profit_factor=None,
+            trades=0,
+            abstained=0,
+            without_data=0,
+            unfilled=0,
+        )
+        s.commit()
+
+        with pytest.raises(backtest_repo.HoldoutAlreadyRecordedError):
+            backtest_repo.save_window(
+                s,
+                run,  # type: ignore[arg-type]
+                window_index=first.index + 1,  # a different slot
+                sample_type=SampleType.HOLDOUT,
+                period_start=first.start,
+                period_end=first.end,
+                chosen=first.chosen,
+                sessions=first.sessions,
+                observations=0,
+                total_return=None,
+                cagr=None,
+                max_drawdown=None,
+                sharpe=None,
+                win_rate=None,
+                profit_factor=None,
+                trades=0,
+                abstained=0,
+                without_data=0,
+                unfilled=0,
+            )
+
+    def test_only_one_row_survives(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report, run = run_and_store(s, iid)
+
+        svc.evaluate_and_persist_holdout(s, run, report)  # type: ignore[arg-type]
         s.commit()
         with pytest.raises(backtest_repo.HoldoutAlreadyRecordedError):
-            svc.persist_holdout(s, run, final)
-        s.commit()
+            svc.evaluate_and_persist_holdout(s, run, report)  # type: ignore[arg-type]
+        s.rollback()
 
         rows = backtest_repo.windows_of(s, run.id, sample_type=SampleType.HOLDOUT)  # type: ignore[attr-defined]
         assert len(rows) == 1
+
+    def test_another_experiments_holdout_is_refused(self, instrument: tuple[Session, int]) -> None:
+        """The live failure: a different instrument's holdout on this run."""
+        s, iid = instrument
+        _, run = run_and_store(s, iid)
+
+        other = Instrument(market=Market.US, name="OTHER CORP", us_cik=CIK_SECOND)
+        s.add(other)
+        s.flush()
+        candle_repo.save_revisions(
+            s,
+            [
+                _row(other.instrument_id, day, Decimal(200 + (i % 53)))
+                for i, day in enumerate(HISTORY)
+            ],
+        )
+        s.commit()
+
+        foreign = svc.walk_forward(
+            s,
+            StrategySpec(definition=moving_average_cross(short=10, long=30)),
+            request_for(other.instrument_id),
+            train_sessions=TRAIN,
+            eval_sessions=EVAL,
+            holdout_sessions=HOLDOUT,
+        )
+
+        with pytest.raises(svc.HoldoutError, match="instrument"):
+            svc.evaluate_and_persist_holdout(s, run, foreign)  # type: ignore[arg-type]
+
+        s.rollback()
+        s.execute(
+            text("DELETE FROM candle WHERE instrument_id = :i"),
+            {"i": other.instrument_id},
+        )
+        s.execute(
+            text("DELETE FROM instrument WHERE instrument_id = :i"),
+            {"i": other.instrument_id},
+        )
+        s.commit()
+
+    def test_a_changed_split_is_refused(self, instrument: tuple[Session, int]) -> None:
+        """Same instrument, different experiment — still not this run."""
+        s, iid = instrument
+        _, run = run_and_store(s, iid)
+
+        different = svc.walk_forward(
+            s,
+            StrategySpec(definition=moving_average_cross(short=10, long=30)),
+            request_for(iid),
+            train_sessions=TRAIN - 20,  # a different split
+            eval_sessions=EVAL,
+            holdout_sessions=HOLDOUT,
+        )
+
+        with pytest.raises(svc.HoldoutError, match="train sessions"):
+            svc.evaluate_and_persist_holdout(s, run, different)  # type: ignore[arg-type]
 
 
 class TestProvenanceCannotBeSkipped:

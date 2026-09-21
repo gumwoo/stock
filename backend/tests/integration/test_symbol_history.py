@@ -23,8 +23,11 @@ from app.config import get_settings
 from app.core.calendar import Market
 from app.models import Base, SymbolHistory
 from app.repositories import instrument_repo
+from tests.conftest import fake_cik
 
 pytestmark = pytest.mark.integration
+
+CIK = fake_cik(__name__)
 
 CHANGEOVER = date(2026, 9, 19)
 
@@ -58,7 +61,7 @@ def rename(session: Session, symbol: str, *, valid_from: date | None = None) -> 
         market=Market.US,
         name="Boundary Test Corp",
         symbol=symbol,
-        us_cik="9999999999",
+        us_cik=CIK,
         listed_at=date(2020, 1, 1),
         symbol_valid_from=valid_from,
     )

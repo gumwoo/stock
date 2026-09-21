@@ -39,8 +39,11 @@ from app.repositories.fundamental_repo import (
     RevisionPolicy,
 )
 from app.services import fundamental_service as service
+from tests.conftest import fake_cik
 
 pytestmark = pytest.mark.integration
+
+CIK = fake_cik(__name__)
 
 US = MarketCalendar(Market.US)
 CONCEPT = "RevenueFromContractWithCustomerExcludingAssessedTax"
@@ -72,7 +75,7 @@ def engine() -> Iterator[object]:
 def company(engine: object) -> Iterator[tuple[Session, int]]:
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
-        inst = Instrument(market=Market.US, name="YOY TEST CORP", us_cik="9999999994")
+        inst = Instrument(market=Market.US, name="YOY TEST CORP", us_cik=CIK)
         s.add(inst)
         s.flush()
         iid = inst.instrument_id

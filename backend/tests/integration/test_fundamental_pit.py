@@ -46,8 +46,11 @@ from app.repositories.fundamental_repo import (
     FundamentalRow,
     RevisionPolicy,
 )
+from tests.conftest import fake_cik
 
 pytestmark = pytest.mark.integration
+
+CIK = fake_cik(__name__)
 
 US = MarketCalendar(Market.US)
 
@@ -84,7 +87,7 @@ def engine() -> Iterator[object]:
 def apple(engine: object) -> Iterator[tuple[Session, int]]:
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
-        inst = Instrument(market=Market.US, name="PIT TEST CORP", us_cik="9999999998")
+        inst = Instrument(market=Market.US, name="PIT TEST CORP", us_cik=CIK)
         s.add(inst)
         s.flush()
         iid = inst.instrument_id

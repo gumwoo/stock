@@ -38,8 +38,11 @@ from app.core.types import Interval
 from app.models import Base, Instrument
 from app.repositories import candle_repo
 from app.repositories.candle_repo import CandleRow
+from tests.conftest import fake_cik
 
 pytestmark = pytest.mark.integration
+
+CIK = fake_cik(__name__)
 
 US = MarketCalendar(Market.US)
 
@@ -89,7 +92,7 @@ def db() -> Iterator[object]:
 def seeded(db: object) -> Iterator[tuple[Session, int, datetime]]:
     factory = sessionmaker(bind=db, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
-        inst = Instrument(market=Market.US, name="REPRO TEST CORP", us_cik="9999999995")
+        inst = Instrument(market=Market.US, name="REPRO TEST CORP", us_cik=CIK)
         s.add(inst)
         s.flush()
         iid = inst.instrument_id

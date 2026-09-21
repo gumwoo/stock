@@ -547,15 +547,60 @@ def persist(
     return run
 
 
-def persist_holdout(session: Session, run: BacktestRun, result: WindowResult) -> BacktestWindow:
-    """Store the final measurement, once.
+def evaluate_and_persist_holdout(
+    session: Session, run: BacktestRun, report: WalkForwardReport
+) -> BacktestWindow:
+    """Take the final measurement and store it against the run it concludes.
 
-    A second attempt collides on the run's unique slot rather than appending a
-    second opinion on the one period nothing was allowed to iterate against.
+    One call rather than two, because the gap between them was reachable. The
+    earlier `persist_holdout(session, run, result)` checked only that the
+    result *was* a holdout — not that it came from this run. Reproduced live:
+    Samsung's holdout stored on Apple's run, sitting beside the real one,
+
+        run #36 holdout rows: 2
+          index=5  2026-06-25..2026-09-18  return +0.219
+          index=6  2026-06-26..2026-09-18  return -0.211
+
+    and nothing in the row said which experiment either belonged to.
+
+    The database now forbids two holdouts per run outright. This forbids the
+    other half: a holdout from a different experiment taking the one slot. The
+    run row and the report are compared on every coordinate that defines the
+    experiment, so a mismatch is refused rather than recorded.
     """
-    if result.sample_type is not SampleType.HOLDOUT:
-        raise HoldoutError(f"{result.sample_type} is not a holdout measurement")
+    _assert_same_experiment(run, report)
+    result = evaluate_holdout(session, report)
     return _save_window(session, run, result)
+
+
+def _assert_same_experiment(run: BacktestRun, report: WalkForwardReport) -> None:
+    """Every coordinate that makes a run the run it is."""
+    request = report.request
+    mismatches = [
+        name
+        for name, stored, live in (
+            ("instrument", run.instrument_id, request.instrument_id),
+            ("period start", run.period_start, request.start),
+            ("period end", run.period_end, request.end),
+            ("interval", run.interval, request.interval),
+            ("data snapshot", run.data_snapshot_at, report.data_snapshot_at),
+            ("train sessions", run.train_sessions, report.train_sessions),
+            ("eval sessions", run.eval_sessions, report.eval_sessions),
+            ("anchored", run.anchored, report.anchored),
+            ("holdout start", run.holdout_start, report.holdout_start),
+            ("holdout end", run.holdout_end, report.holdout_end),
+            ("fitter version", run.fitter_version, report.spec.fitter_version),
+            ("starting cash", run.starting_cash, request.starting_cash),
+        )
+        if stored != live
+    ]
+    if mismatches:
+        raise HoldoutError(
+            f"this report is not the run stored as #{run.id}: "
+            + ", ".join(mismatches)
+            + " differ. A holdout concludes one experiment; attaching another's "
+            "would put a number on the run that nothing in the row explains"
+        )
 
 
 def _save_window(session: Session, run: BacktestRun, window: WindowResult) -> BacktestWindow:

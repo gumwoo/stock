@@ -35,8 +35,11 @@ from app.repositories import candle_repo
 from app.repositories.candle_repo import CandleRow
 from app.services import backtest_service as svc
 from app.services.backtest_service import BacktestWindowError, RunRequest
+from tests.conftest import fake_cik
 
 pytestmark = pytest.mark.integration
+
+CIK = fake_cik(__name__)
 
 US = MarketCalendar(Market.US)
 
@@ -79,7 +82,7 @@ def narrow(db: object) -> Iterator[tuple[Session, int]]:
     """An instrument whose history is shorter than people will ask about."""
     factory = sessionmaker(bind=db, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
-        inst = Instrument(market=Market.US, name="WINDOW TEST CORP", us_cik="9999999994")
+        inst = Instrument(market=Market.US, name="WINDOW TEST CORP", us_cik=CIK)
         s.add(inst)
         s.flush()
         iid = inst.instrument_id
