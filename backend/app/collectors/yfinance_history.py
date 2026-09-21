@@ -90,7 +90,14 @@ class YFinanceHistoryCollector(BaseCollector):
                 warnings.append(f"{ticker}: no data returned")
                 continue
 
-            rows = self._to_rows(frame, instrument.instrument_id, calendar, now=utc_now())
+            rows, before_calendar = self._to_rows(
+                frame, instrument.instrument_id, calendar, now=utc_now()
+            )
+            if before_calendar:
+                warnings.append(
+                    f"{ticker}: {before_calendar} bars predate the {instrument.market} "
+                    f"calendar ({calendar.first_session}) and were not stored"
+                )
             read += len(rows)
             saved += candle_repo.save_revisions(session, rows)
 
@@ -106,8 +113,10 @@ class YFinanceHistoryCollector(BaseCollector):
     @staticmethod
     def _to_rows(
         frame: object, instrument_id: int, calendar: MarketCalendar, *, now: datetime
-    ) -> list[CandleRow]:
+    ) -> tuple[list[CandleRow], int]:
         """Convert a yfinance frame into candle rows anchored to session opens.
+
+        Returns the rows and how many bars fell before the calendar begins.
 
         yfinance indexes daily bars by date in the exchange's local timezone.
         We re-anchor each bar to that session's actual opening instant in UTC,
@@ -120,8 +129,20 @@ class YFinanceHistoryCollector(BaseCollector):
         filters on availability as well, so this is the first of two guards.
         """
         rows: list[CandleRow] = []
+        before_calendar = 0
         for index, row in frame.iterrows():  # type: ignore[attr-defined]
             day: date = index.date()
+            if day < calendar.first_session:
+                # `--period max` reaches past the loaded calendar: Apple listed
+                # in 1980 and XNYS is loaded from 1990. A bar's `available_at`
+                # is its session close, and there is no session to ask about,
+                # so the bar cannot be given an honest availability at all.
+                # Skipped and counted rather than dropped quietly, and counted
+                # rather than fixed by widening the calendar — nothing here
+                # needs 1980, and loading two more decades of XKRX to store
+                # bars no backtest reaches would be paying for the wrong thing.
+                before_calendar += 1
+                continue
             if not calendar.is_session(day):
                 # yfinance occasionally emits a bar for a non-session day.
                 continue
@@ -145,7 +166,7 @@ class YFinanceHistoryCollector(BaseCollector):
                     source="YFINANCE",
                 )
             )
-        return rows
+        return rows, before_calendar
 
 
 class FxRateCollector(BaseCollector):
