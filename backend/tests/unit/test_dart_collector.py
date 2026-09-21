@@ -293,7 +293,7 @@ LEGACY = [
         "bfefrmtrm_amount": "228,692,667",
     },
     {
-        "account_id": "ifrs_ProfitLoss",
+        "account_id": "ifrs_ProfitLossAttributableToOwnersOfParent",
         "rcept_no": "20160330003536",
         "currency": "KRW",
         "thstrm_amount": "19,060,144",
@@ -391,3 +391,60 @@ class TestBothIfrsNamespaces:
         unknown = [{**LEGACY[0], "account_id": "entity00126380_Revenue"}]
 
         assert self.rows(unknown) == []
+
+
+class TestTheTotalsAreNotTheParentFigures:
+    """`ifrs-full_ProfitLoss` is not `NetIncomeLoss`, and the gap is material.
+
+    us-gaap's `NetIncomeLoss` and `StockholdersEquity` are both attributable to
+    the parent; the including-noncontrolling-interests elements are
+    `ProfitLoss` and
+    `StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest`.
+    The SEC collector reads the us-gaap elements directly, so a Korean row
+    filled from an IFRS total would share a column with an American row and
+    mean something else.
+
+    Measured on FY2023 filings the two profit figures differ by 34.8% for
+    LG화학, 8.0% for POSCO홀딩스 and 6.5% for 삼성전자, and NAVER's parent
+    figure is the larger. A cross-market comparison was comparing two different
+    quantities, and nothing in the stored row said so.
+    """
+
+    @pytest.mark.parametrize(
+        "account_id",
+        [
+            "ifrs-full_ProfitLoss",
+            "ifrs_ProfitLoss",
+            "ifrs-full_Equity",
+            "ifrs_Equity",
+        ],
+    )
+    def test_an_including_nci_total_is_not_mapped(self, account_id: str) -> None:
+        assert account_id not in ACCOUNT_MAP
+
+    @pytest.mark.parametrize(
+        ("account_id", "concept"),
+        [
+            ("ifrs-full_ProfitLossAttributableToOwnersOfParent", "NetIncomeLoss"),
+            ("ifrs_ProfitLossAttributableToOwnersOfParent", "NetIncomeLoss"),
+            ("ifrs-full_EquityAttributableToOwnersOfParent", "StockholdersEquity"),
+            ("ifrs_EquityAttributableToOwnersOfParent", "StockholdersEquity"),
+        ],
+    )
+    def test_the_parent_figure_is(self, account_id: str, concept: str) -> None:
+        assert ACCOUNT_MAP[account_id] == concept
+
+    def test_a_total_in_the_payload_is_ignored(self) -> None:
+        """Not merely unmapped in the table — dropped by `_to_rows` too."""
+        payload = [{**LEGACY[0], "account_id": "ifrs_ProfitLoss"}]
+        collector = DartFundamentalCollector()
+
+        rows, _ = collector._to_rows(
+            payload,  # type: ignore[arg-type]
+            instrument_id=1,
+            business_year=2015,
+            fiscal_end_month=12,
+            calendar=MarketCalendar(Market.KR),
+        )
+
+        assert list(rows) == []

@@ -78,14 +78,38 @@ BASE = "https://opendart.fss.or.kr/api"
 # years on technicals alone while the coverage check saw filings and passed.
 _IFRS_ACCOUNTS: dict[str, str] = {
     "Revenue": "Revenues",
-    "ProfitLoss": "NetIncomeLoss",
+    "ProfitLossAttributableToOwnersOfParent": "NetIncomeLoss",
     "BasicEarningsLossPerShare": "EarningsPerShareBasic",
     "DilutedEarningsLossPerShare": "EarningsPerShareDiluted",
     "Assets": "Assets",
     "Liabilities": "Liabilities",
-    "Equity": "StockholdersEquity",
+    "EquityAttributableToOwnersOfParent": "StockholdersEquity",
     "CashAndCashEquivalents": "CashAndCashEquivalentsAtCarryingValue",
 }
+
+# Deliberately absent: `ifrs-full_ProfitLoss` and `ifrs-full_Equity`.
+#
+# They are the including-noncontrolling-interests totals, and the us-gaap names
+# this collector maps onto are not. `NetIncomeLoss` in us-gaap is income
+# attributable to the parent — the including-NCI figure is `ProfitLoss`, a
+# different element — and `StockholdersEquity` is likewise parent-only against
+# `StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest`.
+# The SEC collector pulls those us-gaap names straight from companyfacts, so a
+# Korean row filled from the IFRS totals and an American row filled from the
+# us-gaap element would sit in the same column meaning different things.
+#
+# The earlier mapping paired them by name and the gap is not cosmetic. On
+# FY2023 filings the two profit figures differ by 34.8% for LG화학, 8.0% for
+# POSCO홀딩스 and 6.5% for 삼성전자, and NAVER's parent figure is the larger of
+# the two. A cross-sectional comparison between a Korean and a US instrument
+# was measuring two different quantities against each other.
+#
+# Dropping rather than remapping costs coverage where a filer tags only the
+# total — 현대자동차 tags only the parent split in 2019 and NAVER only the
+# total — and that is the right trade. A year without an anchorable figure is
+# reported by the concept count above and refused by the backtest's coverage
+# gate; a year holding the wrong quantity under the right name is reported by
+# nothing.
 
 # Namespaces one concept may arrive under, newest first.
 IFRS_PREFIXES = ("ifrs-full_", "ifrs_")

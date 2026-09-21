@@ -324,6 +324,20 @@ changed on the strength of them.
   `require_complete_sessions=False` accepts them, marking each at the last
   price that printed. Resolving it properly needs a newer calendar release or
   KRX's own holiday record, which is due with the Korean universe expansion.
+- **DART returns the current version of a report, not the version as filed.**
+  `fnlttSinglAcntAll` answers with whatever the latest correction says, and the
+  receipt number it carries is the correction's — so that is the date we can
+  honestly call the figure knowable from. Where a company has never corrected,
+  this is invisible: Samsung's history arrives as one filing per year, each
+  carrying three. Where a company has, the whole history collapses onto the
+  correction. 현대자동차 restated business years 2013 through 2020 in a single
+  filing on 2022-02-17, and 신한지주 did the same on 2024-05-02, so for those
+  two we genuinely do not know what the market saw in 2016 — the original
+  numbers are not retrievable from this endpoint. The backtest's coverage gate
+  refuses those periods, which is correct rather than a defect, and it means
+  seven of the nine Korean instruments are usable from 2016 and two are not.
+  Recovering the as-filed figures would mean parsing the original XBRL
+  attachments from the filing register instead of using the summary endpoint.
 - DART fundamentals request consolidated statements (`fs_div=CFS`) only. A
   company that files no consolidated statements therefore yields no facts at
   all, which the absence logic correctly reports as
