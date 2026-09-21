@@ -74,14 +74,18 @@ def cmd_seed() -> int:
     return 0
 
 
-def cmd_collect(source: str) -> int:
+def cmd_collect(source: str, period: str | None = None) -> int:
     factory = COLLECTORS.get(source)
     if factory is None:
         print(f"unknown source {source!r}; known: {', '.join(sorted(COLLECTORS))}")
         return 2
 
+    # Only the price collectors take a period; the filing collectors decide
+    # their own range from the filer's fiscal calendar.
+    kwargs = {"period": period} if period and source in {"yfinance", "fx"} else {}
+
     with session_scope() as session:
-        run = run_collector(factory(), session)
+        run = run_collector(factory(**kwargs), session)
         print(f"{run.source}: {run.status} read={run.items_read} saved={run.items_saved}")
         if run.detail:
             print(f"  detail: {run.detail}")
@@ -147,6 +151,12 @@ def main(argv: list[str] | None = None) -> int:
 
     collect = sub.add_parser("collect", help="run one collector")
     collect.add_argument("--source", required=True, choices=sorted(COLLECTORS))
+    collect.add_argument(
+        "--period",
+        help="how far back to fetch, for price sources: 2y, 5y, 10y, max. "
+        "Longer history is what lets a backtest include a falling market, "
+        "and two rising years is a sample that flatters any rule that buys",
+    )
 
     cli_backtest.register(sub)
 
@@ -165,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         case "runs":
             return cmd_runs()
         case "collect":
-            return cmd_collect(args.source)
+            return cmd_collect(args.source, args.period)
         case "backtest":
             return cli_backtest.dispatch(args)
         case "candles":

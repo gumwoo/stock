@@ -140,6 +140,7 @@ reintroduces look-ahead bias without failing a single test.
 ### Backtests
 
 ```bash
+python -m app.cli collect --source yfinance --period 10y          # longer history first
 python -m app.cli backtest run --symbol 005930 --strategy score   # the system's own rule
 python -m app.cli backtest run --symbol 005930     # default: a moving-average harness
 python -m app.cli backtest show --run 1            # what it recorded
