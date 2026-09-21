@@ -506,7 +506,28 @@ class TestFoldsAreIndependentRuns:
         assert all(w.sessions == 60 for w in out)
 
 
-class TestHoldoutIsNeverRun:
+class TestWalkForwardNeverScoresTheHoldout:
+    """Scoring it is a separate call, on purpose.
+
+    A holdout reported on every iteration gets fitted by eye — someone adjusts
+    the window lengths, sees the number move, adjusts again. That is harder to
+    notice than fitting it in code and no less real, so `walk_forward` cannot
+    produce a HOLDOUT result at all.
+    """
+
+    def test_it_produces_no_holdout_result(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report = svc.walk_forward(
+            s,
+            BuyAndHold(),
+            request_for(iid),
+            train_sessions=120,
+            eval_sessions=60,
+            holdout_sessions=60,
+        )
+
+        assert report.of(SampleType.HOLDOUT) == ()
+
     def test_no_window_touches_the_reserved_tail(self, instrument: tuple[Session, int]) -> None:
         s, iid = instrument
         report = svc.walk_forward(
@@ -531,3 +552,138 @@ class TestHoldoutIsNeverRun:
                 train_sessions=10_000,
                 eval_sessions=60,
             )
+
+
+class TestTheFinalHoldoutEvaluation:
+    """The one measurement nothing was allowed to iterate against.
+
+    Run after every choice has been made, on a period no window, no fitter and
+    no earlier run could read. It is the only figure in the system that was
+    not available while the rule was being chosen, which is the whole of its
+    value — and it survives only because scoring it is a deliberate act rather
+    than something `walk_forward` returns for free.
+    """
+
+    def _report(self, s: Session, iid: int, **kwargs: object) -> object:
+        return svc.walk_forward(
+            s,
+            BuyAndHold(),
+            request_for(iid),
+            train_sessions=120,
+            eval_sessions=60,
+            holdout_sessions=60,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    def test_it_covers_exactly_the_reserved_tail(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report = self._report(s, iid)
+
+        final = svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report)  # type: ignore[arg-type]
+
+        assert final.sample_type is SampleType.HOLDOUT
+        assert (final.start, final.end) == (report.holdout_start, report.holdout_end)  # type: ignore[attr-defined]
+        assert final.sessions == 60
+
+    def test_it_is_a_single_result(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report = self._report(s, iid)
+
+        final = svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report)  # type: ignore[arg-type]
+
+        assert isinstance(final, svc.WindowResult)
+
+    def test_a_run_with_no_holdout_refuses(self, instrument: tuple[Session, int]) -> None:
+        """Reserving it afterwards is not reserving it."""
+        s, iid = instrument
+        report = svc.walk_forward(
+            s, BuyAndHold(), request_for(iid), train_sessions=120, eval_sessions=60
+        )
+
+        with pytest.raises(svc.HoldoutError, match="reserved no holdout"):
+            svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report)
+
+    def test_it_reuses_the_run_snapshot(self, instrument: tuple[Session, int]) -> None:
+        """A holdout scored against a different snapshot concludes a different run."""
+        s, iid = instrument
+        report = self._report(s, iid)
+
+        # A restatement landing after the walk-forward must not reach it.
+        candle_repo.save_revisions(s, [_row(iid, HISTORY[-1], Decimal("4242"))])
+        s.commit()
+
+        final = svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report)  # type: ignore[arg-type]
+        again = svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report)  # type: ignore[arg-type]
+
+        assert final == again
+
+    def test_the_final_fitter_cannot_see_the_holdout(self, instrument: tuple[Session, int]) -> None:
+        """It refits on everything up to the session before it opens."""
+        s, iid = instrument
+        report = self._report(s, iid)
+        assert report.holdout_start is not None  # type: ignore[attr-defined]
+        seen: list[tuple[date, date, date]] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
+            seen.append((lo, hi, bars[-1].ts.date()))
+            return BuyAndHold()
+
+        svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report, fit=fit)  # type: ignore[arg-type]
+
+        assert len(seen) == 1
+        train_start, train_end, latest = seen[0]
+        assert train_end < report.holdout_start  # type: ignore[attr-defined]
+        assert latest <= train_end
+        assert train_start < train_end
+
+    def test_reaching_into_the_holdout_raises(self, instrument: tuple[Session, int]) -> None:
+        s, iid = instrument
+        report = self._report(s, iid)
+        assert report.holdout_end is not None  # type: ignore[attr-defined]
+        refused: list[bool] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            try:
+                view.at(US.session_close(report.holdout_end))  # type: ignore[attr-defined]
+                refused.append(False)
+            except PitViolationError:
+                refused.append(True)
+            return BuyAndHold()
+
+        svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report, fit=fit)  # type: ignore[arg-type]
+
+        assert refused == [True]
+
+    def test_the_final_training_window_rolls_when_the_split_rolled(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        s, iid = instrument
+        report = self._report(s, iid)
+        lengths: list[int] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
+            lengths.append(len(bars))
+            return BuyAndHold()
+
+        svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report, fit=fit)  # type: ignore[arg-type]
+
+        assert lengths == [120]
+
+    def test_it_is_anchored_when_the_split_was_anchored(
+        self, instrument: tuple[Session, int]
+    ) -> None:
+        """The final fit must follow the run it concludes, not its own default."""
+        s, iid = instrument
+        report = self._report(s, iid, anchored=True)
+        starts: list[date] = []
+
+        def fit(view: MarketData, instrument_id: int, lo: date, hi: date) -> BuyAndHold:
+            bars = view.at(US.session_close(hi)).bars(instrument_id, Interval.DAY_1, limit=10000)
+            starts.append(bars[0].ts.date())
+            return BuyAndHold()
+
+        svc.evaluate_holdout(s, BuyAndHold(), request_for(iid), report, fit=fit)  # type: ignore[arg-type]
+
+        assert starts == [HISTORY[0]]

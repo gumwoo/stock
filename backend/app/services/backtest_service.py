@@ -203,6 +203,8 @@ class WalkForwardReport:
     windows: tuple[WindowResult, ...]
     fitted: bool
     data_snapshot_at: datetime
+    train_sessions: int
+    anchored: bool
     holdout_start: date | None = None
     holdout_end: date | None = None
 
@@ -333,6 +335,96 @@ def walk_forward(
         windows=tuple(results),
         fitted=fit is not None,
         data_snapshot_at=snapshot,
+        train_sessions=train_sessions,
+        anchored=anchored,
         holdout_start=split.holdout_start,
         holdout_end=split.holdout_end,
+    )
+
+
+class HoldoutError(Exception):
+    """The reserved tail cannot be evaluated as asked."""
+
+
+def evaluate_holdout(
+    session: Session,
+    strategy: Strategy,
+    request: RunRequest,
+    report: WalkForwardReport,
+    *,
+    fit: StrategyFitter | None = None,
+    require_complete_sessions: bool = True,
+) -> WindowResult:
+    """Evaluate the reserved tail, once, after every choice has been made.
+
+    **Deliberately not part of `walk_forward`.** If the holdout were scored on
+    every call, anyone adjusting window lengths or trying a different rule
+    would see its number each time, and after a few iterations it would be as
+    thoroughly fitted as the training data — by eye rather than by code, which
+    is harder to notice and no less real. A holdout survives only while
+    looking at it is a separate, deliberate act, so this is a separate
+    function that a caller has to mean.
+
+    It takes the `WalkForwardReport` rather than a fresh set of parameters so
+    that the snapshot, the training length and the anchoring cannot drift from
+    the run this is supposed to conclude. A holdout scored against a different
+    snapshot is not the final check on that run; it is a new run that happens
+    to use the same dates.
+
+    The strategy is refit once on everything up to the session before the
+    holdout opens — the most data any choice was allowed to see — and applied
+    to the holdout unchanged. Without a fitter, `strategy` is used as given.
+    """
+    if report.holdout_start is None or report.holdout_end is None:
+        raise HoldoutError(
+            "this run reserved no holdout; pass holdout_sessions to walk_forward "
+            "before the choices are made, not after"
+        )
+
+    instrument = session.get(Instrument, request.instrument_id)
+    if instrument is None:
+        raise BacktestWindowError(f"no instrument {request.instrument_id}")
+
+    calendar = MarketCalendar(instrument.market)
+    sessions = calendar.sessions_between(request.start, request.end)
+
+    opening = sessions.index(report.holdout_start)
+    if opening == 0:
+        raise HoldoutError("the holdout starts at the first session; nothing precedes it")
+
+    final_train_end = sessions[opening - 1]
+    final_train_start = (
+        sessions[0] if report.anchored else sessions[max(0, opening - report.train_sessions)]
+    )
+
+    chosen = strategy
+    if fit is not None:
+        # Same confinement as every other fitting: it may read up to the last
+        # session before the holdout opens and no further.
+        training_view = PitReader(session, data_snapshot_at=report.data_snapshot_at).windowed(
+            not_before=calendar.session_open(final_train_start),
+            not_after=calendar.session_close(final_train_end),
+        )
+        chosen = fit(training_view, request.instrument_id, final_train_start, final_train_end)
+
+    outcome = execute(
+        session,
+        chosen,
+        replace(request, start=report.holdout_start, end=report.holdout_end),
+        data_snapshot_at=report.data_snapshot_at,
+        require_complete_sessions=require_complete_sessions,
+    )
+    result = outcome.result
+
+    return WindowResult(
+        index=len(report.of(SampleType.OUT_OF_SAMPLE)),
+        sample_type=SampleType.HOLDOUT,
+        start=report.holdout_start,
+        end=report.holdout_end,
+        performance=summarise(result.equity_curve, result.trades),
+        sessions=result.sessions,
+        trades=len(result.trades),
+        abstained=len(result.abstained_sessions),
+        without_data=len(result.sessions_without_data),
+        unfilled=len(result.unfilled),
     )

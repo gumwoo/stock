@@ -53,7 +53,13 @@ class SampleType(StrEnum):
     """Measured over a period the rule had not seen when it was chosen."""
 
     HOLDOUT = "HOLDOUT"
-    """The reserved tail, evaluated once at the end and never iterated on."""
+    """The reserved tail, evaluated once after every choice has been made.
+
+    `generate` never produces a window over it and `walk_forward` never scores
+    it. Scoring is a separate, deliberate call, because a holdout that is
+    reported on every iteration gets fitted by eye — which is harder to notice
+    than fitting it in code, and no less real.
+    """
 
 
 class WalkForwardError(Exception):
