@@ -127,11 +127,17 @@ X(트위터)는 의도적으로 빠져 있다. 2026년 2월 종량제 전환 이
 cd backend && ./check.sh
 ```
 
-순서대로 `ruff format --check`, `ruff check`, `mypy`, `lint-imports`, `pytest`를 돌린다.
-다섯 개 전부 통과해야 한다.
+순서대로 `ruff format --check`, `ruff check`, `mypy`, `lint-imports`, `alembic check`,
+`pytest`를 돌린다. 여섯 개 전부 통과해야 한다.
 
-같은 다섯 개가 push와 PR마다 GitHub Actions에서 실제 Postgres 서비스를 붙여 돌아가고,
+같은 여섯 개가 push와 PR마다 GitHub Actions에서 실제 Postgres 서비스를 붙여 돌아가고,
 프론트엔드 타입체크와 빌드도 함께 돈다 — 위 주장이 주장이 아니라 검사이도록.
+
+`alembic check`가 게이트인 이유는 **마이그레이션에만 있는 제약은 보이지 않기 때문**이다.
+autogenerate는 모델과 DB를 비교하므로, 모델이 선언하지 않은 제약을 "지워야 할 것"으로 보고
+한다. 그 revision을 한 번만 받아들이면 제약이 사라지는데, diff는 정리처럼 보인다.
+`uq_backtest_window_one_holdout_per_run`이 실제로 그 상태였고, 마이그레이션 두 개가 그
+제안을 부분 인덱스 비교의 한계라고 적어두고 넘어갔다. 한계가 아니라 진짜 드리프트였다.
 
 로컬에서 `pytest`는 **빠른 절반**(단위 테스트)만 돈다. 통합 테스트는 실제 Postgres에 수백
 개의 시뮬레이션 세션을 걸기 때문에 전체가 13분쯤 걸리고, 그건 매 변경마다 치를 값이 아니다.

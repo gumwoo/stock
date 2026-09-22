@@ -32,6 +32,7 @@ from __future__ import annotations
 import io
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -183,9 +184,37 @@ class KrxMasterCollector(BaseCollector):
         """
         cls.check_archive(payload)
 
-        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            name = next(n for n in archive.namelist() if n.lower().endswith(".xml"))
-            root = ET.fromstring(archive.read(name).decode("utf-8"))
+        # Past the magic bytes, everything below is still the outside world.
+        # A body that begins `PK` can hold no `.xml` member, a member whose
+        # compressed data is damaged, bytes that are not UTF-8, or text that is
+        # not XML — and those raise `StopIteration`, `zlib.error`,
+        # `UnicodeDecodeError` and `ParseError`, none of which is a
+        # `CollectorError`. `run_collector` re-raises every one of them and
+        # files the run as an internal defect, which is the exact symptom
+        # `check_archive` was added to remove. Checking the first four bytes
+        # only moved the boundary; it did not close it.
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                name = next((n for n in archive.namelist() if n.lower().endswith(".xml")), None)
+                if name is None:
+                    raise UpstreamUnavailableError(
+                        "DART corpCode.xml archive holds no XML member, only "
+                        f"{archive.namelist()[:5]}"
+                    )
+                body = archive.read(name)
+        except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
+            raise UpstreamUnavailableError(f"DART corpCode.xml archive is damaged: {exc}") from exc
+
+        try:
+            root = ET.fromstring(body.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise UpstreamUnavailableError(
+                f"DART corpCode.xml member {name!r} is not UTF-8: {exc}"
+            ) from exc
+        except ET.ParseError as exc:
+            raise UpstreamUnavailableError(
+                f"DART corpCode.xml member {name!r} is not XML: {exc}"
+            ) from exc
 
         found: list[Candidate] = []
         for node in root.iter("list"):
@@ -231,6 +260,11 @@ class KrxMasterCollector(BaseCollector):
             payload: dict[str, Any] = response.json()
         except ValueError as exc:
             raise UpstreamUnavailableError(f"DART returned non-JSON for {path}") from exc
+
+        if not isinstance(payload, dict):
+            raise UpstreamUnavailableError(
+                f"DART {path} returned {type(payload).__name__}, not an object"
+            )
 
         status = payload.get("status")
         if status == "020":
@@ -288,12 +322,21 @@ class KrxMasterCollector(BaseCollector):
                     return boards, str(refused)
 
                 for row in payload.get("list") or []:
+                    if not isinstance(row, dict):
+                        continue
                     corp_code = (row.get("corp_code") or "").strip()
                     corp_cls = (row.get("corp_cls") or "").strip()
                     if corp_code and corp_cls:
                         boards.setdefault(corp_code, corp_cls)
 
-                total = int(payload.get("total_page") or 0)
+                # A page count we cannot read is the upstream misbehaving, not
+                # a reason to raise `ValueError` out of a collector.
+                try:
+                    total = int(payload.get("total_page") or 0)
+                except (TypeError, ValueError) as exc:
+                    raise UpstreamUnavailableError(
+                        f"DART list.json gave total_page={payload.get('total_page')!r}"
+                    ) from exc
                 if page >= total:
                     break
                 page += 1

@@ -67,6 +67,70 @@ class TestAnArchiveIsParsed:
         assert [c.name for c in found] == ["삼성전자"]
 
 
+def no_xml_member() -> bytes:
+    """A valid ZIP whose members are all something else."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("readme.txt", "not the file we wanted")
+    return buffer.getvalue()
+
+
+def corrupt_member() -> bytes:
+    """A ZIP whose compressed bytes are damaged in transit.
+
+    The likeliest of these in practice: a proxy or CDN returns a body that is
+    complete by length and wrong by content, so the transport sees nothing
+    amiss and `zlib` raises on decompression.
+    """
+    good = bytearray(archive(("00126380", "삼성전자", "005930")))
+    good[60:90] = bytes(30)
+    return bytes(good)
+
+
+def member_not_utf8() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("CORPCODE.xml", bytes([0xFF, 0xFE, 0x00]) + b"garbage")
+    return buffer.getvalue()
+
+
+def member_not_xml() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("CORPCODE.xml", "502 Bad Gateway, from somewhere in the middle")
+    return buffer.getvalue()
+
+
+class TestAnArchiveThatBeginsPKIsStillNotTrusted:
+    """Checking four bytes moves the boundary; it does not close it.
+
+    Everything below the ZIP header is still the outside world. A body with no
+    XML member, a damaged member, bytes that are not UTF-8 or text that is not
+    XML each raise something that is not a `CollectorError`, so `run_collector`
+    re-raises it and records the run as an internal defect.
+    """
+
+    def test_an_archive_without_an_xml_member_is_an_outage(self) -> None:
+        with pytest.raises(UpstreamUnavailableError, match="no XML member"):
+            KrxMasterCollector.parse_corp_codes(no_xml_member())
+
+    def test_a_damaged_member_is_an_outage(self) -> None:
+        with pytest.raises(UpstreamUnavailableError, match="damaged"):
+            KrxMasterCollector.parse_corp_codes(corrupt_member())
+
+    def test_a_truncated_archive_is_an_outage(self) -> None:
+        with pytest.raises(UpstreamUnavailableError):
+            KrxMasterCollector.parse_corp_codes(archive(("00126380", "삼성전자", "005930"))[:200])
+
+    def test_a_member_that_is_not_utf8_is_an_outage(self) -> None:
+        with pytest.raises(UpstreamUnavailableError, match="not UTF-8"):
+            KrxMasterCollector.parse_corp_codes(member_not_utf8())
+
+    def test_a_member_that_is_not_xml_is_an_outage(self) -> None:
+        with pytest.raises(UpstreamUnavailableError, match="not XML"):
+            KrxMasterCollector.parse_corp_codes(member_not_xml())
+
+
 class TestARefusalIsNotAnArchive:
     def test_a_quota_refusal_is_a_rate_limit(self) -> None:
         """Their counter and ours disagree, which is an accounting bug here."""
@@ -98,7 +162,36 @@ class TestARefusalIsNotAnArchive:
         with pytest.raises(UpstreamUnavailableError):
             KrxMasterCollector.parse_corp_codes(b"")
 
-    @pytest.mark.parametrize("payload", [refusal("020"), refusal("010"), b"", b"garbage"])
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            refusal("020"),
+            refusal("010"),
+            b"",
+            b"garbage",
+            # Bodies that begin `PK` and are still not a usable archive. The
+            # magic-byte check waves every one of these through, and each used
+            # to escape as something other than a CollectorError.
+            no_xml_member(),
+            corrupt_member(),
+            member_not_utf8(),
+            member_not_xml(),
+            archive(("00126380", "삼성전자", "005930"))[:200],
+        ],
+        # Named explicitly. A ZIP carries the moment it was written, so the
+        # generated ids differ between xdist workers and collection disagrees.
+        ids=[
+            "status-020",
+            "status-010",
+            "empty",
+            "garbage",
+            "zip-without-xml-member",
+            "zip-damaged-member",
+            "zip-member-not-utf8",
+            "zip-member-not-xml",
+            "zip-truncated",
+        ],
+    )
     def test_nothing_escapes_as_a_bare_zip_error(self, payload: bytes) -> None:
         """The regression itself.
 

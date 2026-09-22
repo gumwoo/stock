@@ -46,6 +46,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -257,6 +258,18 @@ class BacktestWindow(Base):
         UniqueConstraint("run_id", "window_index", "sample_type", name="uq_backtest_window_slot"),
         CheckConstraint("period_end >= period_start", name="window_period_ordered"),
         Index("ix_backtest_window_run", "run_id", "sample_type"),
+        # One holdout per run, enforced as a partial unique index because the
+        # constraint applies to holdout rows only. Declared here and not just
+        # in 26316452f0f4: two later migrations recorded autogenerate wanting
+        # to drop it and wrote the proposal off as a comparison limitation,
+        # which it was not. The index really was missing from the model, and an
+        # autogenerate run that anyone accepted would have dropped it.
+        Index(
+            "uq_backtest_window_one_holdout_per_run",
+            "run_id",
+            unique=True,
+            postgresql_where=text("sample_type = 'HOLDOUT'"),
+        ),
     )
 
     def __repr__(self) -> str:

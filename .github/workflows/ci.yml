@@ -75,6 +75,16 @@ jobs:
       - name: Migrations apply cleanly
         run: alembic upgrade head
 
+      # The models and the migrations must still describe the same schema. A
+      # constraint that lives only in a migration is invisible to
+      # autogenerate, which then reports the live one as something to drop —
+      # and the revision that drops it looks like tidying. That is how
+      # `uq_backtest_window_one_holdout_per_run` came within one accepted
+      # autogenerate of being removed, twice written off as a comparison
+      # limitation in the migrations themselves.
+      - name: Models and migrations agree
+        run: alembic check
+
       # `-m ""` clears the `not integration` default in pyproject.toml. Locally
       # a bare `pytest` is the fast suite; here everything runs, because a
       # gate that inherited the developer's shortcut would report success on

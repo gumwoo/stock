@@ -13,7 +13,7 @@ day, while its own comment said it closed "the day before".
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select, text
@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 from app.core.calendar import Market
-from app.models import Base, SymbolHistory
+from app.core.clock import utc_now
+from app.models import Base, Instrument, SymbolHistory
 from app.repositories import instrument_repo
 from tests.conftest import fake_cik
 
@@ -570,3 +571,175 @@ class TestAnAnchorIsUnique:
 
         session.execute(text("DELETE FROM instrument WHERE name LIKE '제트제트무앵커%'"))
         session.commit()
+
+
+class TestATickerMayBeReassigned:
+    """Two companies, one code, different years. Korea recycles six-digit codes.
+
+    Nothing in the feed announces it: the listing master simply shows the code
+    against a different company than last month. The danger is not the
+    reassignment, it is the window opened for the new holder. A collector that
+    does not know when the change happened opens at the placeholder date, which
+    is 1970, which covers every day the previous holder legitimately owned the
+    code. `resolve_symbol` then matches two rows for a historical date and
+    returns whichever the planner ordered first, and a backtest attributes one
+    company's prices to another.
+    """
+
+    @staticmethod
+    def hand_over(session: Session) -> None:
+        """Company A gives up 990301; company B picks it up."""
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트양도",
+            symbol="990301",
+            kr_corp_code="ZZ000301",
+            symbol_source="MASTER",
+        )
+        session.commit()
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트양도",
+            symbol="990302",
+            kr_corp_code="ZZ000301",
+            symbol_source="MASTER",
+        )
+        session.commit()
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트양수",
+            symbol="990301",
+            kr_corp_code="ZZ000302",
+            symbol_source="MASTER",
+        )
+        session.commit()
+
+    def test_one_code_resolves_to_one_company_on_any_date(self, session: Session) -> None:
+        self.hand_over(session)
+
+        for asof in (date(1999, 1, 1), date(2015, 6, 30), date(2030, 1, 1)):
+            rows = (
+                session.execute(
+                    select(SymbolHistory).where(
+                        SymbolHistory.symbol == "990301",
+                        SymbolHistory.valid_from <= asof,
+                        (SymbolHistory.valid_to.is_(None)) | (SymbolHistory.valid_to >= asof),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(rows) <= 1, (
+                asof,
+                [(r.instrument_id, r.valid_from, r.valid_to) for r in rows],
+            )
+
+    def test_the_old_holder_keeps_its_history(self, session: Session) -> None:
+        """The previous owner really did have the code. Deleting that is a lie."""
+        self.hand_over(session)
+
+        old = instrument_repo.resolve_symbol(session, "990301", Market.KR, asof=date(2015, 6, 30))
+        assert old is not None
+        assert old.kr_corp_code == "ZZ000301"
+
+    def test_the_new_holder_owns_it_today(self, session: Session) -> None:
+        self.hand_over(session)
+
+        now = instrument_repo.resolve_symbol(session, "990301", Market.KR, asof=date(2030, 1, 1))
+        assert now is not None
+        assert now.kr_corp_code == "ZZ000302"
+
+    def test_no_window_ends_before_it_begins(self, session: Session) -> None:
+        self.hand_over(session)
+
+        rows = (
+            session.execute(
+                select(SymbolHistory).where(SymbolHistory.symbol.in_(["990301", "990302"]))
+            )
+            .scalars()
+            .all()
+        )
+
+        assert rows
+        for row in rows:
+            if row.valid_to is not None:
+                assert row.valid_from <= row.valid_to, (row.symbol, row.valid_from, row.valid_to)
+
+    def test_the_same_code_in_another_market_is_untouched(self, session: Session) -> None:
+        """Six digits mean one company per exchange, not one worldwide."""
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.US,
+            name="제트제트해외",
+            symbol="990301",
+            us_cik="0009990301",
+            symbol_source="MASTER",
+        )
+        session.commit()
+        self.hand_over(session)
+
+        abroad = (
+            session.execute(
+                select(SymbolHistory)
+                .join(Instrument, Instrument.instrument_id == SymbolHistory.instrument_id)
+                .where(SymbolHistory.symbol == "990301", Instrument.market == Market.US)
+            )
+            .scalars()
+            .all()
+        )
+
+        assert len(abroad) == 1
+        assert abroad[0].valid_to is None
+
+        session.execute(
+            text(
+                "DELETE FROM symbol_history WHERE instrument_id IN "
+                "(SELECT instrument_id FROM instrument WHERE us_cik = '0009990301')"
+            )
+        )
+        session.execute(text("DELETE FROM instrument WHERE us_cik = '0009990301'"))
+        session.commit()
+
+
+class TestAFutureListingDate:
+    def test_a_change_never_closes_a_window_before_it_opened(self, session: Session) -> None:
+        """`listed_at` may be in the future for a company about to list.
+
+        The first window then opens later than today, and a symbol change
+        observed today would close it on a day before it began — no exception,
+        and the instrument resolves to nothing on every date afterwards.
+        """
+        ahead = utc_now().date() + timedelta(days=30)
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트상장예정",
+            symbol="990401",
+            kr_corp_code="ZZ000401",
+            listed_at=ahead,
+        )
+        session.commit()
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트상장예정",
+            symbol="990402",
+            kr_corp_code="ZZ000401",
+        )
+        session.commit()
+
+        rows = (
+            session.execute(
+                select(SymbolHistory).where(SymbolHistory.symbol.in_(["990401", "990402"]))
+            )
+            .scalars()
+            .all()
+        )
+
+        assert len(rows) == 2
+        for row in rows:
+            if row.valid_to is not None:
+                assert row.valid_from <= row.valid_to, (row.symbol, row.valid_from, row.valid_to)

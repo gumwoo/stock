@@ -190,6 +190,7 @@ def upsert_instrument(
     _ensure_symbol(
         session,
         instrument_id=existing.instrument_id,
+        market=market,
         symbol=symbol,
         valid_from=symbol_valid_from,
         first_window_from=listed_at or date(1970, 1, 1),
@@ -199,10 +200,70 @@ def upsert_instrument(
     return existing
 
 
+def _earliest_free(
+    session: Session,
+    *,
+    instrument_id: int,
+    market: Market,
+    symbol: str,
+    earliest: date,
+    observed_on: date,
+) -> date:
+    """The first day this instrument may claim `symbol`, closing who held it.
+
+    Tickers get reassigned. Korea recycles six-digit codes and the US recycles
+    letters, and nothing in either feed announces it — a listing master simply
+    shows the code against a different company than last month.
+
+    The danger is not the reassignment, it is the window we would open for the
+    new holder. A collector that does not know when the change happened opens
+    at the placeholder date, which is 1970, which covers every day the previous
+    holder legitimately owned the code. `resolve_symbol` then matches two rows
+    for a historical date and returns whichever the planner ordered first, so a
+    backtest attributes one company's prices to another. That is the failure
+    the whole point-in-time symbol table exists to prevent, arriving through
+    the table itself.
+
+    So: the newcomer starts no earlier than today and no earlier than the day
+    after any window already recorded for that code, and whoever still holds it
+    is closed out the day before. No exception is raised even when two
+    companies claim the code on one day, because one contradictory row must not
+    cost a sweep of several thousand.
+    """
+    held = list(
+        session.execute(
+            select(SymbolHistory)
+            .join(Instrument, Instrument.instrument_id == SymbolHistory.instrument_id)
+            .where(
+                SymbolHistory.symbol == symbol,
+                Instrument.market == market,
+                SymbolHistory.instrument_id != instrument_id,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not held:
+        return earliest
+
+    bounds = [earliest, observed_on]
+    for row in held:
+        bounds.append(row.valid_from + timedelta(days=1))
+        if row.valid_to is not None:
+            bounds.append(row.valid_to + timedelta(days=1))
+    start = max(bounds)
+
+    for row in held:
+        if row.valid_to is None:
+            row.valid_to = start - timedelta(days=1)
+    return start
+
+
 def _ensure_symbol(
     session: Session,
     *,
     instrument_id: int,
+    market: Market,
     symbol: str,
     valid_from: date | None,
     first_window_from: date,
@@ -242,7 +303,14 @@ def _ensure_symbol(
             SymbolHistory(
                 instrument_id=instrument_id,
                 symbol=symbol,
-                valid_from=valid_from if valid_from is not None else first_window_from,
+                valid_from=_earliest_free(
+                    session,
+                    instrument_id=instrument_id,
+                    market=market,
+                    symbol=symbol,
+                    earliest=valid_from if valid_from is not None else first_window_from,
+                    observed_on=observed_on,
+                ),
                 valid_to=None,
                 source=source,
             )
@@ -270,6 +338,15 @@ def _ensure_symbol(
         )
     else:
         changeover = valid_from
+
+    changeover = _earliest_free(
+        session,
+        instrument_id=instrument_id,
+        market=market,
+        symbol=symbol,
+        earliest=changeover,
+        observed_on=observed_on,
+    )
 
     # The ticker changed under us. Close the old window on the day *before* the
     # new one opens rather than deleting it: the old mapping was true then.

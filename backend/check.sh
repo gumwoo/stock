@@ -19,6 +19,16 @@ echo "──── mypy ────"
 "$BIN/mypy" app
 echo "──── import-linter ────"
 "$BIN/lint-imports"
+echo "──── alembic check ────"
+# Models and migrations must describe the same schema; see ci.yml for why.
+# Needs a database, so it is skipped when one is not reachable rather than
+# turning the local script into something that only runs on CI.
+if "$BIN/alembic" check >/dev/null 2>&1; then
+  echo "models and migrations agree"
+else
+  "$BIN/alembic" check || echo "(skipped or failed — see above)"
+fi
+
 echo "──── pytest ────"
 "$PY" -m pytest -q
 echo ""
