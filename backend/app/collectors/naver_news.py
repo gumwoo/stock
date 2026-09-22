@@ -55,6 +55,7 @@ from app.collectors.base import (
     CollectionResult,
     CollectorStatusLookup,
     RateLimitedError,
+    SkipCollection,
     TokenBucket,
     UpstreamUnavailableError,
 )
@@ -134,6 +135,12 @@ TRACKING_PARAMS = frozenset(
     }
 )
 
+
+def _is_hangul(char: str) -> bool:
+    """Precomposed syllables and the Jamo blocks around them."""
+    return "가" <= char <= "힣" or "ᄀ" <= char <= "ᇿ" or "㄰" <= char <= "㆏"
+
+
 _TAG = re.compile(r"<[^>]+>")
 _SPACE = re.compile(r"\s+")
 # Whether a neighbouring character continues a number, for symbol matching.
@@ -178,6 +185,11 @@ class NaverNewsCollector(BaseCollector):
         self._bucket = TokenBucket(settings.naver_rate)
         self._guard = guard if guard is not None else QuotaGuard()
         self.max_pages = max_pages if max_pages is not None else settings.naver_news_max_pages
+        if self.max_pages < 1:
+            # Zero pages reads nothing, and `_sweep` would report a clean stop
+            # rather than a truncation, so the run would finish SUCCESS having
+            # asked no questions and move the watermark past the answers.
+            raise ValueError(f"max_pages must be at least 1, got {self.max_pages}")
         # Present so the end-to-end check can cost one call rather than a
         # full sweep. Never set in scheduled operation.
         self.max_instruments = max_instruments
@@ -292,7 +304,19 @@ class NaverNewsCollector(BaseCollector):
         squeezed = [ch for ch in term if not ch.isspace()]
         if not squeezed:
             return None
-        return re.compile(r"\s*".join(re.escape(ch) for ch in squeezed), re.IGNORECASE)
+
+        parts: list[str] = []
+        for index, char in enumerate(squeezed):
+            if index and not (_is_hangul(squeezed[index - 1]) and _is_hangul(char)):
+                # A space is allowed where the script changes, which is where
+                # copy actually puts one: `SK 하이닉스`, `KT & G`. Allowing it
+                # between two Hangul syllables instead turns `한 화면에` into
+                # 한화 and `최 대 유 통` into 대유 — ordinary Korean sentences,
+                # not contrived ones, and the names it costs are the short
+                # well-known ones that appear most often.
+                parts.append(r"\s*")
+            parts.append(re.escape(char))
+        return re.compile("".join(parts), re.IGNORECASE)
 
     @classmethod
     def spans(cls, text: str, term: str) -> list[tuple[int, int]]:
@@ -308,7 +332,7 @@ class NaverNewsCollector(BaseCollector):
         Prepared once per run. Squeezing inside the per-instrument scan instead
         would run the regex six million times over a full master.
         """
-        return tuple((name, _SPACE.sub("", name)) for name in names)
+        return tuple((name, _SPACE.sub("", name).casefold()) for name in names)
 
     @classmethod
     def conflicts_for(
@@ -326,7 +350,7 @@ class NaverNewsCollector(BaseCollector):
         the quadratic scan happens once per run over the master, and the
         per-article work stays proportional to the few that actually collide.
         """
-        squeezed = {_SPACE.sub("", t) for t in terms}
+        squeezed = {_SPACE.sub("", t).casefold() for t in terms}
         squeezed.discard("")
         if not squeezed:
             return ()
@@ -334,6 +358,30 @@ class NaverNewsCollector(BaseCollector):
             name
             for name, flat in registry
             if any(len(flat) > len(t) and t in flat for t in squeezed)
+        )
+
+    @staticmethod
+    def stands_alone(text: str, span: tuple[int, int], term: str) -> bool:
+        """For a Latin-only name, is this an occurrence of the word itself?
+
+        `KT` is inside `KTX`, `SK` inside `TASK`, `LG` inside `ALGO`. Latin
+        script has word boundaries, so these are cheap to reject, and the
+        companies with two-letter Latin names are among the most written about
+        in the market.
+
+        The test is deliberately ASCII-only: `SK는` must still match, and the
+        particle is not ASCII. Names carrying any Hangul or punctuation —
+        `SK하이닉스`, `KT&G` — are long or distinctive enough that this rule
+        would only cost matches, so it does not apply to them.
+        """
+        flat = _SPACE.sub("", term)
+        if not flat or not flat.isascii() or not flat.isalnum():
+            return True
+        start, end = span
+        before = text[start - 1 : start] if start else ""
+        after = text[end : end + 1]
+        return not (before.isascii() and before.isalnum()) and not (
+            after.isascii() and after.isalnum()
         )
 
     @staticmethod
@@ -375,7 +423,7 @@ class NaverNewsCollector(BaseCollector):
             *((alias, MatchMethod.ALIAS) for alias in aliases),
         ):
             for span in cls.spans(text, term):
-                if not cls.swallowed_by(span, covers):
+                if cls.stands_alone(text, span, term) and not cls.swallowed_by(span, covers):
                     return method
 
         if symbol:
@@ -513,7 +561,12 @@ class NaverNewsCollector(BaseCollector):
         now = utc_now()
         universe = instrument_repo.list_active(session, asof=now.date(), market=Market.KR)
         if not universe:
-            return CollectionResult(detail="no active Korean instruments to search")
+            # SKIPPED, not SUCCESS. Reporting success here advances the
+            # watermark to now, and the state this happens in — migrated but
+            # not yet seeded or mastered — is exactly the one a few minutes
+            # before thousands of names arrive. Their previous three days of
+            # coverage would be stepped over and never read.
+            raise SkipCollection("no active Korean instruments to search")
 
         # Built from the whole master, and before any truncation: whether a
         # name is swallowed by a longer one is a fact about the market, not

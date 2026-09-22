@@ -193,11 +193,17 @@ def _create_news_tables() -> None:
     # **조건이 붙는 이유.** 무조건 UPDATE이면, 마스터로 3,950개 이름을 넣은 뒤
     # 누군가 downgrade → upgrade를 한 번만 해도 그 이름들이 전부 추적 대상이
     # 된다. 동종군이 9개에서 수천 개로 바뀌는 것 — 이 마이그레이션이 막겠다고
-    # 쓴 바로 그 일이 마이그레이션 자신 때문에 일어난다. 캔들이 있다는 것이
-    # 곧 "가격을 받아 채점할 수 있다"이므로 그것을 조건으로 쓴다.
+    # 쓴 바로 그 일이 마이그레이션 자신 때문에 일어난다.
+    #
+    # 조건은 `symbol_source`로 잡는다. 마스터가 만든 행만 `MASTER`를 남기므로,
+    # 그게 아닌 행은 사람이 워치리스트에 올린 행이다. "캔들이 있는가"를 쓰면
+    # 시드만 하고 아직 가격을 안 받은 행이 왕복 후 조용히 untracked가 된다.
     op.execute(
         "UPDATE instrument SET tracked = true "
-        "WHERE instrument_id IN (SELECT DISTINCT instrument_id FROM candle)"
+        "WHERE NOT EXISTS ("
+        "  SELECT 1 FROM symbol_history sh "
+        "  WHERE sh.instrument_id = instrument.instrument_id AND sh.source = 'MASTER'"
+        ")"
     )
 
 

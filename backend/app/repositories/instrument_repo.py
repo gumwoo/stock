@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.calendar import Market
+from app.core.clock import utc_now
 from app.models import Instrument, SymbolHistory
 
 
@@ -141,6 +142,26 @@ def upsert_instrument(
             .first()
         )
 
+    if existing is None and (us_cik or kr_corp_code):
+        # A row of this name carrying no anchor at all is this same company
+        # from before anyone knew its code, so adopt it rather than opening a
+        # second row beside it with the same symbol. A row that already has an
+        # anchor is a different company that happens to share the name — the
+        # real master holds thirty such pairs — and merging those is exactly
+        # what the lookup above exists to prevent.
+        existing = (
+            session.execute(
+                select(Instrument).where(
+                    Instrument.market == market,
+                    Instrument.name == name,
+                    Instrument.us_cik.is_(None),
+                    Instrument.kr_corp_code.is_(None),
+                )
+            )
+            .scalars()
+            .first()
+        )
+
     if existing is None:
         existing = Instrument(
             market=market,
@@ -170,7 +191,9 @@ def upsert_instrument(
         session,
         instrument_id=existing.instrument_id,
         symbol=symbol,
-        valid_from=symbol_valid_from or listed_at or date(1970, 1, 1),
+        valid_from=symbol_valid_from,
+        first_window_from=listed_at or date(1970, 1, 1),
+        observed_on=utc_now().date(),
         source=symbol_source,
     )
     return existing
@@ -181,7 +204,9 @@ def _ensure_symbol(
     *,
     instrument_id: int,
     symbol: str,
-    valid_from: date,
+    valid_from: date | None,
+    first_window_from: date,
+    observed_on: date,
     source: str,
 ) -> None:
     """Record the current symbol, closing any previous one.
@@ -190,6 +215,16 @@ def _ensure_symbol(
     That distinction matters because SEC publishes no ticker history at all —
     `formerNames` holds former *company names*, not former symbols — so any
     mapping we did not watch happen is only as good as wherever it came from.
+
+    **`valid_from=None` means the caller does not know when.** It is the usual
+    case: a collector reading today's listing master sees a symbol, not a
+    changeover date. The two situations need different answers and previously
+    got the same one. Opening the *first* window with no date means "as far
+    back as we care", which is `first_window_from`. Noticing a *change* with no
+    date means "different as of today", which is `observed_on` — reusing the
+    first-window placeholder there would close the live window on a day before
+    it opened, and every master row shares that placeholder, so it would fire
+    for every company that ever changed code.
     """
     current = (
         session.execute(
@@ -202,34 +237,53 @@ def _ensure_symbol(
         .first()
     )
 
-    if current is not None:
-        if current.symbol == symbol:
-            return
-        if valid_from <= current.valid_from:
-            # The replacement would have to start on or before the window it
-            # replaces, which closes that window on a day earlier than it
-            # opened. `resolve_symbol` then matches neither row and the
-            # instrument has no symbol on any date. Refuse rather than write
-            # it: silence here is a lookup that fails forever.
-            raise ValueError(
-                f"instrument {instrument_id}: symbol {symbol!r} would start "
-                f"{valid_from}, on or before the current window for "
-                f"{current.symbol!r} which opened {current.valid_from}"
+    if current is None:
+        session.add(
+            SymbolHistory(
+                instrument_id=instrument_id,
+                symbol=symbol,
+                valid_from=valid_from if valid_from is not None else first_window_from,
+                valid_to=None,
+                source=source,
             )
-        # The ticker changed under us. Close the old window on the day *before*
-        # the new one opens rather than deleting it: the old mapping was true
-        # then. Both bounds are inclusive, matching the `valid_from <= asof <=
-        # valid_to` lookup, so closing on `valid_from` itself would leave the
-        # changeover date resolving to two instruments at once.
-        current.valid_to = valid_from - timedelta(days=1)
-        source = "OBSERVED"
+        )
+        return
+
+    if current.symbol == symbol:
+        return
+
+    if valid_from is None:
+        # Never before the day after the window it replaces. `observed_on`
+        # alone would be enough in practice, but a window opened with a future
+        # `listed_at` would still invert, and the inversion is silent.
+        changeover = max(observed_on, current.valid_from + timedelta(days=1))
+    elif valid_from <= current.valid_from:
+        # A date the caller chose, and it is on or before the window it
+        # replaces. That closes the live window a day earlier than it opened,
+        # after which `resolve_symbol` matches neither row and the instrument
+        # has no symbol on any date at all. Refuse rather than write it:
+        # silence here is a lookup that fails forever.
+        raise ValueError(
+            f"instrument {instrument_id}: symbol {symbol!r} would start "
+            f"{valid_from}, on or before the current window for "
+            f"{current.symbol!r} which opened {current.valid_from}"
+        )
+    else:
+        changeover = valid_from
+
+    # The ticker changed under us. Close the old window on the day *before* the
+    # new one opens rather than deleting it: the old mapping was true then.
+    # Both bounds are inclusive, matching the `valid_from <= asof <= valid_to`
+    # lookup, so closing on `changeover` itself would leave the changeover date
+    # resolving to two instruments at once.
+    current.valid_to = changeover - timedelta(days=1)
 
     session.add(
         SymbolHistory(
             instrument_id=instrument_id,
             symbol=symbol,
-            valid_from=valid_from,
+            valid_from=changeover,
             valid_to=None,
-            source=source,
+            source="OBSERVED",
         )
     )

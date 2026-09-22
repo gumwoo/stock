@@ -311,3 +311,181 @@ class TestTrackedIsSetWhereItIsMeant:
         session.commit()
 
         assert again.tracked is True
+
+
+class TestACollectorMayNoticeAChange:
+    """A collector reading today's master sees a symbol, not a changeover date.
+
+    The two are different facts and once got the same answer. Every master row
+    opens its window on the same placeholder date, so treating "I do not know
+    when" as "since the placeholder" makes the replacement start on or before
+    the window it replaces — for every company that ever changed code. The
+    guard against inverted windows then fires on ordinary operation, and since
+    `ValueError` is not a `CollectorError` it escapes `run_collector` and fails
+    the whole sweep, permanently, because the placeholder never moves.
+    """
+
+    def test_a_second_master_pass_with_a_new_symbol_succeeds(self, session: Session) -> None:
+        for symbol in ("990101", "990102"):
+            instrument_repo.upsert_instrument(
+                session,
+                market=Market.KR,
+                name="제트제트코드변경",
+                symbol=symbol,
+                kr_corp_code="ZZ000101",
+                symbol_source="MASTER",
+            )
+            session.commit()
+
+        rows = list(
+            session.execute(
+                select(SymbolHistory)
+                .join(
+                    instrument_repo.Instrument,
+                    instrument_repo.Instrument.instrument_id == SymbolHistory.instrument_id,
+                )
+                .where(instrument_repo.Instrument.kr_corp_code == "ZZ000101")
+                .order_by(SymbolHistory.valid_from)
+            ).scalars()
+        )
+
+        assert [r.symbol for r in rows] == ["990101", "990102"]
+        assert rows[0].valid_to is not None
+        assert rows[0].valid_to < rows[1].valid_from
+        assert rows[0].valid_from <= rows[0].valid_to
+
+    def test_both_windows_still_resolve_on_their_own_dates(self, session: Session) -> None:
+        for symbol in ("990101", "990102"):
+            instrument_repo.upsert_instrument(
+                session,
+                market=Market.KR,
+                name="제트제트코드변경",
+                symbol=symbol,
+                kr_corp_code="ZZ000101",
+                symbol_source="MASTER",
+            )
+            session.commit()
+
+        old_one = instrument_repo.resolve_symbol(
+            session, "990101", Market.KR, asof=date(2020, 1, 1)
+        )
+        new_one = instrument_repo.resolve_symbol(
+            session, "990102", Market.KR, asof=date(2030, 1, 1)
+        )
+
+        assert old_one is not None
+        assert new_one is not None
+        assert old_one.instrument_id == new_one.instrument_id
+
+    def test_reseeding_a_renamed_ticker_does_not_raise(self, session: Session) -> None:
+        """`cli seed` passes `listed_at` and no changeover date."""
+        for symbol in ("ZZA", "ZZB"):
+            instrument_repo.upsert_instrument(
+                session,
+                market=Market.KR,
+                name="제트제트시드변경",
+                symbol=symbol,
+                kr_corp_code="ZZ000102",
+                listed_at=date(2010, 5, 5),
+                symbol_source="SEED",
+            )
+            session.commit()
+
+        found = instrument_repo.resolve_symbol(session, "ZZB", Market.KR, asof=date(2030, 1, 1))
+        assert found is not None
+        assert instrument_repo.current_symbol(session, found.instrument_id) == "ZZB"
+
+        # The closed window must still be a window. `listed_at` is the same
+        # date for both passes, so reusing it as the changeover date writes
+        # `valid_to` one day before `valid_from` — no exception, and the old
+        # ticker then resolves to nothing on any date at all.
+        rows = list(
+            session.execute(
+                select(SymbolHistory)
+                .where(SymbolHistory.instrument_id == found.instrument_id)
+                .order_by(SymbolHistory.valid_from)
+            ).scalars()
+        )
+        closed = [r for r in rows if r.valid_to is not None]
+        assert closed, "the old ticker was not closed at all"
+        for row in closed:
+            assert row.valid_from <= row.valid_to, (row.symbol, row.valid_from, row.valid_to)
+        assert (
+            instrument_repo.resolve_symbol(session, "ZZA", Market.KR, asof=date(2010, 6, 1))
+            is not None
+        )
+
+
+class TestAnUnanchoredRowIsAdopted:
+    def test_a_master_pass_fills_in_the_code_rather_than_duplicating(
+        self, session: Session
+    ) -> None:
+        """Narrowing the name fallback must not create a second row.
+
+        A KR instrument seeded without a corp code, then met by the listing
+        master, previously became two rows carrying the same symbol over the
+        same dates — after which `resolve_symbol` picks whichever the database
+        returns first.
+        """
+        seeded = instrument_repo.upsert_instrument(
+            session, market=Market.KR, name="제트제트무코드", symbol="990103"
+        )
+        session.commit()
+        mastered = instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트무코드",
+            symbol="990103",
+            kr_corp_code="ZZ000103",
+            symbol_source="MASTER",
+        )
+        session.commit()
+
+        assert seeded.instrument_id == mastered.instrument_id
+        assert mastered.kr_corp_code == "ZZ000103"
+
+    def test_an_anchored_namesake_is_still_a_separate_company(self, session: Session) -> None:
+        """The control: adoption must not become the merge it replaced."""
+        first = instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트동명",
+            symbol="990104",
+            kr_corp_code="ZZ000104",
+        )
+        session.commit()
+        second = instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트동명",
+            symbol="990105",
+            kr_corp_code="ZZ000105",
+        )
+        session.commit()
+
+        assert first.instrument_id != second.instrument_id
+
+
+class TestTrackedOnAnExistingRow:
+    def test_an_existing_row_can_be_marked_tracked(self, session: Session) -> None:
+        """The update path had no test; only row creation did."""
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트승격",
+            symbol="990106",
+            kr_corp_code="ZZ000106",
+            symbol_source="MASTER",
+        )
+        session.commit()
+        promoted = instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트승격",
+            symbol="990106",
+            kr_corp_code="ZZ000106",
+            tracked=True,
+        )
+        session.commit()
+
+        assert promoted.tracked is True

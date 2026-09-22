@@ -492,3 +492,84 @@ class TestOneSpellingPerArticle:
 
     def test_a_real_tracker_still_folds(self) -> None:
         assert self.canon("https://e.com/a?utm_source=x") == self.canon("https://e.com/a")
+
+
+class TestLatinNamesHaveWordBoundaries:
+    """`KT` is inside `KTX`, `SK` inside `TASK`, `LG` inside `ALGO`.
+
+    The longest-registered-name rule cannot help here: the word swallowing the
+    name is not a company, so there is nothing in the master to compare
+    against. Latin script does have boundaries, though, and the companies with
+    two-letter Latin names are among the most written about in the market.
+    """
+
+    def test_a_latin_name_inside_an_ordinary_word_is_rejected(self) -> None:
+        for text, name in (
+            ("KTX 특송 화물 증가", "KT"),
+            ("TASK FORCE 가동", "SK"),
+            ("ALGO 트레이딩 확대", "LG"),
+            ("CJK 인코딩 오류", "CJ"),
+        ):
+            assert NaverNewsCollector.match_method(text, name=name) is None, (text, name)
+
+    def test_the_company_still_matches_before_a_particle(self) -> None:
+        """A Korean particle is not ASCII, so it is not a word character here."""
+        assert (
+            NaverNewsCollector.match_method("KT는 요금제를 개편했다", name="KT") is MatchMethod.NAME
+        )
+        assert NaverNewsCollector.match_method("SK 실적 발표", name="SK") is MatchMethod.NAME
+
+    def test_a_name_with_punctuation_is_left_alone(self) -> None:
+        """`KT&G` is distinctive enough that the rule would only cost matches."""
+        assert NaverNewsCollector.match_method("KT&G 담배 매출", name="KT&G") is MatchMethod.NAME
+
+    def test_a_hangul_name_is_left_alone(self) -> None:
+        assert (
+            NaverNewsCollector.match_method("삼성전자는 반도체", name="삼성전자")
+            is MatchMethod.NAME
+        )
+
+    def test_conflicts_and_matching_fold_case_the_same_way(self) -> None:
+        """`spans` ignores case, so `conflicts_for` must too.
+
+        Otherwise a registry spelling that differs only in case yields no
+        conflict, and the short name claims the long company's article.
+        """
+        registry = NaverNewsCollector.registry(["SK", "Sk하이닉스"])
+
+        assert NaverNewsCollector.conflicts_for(("SK",), registry) == ("Sk하이닉스",)
+        assert (
+            NaverNewsCollector.match_method(
+                "SK하이닉스 HBM 증설", name="SK", conflicts=("Sk하이닉스",)
+            )
+            is None
+        )
+
+
+class TestWhereASpaceMayFall:
+    """A space is tolerated where the script changes, not between syllables.
+
+    `SK 하이닉스` and `SK하이닉스` are the same company and copy uses both. But
+    allowing a space between two Hangul syllables makes every short name match
+    ordinary prose: `한 화면에` becomes 한화 and `최 대 유 통 업체` becomes
+    대유. Those are real Korean sentences, and the names they damage are the
+    short well-known ones that appear most often.
+
+    The cost is the reverse spelling — `삼성 전자` for 삼성전자 — which Korean
+    copy does not normally use. Worth measuring against the reject rate on the
+    first full sweep rather than assuming.
+    """
+
+    def test_a_space_at_a_script_change_is_allowed(self) -> None:
+        for text in ("SK 하이닉스 신고가", "SK하이닉스 신고가"):
+            assert NaverNewsCollector.match_method(text, name="SK하이닉스") is MatchMethod.NAME
+
+    def test_a_space_between_syllables_is_not_a_company(self) -> None:
+        assert NaverNewsCollector.match_method("한 화면에 담았다", name="한화") is None
+        assert NaverNewsCollector.match_method("최 대 유 통 업체", name="대유") is None
+
+    def test_the_solid_spelling_still_matches(self) -> None:
+        assert NaverNewsCollector.match_method("한화는 실적을", name="한화") is MatchMethod.NAME
+
+    def test_punctuation_still_takes_a_space(self) -> None:
+        assert NaverNewsCollector.match_method("KT & G 매출", name="KT&G") is MatchMethod.NAME

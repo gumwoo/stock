@@ -132,6 +132,11 @@ def collector_over(pages: dict[str, list[list[dict[str, str]]]]) -> NaverNewsCol
     # push the watermark past every fixture article and turn eight of these
     # red, which makes the gate report the database's state and not the code's.
     c.name = SOURCE
+    # The transport is faked below, so the key is never used — but without one
+    # `run_collector` records SKIPPED and the tests that assert on a status
+    # fail wherever `.env` is absent, which is every CI runner.
+    c._client_id = "test-key-id"
+    c._client_secret = "test-key"
 
     def fake_get(client: Any, *, query: str, start: int) -> dict[str, Any]:
         index = (start - 1) // PAGE_SIZE
@@ -444,3 +449,40 @@ class TestTheLongerNameWinsInTheDatabase:
         assert items(session) == 1
         assert mentions(session, semi.instrument_id) == []
         assert len(mentions(session, material.instrument_id)) == 1
+
+
+class TestNothingToSweepIsNotASweep:
+    def test_an_empty_universe_does_not_advance_the_watermark(
+        self, market: tuple[Session, list[Instrument]]
+    ) -> None:
+        """Migrated but not yet seeded is a real state, and a dangerous one.
+
+        It is the state a few minutes before thousands of names arrive. A run
+        that reports SUCCESS there pins the watermark to now, and everything
+        those names were written about in the previous three days is stepped
+        over and never read.
+        """
+        session, _ = market
+        c = collector_over({})
+
+        def nothing(*_: object, **__: object) -> list[Instrument]:
+            return []
+
+        import app.collectors.naver_news as module
+
+        original = module.instrument_repo.list_active
+        module.instrument_repo.list_active = nothing  # type: ignore[assignment]
+        try:
+            run = run_collector(c, session)
+        finally:
+            module.instrument_repo.list_active = original  # type: ignore[assignment]
+
+        assert run.status is CollectorStatus.SKIPPED
+        assert CollectorStatusLookup(session).last_full_success(SOURCE) is None
+
+
+class TestAZeroPageBudgetIsRefused:
+    def test_zero_pages_cannot_be_configured(self) -> None:
+        """It reads nothing and `_sweep` would call that a clean finish."""
+        with pytest.raises(ValueError, match="at least 1"):
+            NaverNewsCollector(guard=FakeGuard(), max_pages=0)  # type: ignore[arg-type]
