@@ -20,6 +20,8 @@ These do.
 
 from __future__ import annotations
 
+import re
+
 from sqlalchemy import Index, UniqueConstraint
 
 from app.models.backtest import BacktestWindow
@@ -80,4 +82,7 @@ class TestOneHoldoutPerRunIsDeclared:
         assert [c.name for c in index.columns] == ["run_id"]
         where = index.dialect_options["postgresql"].get("where")
         assert where is not None
-        assert "HOLDOUT" in str(where)
+        # The exact predicate, not a word inside it. `alembic check` does not
+        # compare partial-index WHERE clauses at all, so a typo here leaves a
+        # constraint that applies to no rows and a gate that reports no drift.
+        assert re.sub(r"\s+", " ", str(where)).strip() == "sample_type = 'HOLDOUT'"

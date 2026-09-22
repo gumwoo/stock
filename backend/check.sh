@@ -21,13 +21,12 @@ echo "──── import-linter ────"
 "$BIN/lint-imports"
 echo "──── alembic check ────"
 # Models and migrations must describe the same schema; see ci.yml for why.
-# Needs a database, so it is skipped when one is not reachable rather than
-# turning the local script into something that only runs on CI.
-if "$BIN/alembic" check >/dev/null 2>&1; then
-  echo "models and migrations agree"
-else
-  "$BIN/alembic" check || echo "(skipped or failed — see above)"
-fi
+#
+# `set -e` carries the failure. The first version of this swallowed it with a
+# trailing `|| echo`, which meant the script printed a complaint and exited
+# zero — a gate that cannot fail is not a gate, and it was added in the same
+# commit that claimed six of them pass.
+"$BIN/alembic" check
 
 echo "──── pytest ────"
 "$PY" -m pytest -q

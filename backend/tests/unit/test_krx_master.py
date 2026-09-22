@@ -23,10 +23,11 @@ import zipfile
 from datetime import date, timedelta
 from itertools import pairwise
 
+import httpx
 import pytest
 
 from app.collectors.base import CollectorError, RateLimitedError, UpstreamUnavailableError
-from app.collectors.krx_master import KrxMasterCollector
+from app.collectors.krx_master import MAX_PAGES_PER_QUARTER, KrxMasterCollector
 
 
 def archive(*rows: tuple[str, str, str]) -> bytes:
@@ -115,7 +116,7 @@ class TestAnArchiveThatBeginsPKIsStillNotTrusted:
             KrxMasterCollector.parse_corp_codes(no_xml_member())
 
     def test_a_damaged_member_is_an_outage(self) -> None:
-        with pytest.raises(UpstreamUnavailableError, match="damaged"):
+        with pytest.raises(UpstreamUnavailableError, match="unreadable"):
             KrxMasterCollector.parse_corp_codes(corrupt_member())
 
     def test_a_truncated_archive_is_an_outage(self) -> None:
@@ -227,3 +228,134 @@ class TestQuartersCoverTheYearDartAllows:
         ranges = list(KrxMasterCollector.quarters(end=date(2026, 9, 22), years_back=2))
 
         assert ranges == sorted(ranges, key=lambda r: r[0], reverse=True)
+
+
+class NoWait:
+    """The rate limiter, minus the waiting."""
+
+    def acquire(self) -> None:
+        return None
+
+
+class CountingGuard:
+    def __init__(self) -> None:
+        self.reserved = 0
+
+    def reserve(self, group: str, endpoint: str, *, calls: int = 1, now: object = None) -> None:
+        self.reserved += 1
+
+
+def answering(handler: object) -> tuple[KrxMasterCollector, httpx.Client]:
+    c = KrxMasterCollector(guard=CountingGuard(), fill_gaps=False)  # type: ignore[arg-type]
+    c._key = "test-key"
+    c._bucket = NoWait()  # type: ignore[assignment]
+    return c, httpx.Client(transport=httpx.MockTransport(handler))  # type: ignore[arg-type]
+
+
+class TestTheJsonEndpointsHaveShapesToo:
+    """The same discipline the archive got, for the endpoints beside it.
+
+    A payload that is not the shape the code assumes raises `TypeError`,
+    `ValueError` or `AttributeError` — none of them a `CollectorError` — so
+    `run_collector` re-raises and files an outage as a defect in our code.
+    """
+
+    def test_a_payload_that_is_not_an_object_is_an_outage(self) -> None:
+        c, client = answering(lambda _r: httpx.Response(200, json=[1, 2, 3]))
+        with client, pytest.raises(UpstreamUnavailableError, match="not an object"):
+            c._get_json(client, "list.json")
+
+    def test_rows_that_are_not_a_list_are_an_outage(self) -> None:
+        """`{"list": 7}` used to reach `for row in 7`."""
+        c, client = answering(
+            lambda _r: httpx.Response(200, json={"status": "000", "total_page": 1, "list": 7})
+        )
+        with client, pytest.raises(UpstreamUnavailableError, match="where rows were expected"):
+            c.boards_from_filings(client, end=date(2026, 9, 22))
+
+    def test_a_row_that_is_not_an_object_is_skipped(self) -> None:
+        """One bad row costs that row, not the sweep."""
+        c, client = answering(
+            lambda _r: httpx.Response(
+                200,
+                json={
+                    "status": "000",
+                    "total_page": 1,
+                    "list": ["nonsense", {"corp_code": "00126380", "corp_cls": "Y"}],
+                },
+            )
+        )
+        with client:
+            boards, stopped = c.boards_from_filings(client, end=date(2026, 9, 22))
+
+        assert stopped is None
+        assert boards["00126380"] == "Y"
+
+    def test_a_page_count_that_is_not_a_number_is_an_outage(self) -> None:
+        c, client = answering(
+            lambda _r: httpx.Response(200, json={"status": "000", "total_page": "many", "list": []})
+        )
+        with client, pytest.raises(UpstreamUnavailableError, match="total_page"):
+            c.boards_from_filings(client, end=date(2026, 9, 22))
+
+    def test_an_absurd_page_count_cannot_spend_the_day(self) -> None:
+        """A wrong number must not turn the loop into the day's whole budget.
+
+        Without a cap this pages until the quota guard refuses, which is one
+        malformed field costing every other DART collector its day.
+
+        The transport refuses past the ceiling rather than answering forever.
+        A test that proves a loop is bounded by running the unbounded version
+        does not fail, it hangs — and a hung suite is worse than a red one.
+        """
+        quarters = len(list(KrxMasterCollector.quarters(end=date(2026, 9, 22), years_back=1)))
+        ceiling = quarters * MAX_PAGES_PER_QUARTER
+        served = 0
+
+        def handler(_r: httpx.Request) -> httpx.Response:
+            nonlocal served
+            served += 1
+            if served > ceiling + 10:
+                raise AssertionError(f"paged past the cap: {served} requests")
+            return httpx.Response(200, json={"status": "000", "total_page": 10**9, "list": []})
+
+        c, client = answering(handler)
+        with client:
+            c.boards_from_filings(client, end=date(2026, 9, 22))
+
+        assert served <= ceiling
+        assert c._guard.reserved == served  # type: ignore[attr-defined]
+
+
+class TestAFieldWiderThanItsColumn:
+    """`corp_name` is `String(200)`. DART is not obliged to agree.
+
+    A value the database refuses arrives as a `DataError` from a flush partway
+    through a sweep of several thousand rows — and it takes the run record with
+    it, because the handler that files the failure commits on the same session
+    the failed flush deactivated.
+    """
+
+    def test_an_overlong_name_drops_that_candidate_only(self) -> None:
+        found = KrxMasterCollector.parse_corp_codes(
+            archive(
+                ("00126380", "삼성전자", "005930"),
+                ("00164779", "가" * 900, "000660"),
+            )
+        )
+
+        assert [c.name for c in found] == ["삼성전자"]
+
+    def test_an_overlong_corp_code_drops_that_candidate(self) -> None:
+        found = KrxMasterCollector.parse_corp_codes(
+            archive(("0" * 40, "긴코드회사", "005931"), ("00126380", "삼성전자", "005930"))
+        )
+
+        assert [c.corp_code for c in found] == ["00126380"]
+
+    def test_an_overlong_stock_code_drops_that_candidate(self) -> None:
+        found = KrxMasterCollector.parse_corp_codes(
+            archive(("00126380", "삼성전자", "005930"), ("00164779", "긴종목", "9" * 40))
+        )
+
+        assert [c.stock_code for c in found] == ["005930"]

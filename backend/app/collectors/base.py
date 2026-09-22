@@ -178,6 +178,35 @@ class BaseCollector(ABC):
         return run_collector(self, session)
 
 
+def _record(session: Session, run: CollectorRun) -> None:
+    """Write the run row even when the collector left the session unusable.
+
+    A failed flush deactivates the transaction: every later statement on it
+    raises `PendingRollbackError`, and that includes this commit. The run row
+    then disappears — the one outcome the record exists to prevent, happening
+    at exactly the moment something went wrong. Observed with a value too long
+    for its column: the collector raised, the handler set FAILED, and the
+    commit that was meant to preserve that finding raised in turn, leaving no
+    trace of the run at all.
+
+    Rolling back first discards nothing that mattered. Collectors commit their
+    own data before returning, and on the failure path there is nothing worth
+    keeping anyway.
+    """
+    from sqlalchemy.exc import SQLAlchemyError
+
+    try:
+        session.add(run)
+        session.commit()
+        return
+    except SQLAlchemyError:
+        logger.warning("%s: the session could not record the run; retrying clean", run.source)
+        session.rollback()
+
+    session.add(run)
+    session.commit()
+
+
 def run_collector(collector: Collector, session: Session) -> CollectorRun:
     """Run one collector with isolation and full run recording."""
     started: datetime = utc_now()
@@ -194,8 +223,7 @@ def run_collector(collector: Collector, session: Session) -> CollectorRun:
         run.status = CollectorStatus.SKIPPED
         run.finished_at = utc_now()
         run.detail = reason
-        session.add(run)
-        session.commit()
+        _record(session, run)
         logger.info("%s: skipped (%s)", collector.name, reason)
         return run
 
@@ -224,8 +252,7 @@ def run_collector(collector: Collector, session: Session) -> CollectorRun:
         run.status = CollectorStatus.FAILED
         run.error = "internal error; see logs"
         run.finished_at = utc_now()
-        session.add(run)
-        session.commit()
+        _record(session, run)
         logger.exception("%s: internal error — re-raising", collector.name)
         raise
     else:
@@ -244,8 +271,7 @@ def run_collector(collector: Collector, session: Session) -> CollectorRun:
         )
 
     run.finished_at = utc_now()
-    session.add(run)
-    session.commit()
+    _record(session, run)
     return run
 
 

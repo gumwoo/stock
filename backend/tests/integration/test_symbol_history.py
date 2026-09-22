@@ -12,6 +12,7 @@ day, while its own comment said it closed "the day before".
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from datetime import date, timedelta
 
@@ -32,6 +33,11 @@ pytestmark = pytest.mark.integration
 CIK = fake_cik(__name__)
 
 CHANGEOVER = date(2026, 9, 19)
+
+# Relative, because a hard-coded future date is a suite with an expiry printed
+# on it. `date(2030, 1, 1)` read as "after everything" until 2030, at which
+# point three of these assertions quietly invert.
+LATER = utc_now().date() + timedelta(days=365)
 
 
 @pytest.fixture(scope="module")
@@ -371,9 +377,7 @@ class TestACollectorMayNoticeAChange:
         old_one = instrument_repo.resolve_symbol(
             session, "990101", Market.KR, asof=date(2020, 1, 1)
         )
-        new_one = instrument_repo.resolve_symbol(
-            session, "990102", Market.KR, asof=date(2030, 1, 1)
-        )
+        new_one = instrument_repo.resolve_symbol(session, "990102", Market.KR, asof=LATER)
 
         assert old_one is not None
         assert new_one is not None
@@ -393,7 +397,7 @@ class TestACollectorMayNoticeAChange:
             )
             session.commit()
 
-        found = instrument_repo.resolve_symbol(session, "ZZB", Market.KR, asof=date(2030, 1, 1))
+        found = instrument_repo.resolve_symbol(session, "ZZB", Market.KR, asof=LATER)
         assert found is not None
         assert instrument_repo.current_symbol(session, found.instrument_id) == "ZZB"
 
@@ -620,7 +624,7 @@ class TestATickerMayBeReassigned:
     def test_one_code_resolves_to_one_company_on_any_date(self, session: Session) -> None:
         self.hand_over(session)
 
-        for asof in (date(1999, 1, 1), date(2015, 6, 30), date(2030, 1, 1)):
+        for asof in (date(1999, 1, 1), date(2015, 6, 30), LATER):
             rows = (
                 session.execute(
                     select(SymbolHistory).where(
@@ -648,7 +652,7 @@ class TestATickerMayBeReassigned:
     def test_the_new_holder_owns_it_today(self, session: Session) -> None:
         self.hand_over(session)
 
-        now = instrument_repo.resolve_symbol(session, "990301", Market.KR, asof=date(2030, 1, 1))
+        now = instrument_repo.resolve_symbol(session, "990301", Market.KR, asof=LATER)
         assert now is not None
         assert now.kr_corp_code == "ZZ000302"
 
@@ -743,3 +747,247 @@ class TestAFutureListingDate:
         for row in rows:
             if row.valid_to is not None:
                 assert row.valid_from <= row.valid_to, (row.symbol, row.valid_from, row.valid_to)
+
+
+class TestThePreviousHolderSaysNothing:
+    """The case the reassignment fix is actually for.
+
+    The earlier test had the old owner move to its new code first, which closes
+    its window on the way past — so by the time the newcomer arrives there is
+    nothing left to close, and the closing step could be deleted without any
+    test noticing. That was measured: removing it left all 954 green.
+
+    What really happens is that the master simply shows the code against
+    somebody else. The previous holder is still there, still open, and saying
+    nothing.
+    """
+
+    @staticmethod
+    def take_over(session: Session) -> None:
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트원주인",
+            symbol="990501",
+            kr_corp_code="ZZ000501",
+            symbol_source="MASTER",
+        )
+        session.commit()
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트새주인",
+            symbol="990501",
+            kr_corp_code="ZZ000502",
+            symbol_source="MASTER",
+        )
+        session.commit()
+
+    def test_the_old_window_is_closed(self, session: Session) -> None:
+        self.take_over(session)
+
+        rows = list(
+            session.execute(
+                select(SymbolHistory)
+                .where(SymbolHistory.symbol == "990501")
+                .order_by(SymbolHistory.valid_from)
+            ).scalars()
+        )
+
+        assert len(rows) == 2
+        assert rows[0].valid_to is not None
+        assert rows[1].valid_to is None
+
+    def test_one_company_per_date(self, session: Session) -> None:
+        self.take_over(session)
+
+        for asof in (date(1999, 1, 1), date(2020, 6, 1), LATER):
+            matched = list(
+                session.execute(
+                    select(SymbolHistory).where(
+                        SymbolHistory.symbol == "990501",
+                        SymbolHistory.valid_from <= asof,
+                        (SymbolHistory.valid_to.is_(None)) | (SymbolHistory.valid_to >= asof),
+                    )
+                ).scalars()
+            )
+            assert len(matched) == 1, (asof, [(r.instrument_id, r.valid_from) for r in matched])
+
+    def test_the_old_holder_still_owns_the_past(self, session: Session) -> None:
+        """Closing the window is not enough; it has to close at the right day.
+
+        The newcomer starting the day after the placeholder would satisfy "one
+        company per date" and still be a lie: the previous holder really did
+        own the code for all those years, and a backtest over them would read
+        the newcomer's prices under the old company's name.
+        """
+        self.take_over(session)
+
+        for asof in (date(1999, 1, 1), date(2015, 6, 30), date(2024, 1, 1)):
+            owner = instrument_repo.resolve_symbol(session, "990501", Market.KR, asof=asof)
+            assert owner is not None, asof
+            assert owner.kr_corp_code == "ZZ000501", (asof, owner.kr_corp_code)
+
+        today = instrument_repo.resolve_symbol(session, "990501", Market.KR, asof=LATER)
+        assert today is not None
+        assert today.kr_corp_code == "ZZ000502"
+
+    def test_a_duplicate_that_predates_the_lock_is_healed(self, session: Session) -> None:
+        """The no-op path used to return before it looked at anyone else.
+
+        That is what made a duplicate permanent. Once two windows existed no
+        later pass would notice, because each company found its own symbol
+        already current and stopped there. The lock stops new ones from
+        forming; rows already in the database from before it have to be
+        cleared by the next ordinary pass, so this one is written in raw SQL
+        to build the state the repository can no longer produce.
+        """
+        for code, name in (("ZZ000511", "제트제트중복갑"), ("ZZ000512", "제트제트중복을")):
+            iid = session.execute(
+                text(
+                    "INSERT INTO instrument (market, name, tracked, kr_corp_code) "
+                    "VALUES ('KR', :n, false, :c) RETURNING instrument_id"
+                ),
+                {"n": name, "c": code},
+            ).scalar_one()
+            session.execute(
+                text(
+                    "INSERT INTO symbol_history "
+                    "(instrument_id, symbol, valid_from, source, ingested_at) "
+                    "VALUES (:i, '990511', '1970-01-01', 'MASTER', now())"
+                ),
+                {"i": iid},
+            )
+        session.commit()
+
+        before = session.execute(
+            text("SELECT count(*) FROM symbol_history WHERE symbol = '990511' AND valid_to IS NULL")
+        ).scalar_one()
+        assert before == 2, "the fixture did not build the broken state"
+
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트중복갑",
+            symbol="990511",
+            kr_corp_code="ZZ000511",
+            symbol_source="MASTER",
+        )
+        session.commit()
+
+        after = session.execute(
+            text("SELECT count(*) FROM symbol_history WHERE symbol = '990511' AND valid_to IS NULL")
+        ).scalar_one()
+        assert after == 1
+
+        session.execute(text("DELETE FROM symbol_history WHERE symbol = '990511'"))
+        session.execute(
+            text("DELETE FROM instrument WHERE kr_corp_code IN ('ZZ000511','ZZ000512')")
+        )
+        session.commit()
+
+
+class TestTwoWritersAtOnce:
+    """The race that made a duplicate permanent.
+
+    `_earliest_free` reads "who holds this code", decides, then writes — with
+    nothing in the schema to catch two processes doing it at the same moment.
+    `symbol_history` has indexes and no uniqueness. Both readers see an empty
+    answer, both open a window at the placeholder date, and from then on the
+    code resolves to two companies on every date back to 1970. It does not heal
+    on its own: a later pass finds its own symbol already current.
+
+    Two `python -m app.cli collect` runs started by hand is all it takes.
+    """
+
+    def test_concurrent_upserts_leave_one_open_window(self, engine: object) -> None:
+        factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
+        errors: list[BaseException] = []
+
+        def claim(code: str, name: str) -> None:
+            try:
+                with factory() as s:
+                    instrument_repo.upsert_instrument(
+                        session=s,
+                        market=Market.KR,
+                        name=name,
+                        symbol="990601",
+                        kr_corp_code=code,
+                        symbol_source="MASTER",
+                    )
+                    s.commit()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=claim, args=("ZZ000601", "제트제트경합갑")),
+            threading.Thread(target=claim, args=("ZZ000602", "제트제트경합을")),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert errors == [], errors
+
+        with factory() as s:
+            open_rows = list(
+                s.execute(
+                    select(SymbolHistory).where(
+                        SymbolHistory.symbol == "990601", SymbolHistory.valid_to.is_(None)
+                    )
+                ).scalars()
+            )
+            assert len(open_rows) == 1, [(r.instrument_id, r.valid_from) for r in open_rows]
+
+            for asof in (date(1999, 1, 1), LATER):
+                matched = list(
+                    s.execute(
+                        select(SymbolHistory).where(
+                            SymbolHistory.symbol == "990601",
+                            SymbolHistory.valid_from <= asof,
+                            (SymbolHistory.valid_to.is_(None)) | (SymbolHistory.valid_to >= asof),
+                        )
+                    ).scalars()
+                )
+                assert len(matched) <= 1, (asof, [r.instrument_id for r in matched])
+
+            s.execute(
+                text(
+                    "DELETE FROM symbol_history WHERE instrument_id IN "
+                    "(SELECT instrument_id FROM instrument WHERE kr_corp_code IN "
+                    "('ZZ000601','ZZ000602'))"
+                )
+            )
+            s.execute(text("DELETE FROM instrument WHERE kr_corp_code IN ('ZZ000601','ZZ000602')"))
+            s.commit()
+
+    def test_a_whole_master_load_takes_one_lock(self, session: Session) -> None:
+        """Per-ticker keys would pile four thousand locks into one transaction.
+
+        The shared table holds `max_locks_per_transaction` times
+        `max_connections` entries, 6,400 by default. Two master loads at once
+        would exhaust it and fail — the exact situation the lock is for.
+        """
+        for n in range(40):
+            instrument_repo.upsert_instrument(
+                session,
+                market=Market.KR,
+                name=f"제트제트다량{n:03d}",
+                symbol=f"9907{n:02d}",
+                kr_corp_code=f"ZZ0007{n:02d}",
+                symbol_source="MASTER",
+            )
+        held = session.execute(
+            text(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                "AND pid = pg_backend_pid()"
+            )
+        ).scalar_one()
+        session.commit()
+
+        assert held == 1, held
+
+        session.execute(text("DELETE FROM symbol_history WHERE symbol LIKE '9907%'"))
+        session.execute(text("DELETE FROM instrument WHERE kr_corp_code LIKE 'ZZ0007%'"))
+        session.commit()

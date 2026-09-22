@@ -145,7 +145,19 @@ class Settings(BaseSettings):
     # with care once a second Naver search collector exists — news alone at
     # two pages is 80% of the group budget in the worst case.
     naver_news_max_pages: int = Field(
-        default=2, gt=0, description="Pages of 100 per instrument per run"
+        default=1,
+        gt=0,
+        description=(
+            "Pages of 100 per instrument per run. One, because the worst case "
+            "has to fit the budget rather than merely be refused by it: the "
+            "Korean master holds about 3,990 listed names, and at two pages "
+            "twice a day that is 15,960 calls against a budget of 12,500. The "
+            "guard would stop the second sweep partway through, every day, "
+            "and a run that never completes pins the window at its seven-day "
+            "floor. Raising this needs the arithmetic redone, and adding "
+            "another Naver search consumer needs it redone again — they share "
+            "one published cap."
+        ),
     )
 
     # ---------------------------------------------------------------------

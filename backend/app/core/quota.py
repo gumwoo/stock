@@ -220,12 +220,19 @@ DEFAULT_PLAN = QuotaPlan(
 
 
 def budget(quota: Quota, *, fraction: float = BUDGET_FRACTION) -> int:
-    """How many calls we allow ourselves against `quota`.
+    """How many calls of this quota we are willing to spend.
 
-    Floored, not rounded: rounding half a call up would spend a call we said we
-    would not. Done in `Decimal`, because binary floating point can land a
-    hair above the exact product and hand the floor an extra call — 4,072,150
-    at 0.3 comes out one too high in `float`.
+    Floored, never rounded: the budget is a ceiling we intend never to reach,
+    and a rounded-up share of a published cap is a number larger than the share
+    we said we would take.
+
+    `Decimal` rather than float multiplication. Binary floating point cannot
+    represent most decimal fractions exactly, so `limit * fraction` can land a
+    hair off the exact product, and `floor` then turns that hair into a whole
+    call either side of the intended budget. Swept across plausible limits and
+    fractions, the two disagree on dozens of combinations. Which ones depends
+    on the platform, which is the point: a budget that is off by one on some
+    machines and not others is a budget nobody can reason about.
     """
     if not 0.0 < fraction <= 1.0:
         raise ValueError(f"fraction must be in (0, 1], got {fraction}")

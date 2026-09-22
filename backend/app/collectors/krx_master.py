@@ -32,7 +32,6 @@ from __future__ import annotations
 import io
 import xml.etree.ElementTree as ET
 import zipfile
-import zlib
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -44,6 +43,7 @@ from sqlalchemy.orm import Session
 from app.collectors.base import (
     BaseCollector,
     CollectionResult,
+    CollectorError,
     RateLimitedError,
     TokenBucket,
     UpstreamUnavailableError,
@@ -62,6 +62,19 @@ QUOTA_GROUP = "dart"
 # DART refuses a range wider than this when no corp_code is given.
 MAX_RANGE = timedelta(days=90)
 PAGE_SIZE = 100
+
+# One quarter of periodic filings measured at 36 pages. The cap is far above
+# that and exists only so a `total_page` we cannot trust — DART returning a
+# wrong number, a proxy rewriting one — cannot spend the whole day's budget in
+# a loop nobody is watching.
+MAX_PAGES_PER_QUARTER = 200
+
+# Column widths in `instrument` and `symbol_history`. A field wider than its
+# column is a row the database refuses, and the refusal arrives as a `DataError`
+# from a flush in the middle of a sweep of several thousand.
+MAX_CORP_CODE = 8
+MAX_NAME = 200
+MAX_SYMBOL = 32
 
 # `corp_cls` to the board it names. KONEX (`N`) and other (`E`) are not stored:
 # this exists to cover KOSPI and KOSDAQ, and `Listing` says so.
@@ -193,6 +206,14 @@ class KrxMasterCollector(BaseCollector):
         # files the run as an internal defect, which is the exact symptom
         # `check_archive` was added to remove. Checking the first four bytes
         # only moved the boundary; it did not close it.
+        # Everything from here is library code run over bytes a stranger
+        # chose, so the usual rule is inverted: catch broadly and name the
+        # outside world. Listing the exceptions instead left three ways
+        # through on the first attempt — an encrypted member raises
+        # `RuntimeError`, an unsupported compression method
+        # `NotImplementedError`, a damaged lzma member `LZMAError` — and each
+        # was recorded as a defect in this file. The narrow block below
+        # contains no logic of ours for a broad catch to hide.
         try:
             with zipfile.ZipFile(io.BytesIO(payload)) as archive:
                 name = next((n for n in archive.namelist() if n.lower().endswith(".xml")), None)
@@ -202,8 +223,12 @@ class KrxMasterCollector(BaseCollector):
                         f"{archive.namelist()[:5]}"
                     )
                 body = archive.read(name)
-        except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
-            raise UpstreamUnavailableError(f"DART corpCode.xml archive is damaged: {exc}") from exc
+        except CollectorError:
+            raise
+        except Exception as exc:
+            raise UpstreamUnavailableError(
+                f"DART corpCode.xml archive is unreadable: {type(exc).__name__}: {exc}"
+            ) from exc
 
         try:
             root = ET.fromstring(body.decode("utf-8"))
@@ -211,9 +236,9 @@ class KrxMasterCollector(BaseCollector):
             raise UpstreamUnavailableError(
                 f"DART corpCode.xml member {name!r} is not UTF-8: {exc}"
             ) from exc
-        except ET.ParseError as exc:
+        except Exception as exc:
             raise UpstreamUnavailableError(
-                f"DART corpCode.xml member {name!r} is not XML: {exc}"
+                f"DART corpCode.xml member {name!r} is not XML: {type(exc).__name__}: {exc}"
             ) from exc
 
         found: list[Candidate] = []
@@ -221,8 +246,19 @@ class KrxMasterCollector(BaseCollector):
             stock_code = (node.findtext("stock_code") or "").strip()
             corp_code = (node.findtext("corp_code") or "").strip()
             corp_name = (node.findtext("corp_name") or "").strip()
-            if stock_code and corp_code and corp_name:
-                found.append(Candidate(corp_code=corp_code, name=corp_name, stock_code=stock_code))
+            if not (stock_code and corp_code and corp_name):
+                continue
+            # A field wider than its column is refused by the database, and the
+            # refusal lands as a `DataError` from a flush partway through a
+            # sweep of several thousand rows. Dropping the one malformed
+            # candidate costs that company; letting it through costs the run.
+            if (
+                len(corp_code) > MAX_CORP_CODE
+                or len(corp_name) > MAX_NAME
+                or len(stock_code) > MAX_SYMBOL
+            ):
+                continue
+            found.append(Candidate(corp_code=corp_code, name=corp_name, stock_code=stock_code))
         return found
 
     @staticmethod
@@ -321,7 +357,12 @@ class KrxMasterCollector(BaseCollector):
                 except QuotaExhausted as refused:
                     return boards, str(refused)
 
-                for row in payload.get("list") or []:
+                rows = payload.get("list") or []
+                if not isinstance(rows, list):
+                    raise UpstreamUnavailableError(
+                        f"DART list.json gave a {type(rows).__name__} where rows were expected"
+                    )
+                for row in rows:
                     if not isinstance(row, dict):
                         continue
                     corp_code = (row.get("corp_code") or "").strip()
@@ -337,7 +378,7 @@ class KrxMasterCollector(BaseCollector):
                     raise UpstreamUnavailableError(
                         f"DART list.json gave total_page={payload.get('total_page')!r}"
                     ) from exc
-                if page >= total:
+                if page >= min(total, MAX_PAGES_PER_QUARTER):
                     break
                 page += 1
         return boards, None

@@ -62,6 +62,7 @@ _TEST_SOURCES = (
     "PARTIAL",
     "SELF_SKIPPING",
     "KRX_MASTER",
+    "POISONING",
 )
 
 
@@ -318,3 +319,80 @@ class TestARefusedArchiveIsAnOutage:
             run_collector(self.refusing("800"), session)  # type: ignore[arg-type]
         except Exception as exc:  # noqa: BLE001  # pragma: no cover
             pytest.fail(f"a DART refusal escaped the isolation boundary: {exc!r}")
+
+
+class PoisoningCollector(BaseCollector):
+    """Fails in a way that leaves the session unable to commit anything."""
+
+    name = "POISONING"
+
+    def collect(self, session: Session) -> CollectionResult:
+        from sqlalchemy import text
+
+        session.execute(
+            text("INSERT INTO instrument (market, name, tracked) VALUES ('KR', :n, false)"),
+            {"n": "가" * 900},
+        )
+        return CollectionResult()  # pragma: no cover
+
+
+class TestTheRunIsRecordedEvenThen:
+    """An unrecorded failure is the kind that costs an afternoon later.
+
+    A failed flush deactivates the transaction, so every later statement on it
+    raises — including the commit that writes down what went wrong. Observed
+    with a value too long for its column: the collector raised, the handler set
+    FAILED, and the commit meant to preserve that finding raised in turn,
+    leaving no row at all. The record vanished at precisely the moment it was
+    worth having.
+    """
+
+    def counted(self, session: Session) -> int:
+        return len(
+            list(
+                session.execute(
+                    select(CollectorRun).where(CollectorRun.source == "POISONING")
+                ).scalars()
+            )
+        )
+
+    def test_a_data_error_still_leaves_a_run_row(self, session: Session) -> None:
+        before = self.counted(session)
+
+        with pytest.raises(Exception, match="too long"):
+            run_collector(PoisoningCollector(), session)
+
+        session.rollback()
+        assert self.counted(session) == before + 1
+
+    def test_the_row_says_it_failed(self, session: Session) -> None:
+        with pytest.raises(Exception, match="too long"):
+            run_collector(PoisoningCollector(), session)
+        session.rollback()
+
+        row = (
+            session.execute(
+                select(CollectorRun)
+                .where(CollectorRun.source == "POISONING")
+                .order_by(CollectorRun.started_at.desc())
+            )
+            .scalars()
+            .first()
+        )
+
+        assert row is not None
+        assert row.status is CollectorStatus.FAILED
+        assert row.finished_at is not None
+
+    def test_the_bad_row_was_not_written(self, session: Session) -> None:
+        """The rollback that saves the record must not save the bad data."""
+        from sqlalchemy import text
+
+        with pytest.raises(Exception, match="too long"):
+            run_collector(PoisoningCollector(), session)
+        session.rollback()
+
+        left = session.execute(
+            text("SELECT count(*) FROM instrument WHERE name LIKE :n"), {"n": "가" * 900}
+        ).scalar_one()
+        assert left == 0

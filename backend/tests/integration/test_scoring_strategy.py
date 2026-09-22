@@ -105,18 +105,24 @@ def instrument(db: object) -> Iterator[tuple[Session, Instrument]]:
         )
         s.commit()
 
-        yield s, inst
-
-        s.execute(
-            text("DELETE FROM backtest_run WHERE instrument_id = :i"),
-            {"i": inst.instrument_id},
-        )
-        for table in ("candle", "instrument"):
+        try:
+            # `try/finally`, so an interrupted run still cleans up. Without
+            # it `pytest -x` or a Ctrl-C leaves this company behind in
+            # whatever database `.env` names, which is the developer's own,
+            # and every later run then fails on the unique CIK until
+            # somebody deletes the row by hand.
+            yield s, inst
+        finally:
             s.execute(
-                text(f"DELETE FROM {table} WHERE instrument_id = :i"),
+                text("DELETE FROM backtest_run WHERE instrument_id = :i"),
                 {"i": inst.instrument_id},
             )
-        s.commit()
+            for table in ("candle", "instrument"):
+                s.execute(
+                    text(f"DELETE FROM {table} WHERE instrument_id = :i"),
+                    {"i": inst.instrument_id},
+                )
+            s.commit()
 
 
 def decisions(s: Session, inst: Instrument) -> tuple[Counter[str], bt.BacktestResult]:
@@ -420,18 +426,24 @@ def funded(db: object) -> Iterator[tuple[Session, Instrument]]:
         fundamental_repo.save_facts(s, _facts(inst.instrument_id))
         s.commit()
 
-        yield s, inst
-
-        s.execute(
-            text("DELETE FROM backtest_run WHERE instrument_id = :i"),
-            {"i": inst.instrument_id},
-        )
-        for table in ("fundamental", "candle", "instrument"):
+        try:
+            # `try/finally`, so an interrupted run still cleans up. Without
+            # it `pytest -x` or a Ctrl-C leaves this company behind in
+            # whatever database `.env` names, which is the developer's own,
+            # and every later run then fails on the unique CIK until
+            # somebody deletes the row by hand.
+            yield s, inst
+        finally:
             s.execute(
-                text(f"DELETE FROM {table} WHERE instrument_id = :i"),
+                text("DELETE FROM backtest_run WHERE instrument_id = :i"),
                 {"i": inst.instrument_id},
             )
-        s.commit()
+            for table in ("fundamental", "candle", "instrument"):
+                s.execute(
+                    text(f"DELETE FROM {table} WHERE instrument_id = :i"),
+                    {"i": inst.instrument_id},
+                )
+            s.commit()
 
 
 class TestARunMustCoverTheEraItMeasures:
