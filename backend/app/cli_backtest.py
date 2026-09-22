@@ -101,6 +101,16 @@ def cmd_run(
         if span is None:
             raise SystemExit(f"no daily bars stored for {symbol}")
 
+        # Only the scoring rule ranks against peers. Recording a universe on a
+        # moving-average run would put a coordinate in the row that nothing in
+        # the run ever read, and a coordinate that does not affect the numbers
+        # is one that makes two identical experiments look different.
+        universe = (
+            svc.market_universe(session, instrument, asof=utc_now().date())
+            if strategy == "score"
+            else None
+        )
+
         report = svc.walk_forward(
             session,
             StrategySpec(definition=definition),
@@ -111,6 +121,7 @@ def cmd_run(
                 starting_cash=Decimal(cash),
                 costs=CostModel(Decimal(commission_bps), Decimal(slippage_bps)),
                 execution_model=ExecutionModel.NEXT_OPEN,
+                universe=universe,
             ),
             train_sessions=train,
             eval_sessions=evaluate,
@@ -245,6 +256,7 @@ def _rebuild(session: Session, run: BacktestRun) -> svc.WalkForwardReport:
             ),
             execution_model=ExecutionModel(run.execution_model),
             bar_minutes=run.bar_minutes,
+            universe=tuple(run.universe) if run.universe else None,
         ),
         train_sessions=run.train_sessions,
         eval_sessions=run.eval_sessions,

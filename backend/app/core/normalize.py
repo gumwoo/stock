@@ -10,17 +10,24 @@ directly is meaningless arithmetic that happens to produce a number. Everything
 therefore passes through normalization to a 0-100 position before it is
 weighted.
 
-**Cross-sectional percentile is the default.** Rank within the same-moment
-universe answers "how does this instrument compare to its peers right now",
-which stays meaningful when the market regime shifts. A time-series z-score
-answers "how unusual is this versus its own history", which sounds equivalent
-but silently changes meaning when volatility regimes change — a 2-sigma move in
-a calm market and in a panic are not comparable events.
+**Both scales are in use, and which one ran is recorded.** `percentile_rank`
+answers "how does this instrument compare to its peers right now", which stays
+meaningful when the market regime shifts. A time-series z-score would answer
+"how unusual is this versus its own history", which sounds equivalent but
+silently changes meaning when volatility regimes change: a 2-sigma move in a
+calm market and in a panic are not comparable events.
 
-Where a universe is too small to rank against (one or two instruments, as at
-the start of this project), `bounded` maps a value onto a fixed scale instead.
-That is honest about being a fixed opinion rather than a comparison, which is
-why it is a separate function rather than a silent fallback inside percentile.
+The four monotonic fundamental ratios are ranked - ROE, debt ratio, operating
+margin and revenue growth - each against the same market's universe at the same
+instant. Everything else is mapped onto a fixed scale by `bounded` or
+`peak_at`, because ranking it would assert something the strategy does not
+believe: that the cheapest P/E in a market is the best one, or that an RSI is
+overbought relative to other instruments rather than to 100.
+
+`bounded` also serves as the stated fallback when a population is too thin to
+rank against. It is a separate function rather than a branch inside percentile
+so a fixed opinion can never be mistaken for a comparison, and the caller
+records which of the two it used in the metric's own `detail`.
 """
 
 from __future__ import annotations

@@ -775,6 +775,41 @@ def latest_filing_date(
     return session.execute(stmt).scalar()
 
 
+def available_instants(
+    session: Session,
+    instrument_id: int,
+    *,
+    source: FundamentalSource | None = None,
+    ingested_before: datetime | None = None,
+) -> list[datetime]:
+    """Every instant at which what is knowable about this instrument changed.
+
+    A point-in-time snapshot of one company can differ between two moments
+    only if some fact became available in between. Handing a caller those
+    instants lets it reuse one built snapshot across every session between
+    them, which is what makes a cross-sectional backtest affordable: the
+    alternative rebuilds a whole market's financials on each of thousands of
+    sessions and gets the same answer almost every time.
+
+    `ingested_before` matters as much here as anywhere else. A backfill that
+    lands later carries an older `available_at`, so a list taken without the
+    snapshot bound would split the cache at instants the run was never
+    supposed to see - and a cache keyed on moments that did not exist for the
+    run is a cache that answers for a different run.
+    """
+    stmt = (
+        select(Fundamental.available_at)
+        .where(Fundamental.instrument_id == instrument_id)
+        .distinct()
+        .order_by(Fundamental.available_at)
+    )
+    if source is not None:
+        stmt = stmt.where(Fundamental.source == source)
+    if ingested_before is not None:
+        stmt = stmt.where(Fundamental.ingested_at <= ingested_before)
+    return list(session.execute(stmt).scalars().all())
+
+
 def concepts_for(session: Session, instrument_id: int) -> list[str]:
     stmt = (
         select(Fundamental.concept)

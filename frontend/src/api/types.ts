@@ -140,6 +140,7 @@ export interface BacktestRunDetail extends BacktestRunSummary {
   min_commission: number;
   execution_model: string;
   bar_minutes: number | null;
+  universe: number[] | null;
   train_sessions: number;
   eval_sessions: number;
   anchored: boolean;

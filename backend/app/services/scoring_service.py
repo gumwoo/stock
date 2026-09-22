@@ -12,6 +12,8 @@ only ever sees a `PriceSeries` and an `asof`.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
@@ -26,7 +28,7 @@ from app.core.types import (
     ScoredSignal,
     SignalReason,
 )
-from app.engines.fundamental import FundamentalEngine
+from app.engines.fundamental import FundamentalEngine, PeerRatios
 from app.engines.technical import PriceSeries, TechnicalEngine, TechnicalParams
 from app.models import Instrument, Interval, Signal, SignalFactor
 from app.models.fundamental import FundamentalSource
@@ -67,12 +69,85 @@ _SOURCE_FOR: dict[Market, FundamentalSource] = {
 _CURRENCY: dict[Market, str] = {Market.US: "USD", Market.KR: "KRW"}
 
 
+# Resolves the peer population for one market at one instant. Passed in rather
+# than built here so that scoring a single instrument stays possible without a
+# universe: the lookup returns None, every ratio falls back to its fixed scale,
+# and each metric says so.
+PeerLookup = Callable[[Market, datetime], PeerRatios | None]
+
+
+def peer_ratios(
+    session: Session,
+    instruments: list[Instrument],
+    *,
+    asof: datetime,
+    source: FundamentalSource,
+    currency: str,
+) -> PeerRatios:
+    """The market's cross-sectional population, at one instant.
+
+    Built with `price=None` on purpose. The ranked ratios are ROE, debt ratio,
+    operating margin and revenue growth, none of which touch the price, and
+    valuation is scored on its fixed scale precisely because a rank over raw
+    multiples is not a belief this strategy holds. Fetching nine last closes to
+    feed a ratio nobody ranks would be work done to no end.
+
+    Every peer is resolved at the same instant as the instrument being scored,
+    so a rank compares what was knowable then rather than mixing eras.
+    """
+    snapshots = [
+        fundamental_service.build_snapshot(
+            session,
+            instrument.instrument_id,
+            asof=asof,
+            price=None,
+            currency=currency,
+            source=source,
+        )
+        for instrument in instruments
+    ]
+    return PeerRatios.of(asof, snapshots)
+
+
+def market_peer_lookup(session: Session, instruments: list[Instrument]) -> PeerLookup:
+    """A lookup over `instruments`, memoised per market and instant.
+
+    Instruments in one market almost always share a session close, so the
+    cache normally collapses a population per instrument into one per market.
+    It is keyed on the instant as well, because two instruments whose newest
+    bar differs must not silently share a population built at the later one.
+    """
+    by_market: dict[Market, list[Instrument]] = defaultdict(list)
+    for instrument in instruments:
+        by_market[instrument.market].append(instrument)
+
+    cache: dict[tuple[Market, datetime], PeerRatios] = {}
+
+    def lookup(market: Market, asof: datetime) -> PeerRatios | None:
+        members = by_market.get(market)
+        if not members:
+            return None
+        key = (market, asof)
+        if key not in cache:
+            cache[key] = peer_ratios(
+                session,
+                members,
+                asof=asof,
+                source=_SOURCE_FOR[market],
+                currency=_CURRENCY[market],
+            )
+        return cache[key]
+
+    return lookup
+
+
 def score_instrument(
     session: Session,
     instrument: Instrument,
     *,
     now: datetime | None = None,
     params: TechnicalParams | None = None,
+    peers: PeerLookup | None = None,
 ) -> ScoredSignal | None:
     """Score one instrument from its stored history.
 
@@ -128,6 +203,7 @@ def score_instrument(
         asof=bars[-1].available_at,
         price=float(bars[-1].close),
         now=now,
+        peers=peers,
     )
 
     policy = POLICY
@@ -181,6 +257,7 @@ def _score_fundamental(
     asof: datetime,
     price: float,
     now: datetime,
+    peers: PeerLookup | None = None,
 ) -> tuple[Factor, tuple[SignalReason, ...]]:
     """Score reported financials as of the same instant as the price data.
 
@@ -217,6 +294,7 @@ def _score_fundamental(
         snapshot,
         requested_weight=WEIGHTS[Engine.FUNDAMENTAL],
         provenance=provenance,
+        peers=peers(instrument.market, asof) if peers is not None else None,
     )
 
 
@@ -286,9 +364,15 @@ def score_all(session: Session, *, now: datetime | None = None) -> list[Signal]:
     now = now or utc_now()
     instruments = instrument_repo.list_active(session, asof=now.date())
 
+    # The whole active universe, grouped by market, so each instrument is
+    # ranked against the peers it actually has. Scoring one instrument alone
+    # cannot build this, which is why the lookup is assembled here and passed
+    # down rather than being reached for inside the scorer.
+    peers = market_peer_lookup(session, instruments)
+
     persisted: list[Signal] = []
     for instrument in instruments:
-        signal = score_instrument(session, instrument, now=now)
+        signal = score_instrument(session, instrument, now=now, peers=peers)
         if signal is None:
             continue
         persisted.append(persist_signal(session, signal))

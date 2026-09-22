@@ -115,6 +115,7 @@ def get_run(run_id: int, session: SessionDep) -> BacktestRunDetail:
         min_commission=float(run.min_commission),
         execution_model=run.execution_model,
         bar_minutes=run.bar_minutes,
+        universe=run.universe,
         train_sessions=run.train_sessions,
         eval_sessions=run.eval_sessions,
         anchored=run.anchored,

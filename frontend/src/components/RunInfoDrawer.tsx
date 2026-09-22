@@ -65,6 +65,14 @@ export function RunInfoDrawer({
               : "accepted, marked at the last printed price"
           }
         />
+        <Row
+          label="Peer group"
+          value={
+            run.universe
+              ? `${run.universe.length} instruments (#${run.universe.join(", #")})`
+              : "none — fundamental ratios scored on their fixed scale"
+          }
+        />
       </Section>
 
       <Section title="Execution">

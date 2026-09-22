@@ -180,6 +180,24 @@ def check_integrity(run: BacktestRun, windows: Sequence[BacktestWindow]) -> tupl
     """
     findings: list[str] = []
 
+    # The peer group has to be a group this run could have been scored in.
+    # Unsorted or duplicated ids mean the coordinate was written by something
+    # other than `market_universe`, and a group missing the run's own
+    # instrument means every rank was taken among companies it was not part
+    # of - which scores fine and describes nothing.
+    universe = run.universe
+    if universe is not None:
+        if list(universe) != sorted(set(universe)):
+            findings.append(
+                f"the run's universe {list(universe)} is not a sorted set of distinct "
+                "instrument ids, so it is not a peer group this code could have built"
+            )
+        if run.instrument_id not in universe:
+            findings.append(
+                f"the run's universe does not contain instrument {run.instrument_id}, "
+                "so its own ratios were ranked against a group it does not belong to"
+            )
+
     header = StrategyDefinition(
         kind=run.strategy_kind, version=run.strategy_version, params=run.strategy_params
     )
@@ -430,6 +448,12 @@ def _replay(session: Session, run: BacktestRun, window: BacktestWindow) -> Windo
             ),
             execution_model=ExecutionModel(run.execution_model),
             bar_minutes=run.bar_minutes,
+            # Replayed against the peers the run recorded, not against the
+            # watchlist as it stands today. Rebuilding the group from the
+            # current universe would make a run stop reproducing the moment an
+            # instrument was added, and the mismatch would point at the
+            # strategy rather than at the group that actually moved.
+            universe=tuple(run.universe) if run.universe else None,
         ),
         data_snapshot_at=run.data_snapshot_at,
         require_complete_sessions=run.require_complete_sessions,

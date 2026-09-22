@@ -54,7 +54,7 @@ from app.backtest.execution import (
 from app.backtest.metrics import ClosedTrade, EquityPoint
 from app.core.calendar import MarketCalendar
 from app.core.types import Bar, Interval
-from app.engines.fundamental import FundamentalSnapshot
+from app.engines.fundamental import FundamentalSnapshot, PeerRatios
 
 # One basis point. Costs are quoted in bps because that is how brokers quote
 # them, and because a fraction written as 0.00015 invites a misplaced zero.
@@ -114,6 +114,15 @@ class ScoringData(MarketData, Protocol):
     def fundamentals(
         self, instrument_id: int, *, price: float, currency: str
     ) -> FundamentalSnapshot: ...
+
+    def peers(self) -> PeerRatios | None:
+        """The same-market population this instant's ranks are taken within.
+
+        None when the run was given no universe, which scores every ratio on
+        its fixed scale. That is the honest answer rather than a degraded one:
+        a rank against nobody is not a weaker comparison, it is not one.
+        """
+        ...
 
 
 class Strategy(Protocol):

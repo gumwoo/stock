@@ -118,6 +118,11 @@ class TechnicalFundamental:
             snapshot,
             requested_weight=WEIGHTS[Engine.FUNDAMENTAL],
             provenance=_provenance(bars[-1].available_at),
+            # Ranked against the market as it was at this instant, under the
+            # same point-in-time bounds as everything else the reader returns.
+            # A run given no universe gets None and scores on the fixed scale,
+            # which is what every run stored before this existed did.
+            peers=data.peers(),
         )
 
         factors = tuple(

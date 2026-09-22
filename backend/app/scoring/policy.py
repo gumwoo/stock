@@ -19,7 +19,21 @@ from app.core.types import Availability, Engine, Factor, MissingFactorPolicy
 from app.scoring.availability import resolve_availability
 from app.scoring.combine import Thresholds
 
-STRATEGY_VERSION = "v0.2-technical-fundamental"
+STRATEGY_VERSION = "v0.3-cross-sectional-fundamental"
+
+# The universe a fundamental rank is taken within. Market-scoped, because
+# currency, accounting standard and filing source already split on market, and
+# because a distribution of multiples in Seoul is not the one in New York.
+#
+# Sector would be closer to what a rank is supposed to mean. This watchlist
+# holds one or two names in most sectors, and `percentile_rank` over a single
+# peer returns 50 for everyone in it, so sector scoping waits for a universe
+# that can carry it.
+#
+# It is part of the strategy version: the same filings scored against a
+# different peer group produce different signals, which is why a backtest run
+# records the universe it used alongside its other coordinates.
+PEER_GROUP = "market"
 
 # The base judgement layer. Sentiment is deliberately absent: it is an event
 # overlay with a different half-life, not a weighted factor, so it never

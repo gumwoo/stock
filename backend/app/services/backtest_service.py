@@ -20,7 +20,8 @@ not a differently-scoped answer that looks like the one requested.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Iterable
+from bisect import bisect_right
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -39,11 +40,11 @@ from app.backtest.walkforward import SampleType
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.core.types import Bar, Interval, StrategyDefinition
-from app.engines.fundamental import FundamentalSnapshot
+from app.engines.fundamental import FundamentalSnapshot, PeerRatios
 from app.models import Instrument
 from app.models.backtest import BacktestRun, BacktestWindow
 from app.models.fundamental import SEMANTIC_VERSIONS, FundamentalSource
-from app.repositories import backtest_repo, fundamental_repo
+from app.repositories import backtest_repo, fundamental_repo, instrument_repo
 from app.services import fundamental_service
 
 
@@ -64,6 +65,26 @@ class RunRequest:
     execution_model: ExecutionModel = ExecutionModel.NEXT_OPEN
     bar_minutes: int | None = None
 
+    universe: tuple[int, ...] | None = None
+    """The peer group a cross-sectional rank is taken within, or None.
+
+    Part of the run's identity in the strongest sense: the same instrument,
+    the same filings and the same code produce different scores against a
+    different set of peers, so a run that did not record this could not be
+    reproduced once the watchlist changed. It is stored, compared and checked
+    alongside the strategy and the data snapshot.
+
+    None means no ranking happened and every ratio used its fixed scale. That
+    is what every run stored before this field existed did, which is why those
+    runs still reproduce.
+
+    The group is the market's universe as it stands now, not as it stood
+    during the window. Reconstructing a historical universe needs a security
+    master including delisted names, which this project deliberately does not
+    have; the consequence is that survivorship bias, already declared for the
+    watchlist, now reaches the ranks as well.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class RunOutcome:
@@ -73,6 +94,81 @@ class RunOutcome:
     data_snapshot_at: datetime
     coverage_start: date
     coverage_end: date
+
+
+class _PeerCache:
+    """One market's snapshots, rebuilt only when a filing actually lands.
+
+    A cross-sectional score needs every peer's financials at every simulated
+    instant. Built the obvious way that is a market's worth of snapshots per
+    session - nine companies across roughly 2,455 sessions for a ten-year
+    Korean run, each snapshot some twenty queries deep - and the run stops
+    being affordable long before it stops being correct.
+
+    What makes the cache exact rather than an approximation: a point-in-time
+    snapshot can only change at an instant where some fact became available.
+    Between two consecutive such instants the same rows qualify, so the same
+    snapshot is the right answer for every session in between. The cache is
+    therefore keyed on the newest availability instant at or before the
+    simulated moment, and both that list and the snapshots themselves are
+    bound by the run's data snapshot, so nothing a backfill added later can
+    split a bucket the run never saw.
+    """
+
+    __slots__ = ("_currency", "_ids", "_instants", "_session", "_snapshot", "_snapshots", "_source")
+
+    def __init__(
+        self,
+        session: Session,
+        *,
+        instrument_ids: Sequence[int],
+        source: FundamentalSource | None,
+        currency: str,
+        snapshot_at: datetime,
+    ) -> None:
+        self._session = session
+        self._ids = tuple(instrument_ids)
+        self._source = source
+        self._currency = currency
+        self._snapshot = snapshot_at
+        self._instants: dict[int, list[datetime]] = {}
+        self._snapshots: dict[tuple[int, datetime | None], FundamentalSnapshot] = {}
+
+    def _bucket(self, instrument_id: int, asof: datetime) -> datetime | None:
+        """The newest instant at or before `asof` where this peer changed."""
+        instants = self._instants.get(instrument_id)
+        if instants is None:
+            instants = fundamental_repo.available_instants(
+                self._session,
+                instrument_id,
+                source=self._source,
+                ingested_before=self._snapshot,
+            )
+            self._instants[instrument_id] = instants
+        position = bisect_right(instants, asof)
+        return instants[position - 1] if position else None
+
+    def _snapshot_of(self, instrument_id: int, asof: datetime) -> FundamentalSnapshot:
+        key = (instrument_id, self._bucket(instrument_id, asof))
+        cached = self._snapshots.get(key)
+        if cached is None:
+            # `price=None` because none of the ranked ratios touch it. Only
+            # valuation does, and valuation keeps its fixed scale, so fetching
+            # a market's last closes here would be work for nobody.
+            cached = fundamental_service.build_snapshot(
+                self._session,
+                instrument_id,
+                asof=asof,
+                price=None,
+                currency=self._currency,
+                ingested_before=self._snapshot,
+                source=self._source,
+            )
+            self._snapshots[key] = cached
+        return cached
+
+    def ratios(self, asof: datetime) -> PeerRatios:
+        return PeerRatios.of(asof, (self._snapshot_of(i, asof) for i in self._ids))
 
 
 class ScoringReader:
@@ -87,7 +183,7 @@ class ScoringReader:
     point-in-time rules as one that asks about prices.
     """
 
-    __slots__ = ("_asked", "_reader", "_session", "_source")
+    __slots__ = ("_asked", "_peers", "_reader", "_session", "_source")
 
     def __init__(
         self,
@@ -95,6 +191,7 @@ class ScoringReader:
         reader: PitReader,
         source: FundamentalSource | None,
         asked: list[bool] | None = None,
+        peers: _PeerCache | None = None,
     ) -> None:
         self._session = session
         self._reader = reader
@@ -102,6 +199,9 @@ class ScoringReader:
         # Shared with every reader this one spawns, so "did the strategy read
         # financials" survives the `at()` calls the engine makes each session.
         self._asked = [] if asked is None else asked
+        # Shared for the same reason, and because a cache rebuilt per session
+        # would cache nothing.
+        self._peers = peers
 
     @property
     def read_fundamentals(self) -> bool:
@@ -119,7 +219,9 @@ class ScoringReader:
         return self._reader.asof
 
     def at(self, asof: datetime) -> ScoringReader:
-        return ScoringReader(self._session, self._reader.at(asof), self._source, self._asked)
+        return ScoringReader(
+            self._session, self._reader.at(asof), self._source, self._asked, self._peers
+        )
 
     def bars(self, instrument_id: int, interval: Interval, *, limit: int = 250) -> list[Bar]:
         return self._reader.bars(instrument_id, interval, limit=limit)
@@ -141,6 +243,18 @@ class ScoringReader:
             source=self._source,
         )
 
+    def peers(self) -> PeerRatios | None:
+        """The market's population at this reader's instant, or None.
+
+        Recorded as a read of financials like any other. Asking what the rest
+        of the market reported is asking the filing history a question, and
+        the coverage gate exists to refuse runs whose era cannot answer one.
+        """
+        if self._peers is None:
+            return None
+        self._asked.append(True)
+        return self._peers.ratios(self._reader.asof)
+
 
 # Which source's filings each market's fundamentals come from. A dollar series
 # and a won series must never merge, so the source travels with every lookup.
@@ -152,12 +266,56 @@ FUNDAMENTAL_SOURCE: dict[Market, FundamentalSource] = {
 CURRENCY: dict[Market, str] = {Market.KR: "KRW", Market.US: "USD"}
 
 
-def reader_for(session: Session, instrument: Instrument, snapshot: datetime) -> ScoringReader:
-    """The data a strategy sees, for this instrument, under this snapshot."""
+def market_universe(session: Session, instrument: Instrument, *, asof: date) -> tuple[int, ...]:
+    """Every active instrument sharing this one's market, as a peer group.
+
+    Sorted, so two callers building the same group produce the same stored
+    coordinate and a run can be compared against itself.
+
+    This is the universe as it stands at `asof`, which for a historical window
+    is not the universe that stood then. Fixing that needs a security master
+    carrying delisted names, which this project has declared it will not build
+    - so the bias is stated here rather than quietly inherited.
+    """
+    return tuple(
+        sorted(
+            i.instrument_id
+            for i in instrument_repo.list_active(session, asof=asof)
+            if i.market == instrument.market
+        )
+    )
+
+
+def reader_for(
+    session: Session,
+    instrument: Instrument,
+    snapshot: datetime,
+    *,
+    universe: Sequence[int] | None = None,
+) -> ScoringReader:
+    """The data a strategy sees, for this instrument, under this snapshot.
+
+    `universe` is the peer group for cross-sectional ranking. Omitting it is
+    not a degraded mode but a different rule, and the metrics say which one
+    ran, so a run without a universe cannot later be read as one with it.
+    """
+    source = FUNDAMENTAL_SOURCE.get(instrument.market)
+    peers = (
+        _PeerCache(
+            session,
+            instrument_ids=universe,
+            source=source,
+            currency=CURRENCY[instrument.market],
+            snapshot_at=snapshot,
+        )
+        if universe
+        else None
+    )
     return ScoringReader(
         session,
         PitReader(session, data_snapshot_at=snapshot),
-        FUNDAMENTAL_SOURCE.get(instrument.market),
+        source,
+        peers=peers,
     )
 
 
@@ -373,7 +531,7 @@ def execute(
             f"{request.interval} data only for {first}..{last}. Trimming the window "
             "silently would report a shorter simulation as a full-period result"
         )
-    data = reader_for(session, instrument, snapshot)
+    data = reader_for(session, instrument, snapshot, universe=request.universe)
     result = bt.run(
         strategy,
         data,
@@ -831,6 +989,7 @@ def experiment_fields(report: WalkForwardReport) -> dict[str, object]:
         "min_commission": costs.min_commission,
         "execution_model": request.execution_model.value,
         "bar_minutes": request.bar_minutes,
+        "universe": list(request.universe) if request.universe else None,
         "train_sessions": report.train_sessions,
         "eval_sessions": report.eval_sessions,
         "anchored": report.anchored,

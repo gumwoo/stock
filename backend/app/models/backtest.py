@@ -146,6 +146,21 @@ class BacktestRun(Base):
     execution_model: Mapped[str] = mapped_column(String(16), nullable=False)
     bar_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # The peer group a cross-sectional rank was taken within: sorted
+    # instrument ids, or NULL where no ranking happened and every ratio used
+    # its fixed scale.
+    #
+    # It belongs beside the cost model rather than with the strategy because
+    # it behaves like one: the same rule over the same filings produces
+    # different scores against a different set of peers. A run that did not
+    # record it would stop being reproducible the first time the watchlist
+    # grew, and nothing in the row would show why the numbers moved.
+    #
+    # NULL is not "unknown". It is the state every run stored before this
+    # column existed was actually in, which is why those runs still reproduce
+    # rather than being grandfathered past the check.
+    universe: Mapped[list[int] | None] = mapped_column(JSONB, nullable=True)
+
     # --- how it was split -------------------------------------------------
     train_sessions: Mapped[int] = mapped_column(Integer, nullable=False)
     eval_sessions: Mapped[int] = mapped_column(Integer, nullable=False)

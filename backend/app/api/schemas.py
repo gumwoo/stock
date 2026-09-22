@@ -232,6 +232,14 @@ class BacktestRunDetail(BacktestRunSummary):
     min_commission: float
     execution_model: str
     bar_minutes: int | None
+    universe: list[int] | None
+    """Instrument ids the fundamental ratios were ranked against, or null.
+
+    Null means no ranking happened and every ratio used its fixed scale. It
+    belongs in this payload because the screen's job is to open every
+    coordinate a reproduction needs, and two runs identical in all the others
+    still differ here.
+    """
 
     train_sessions: int
     eval_sessions: int
