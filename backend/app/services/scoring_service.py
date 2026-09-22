@@ -147,9 +147,17 @@ def score_instrument(
     *,
     now: datetime | None = None,
     params: TechnicalParams | None = None,
-    peers: PeerLookup | None = None,
+    peers: PeerLookup | None,
 ) -> ScoredSignal | None:
     """Score one instrument from its stored history.
+
+    `peers` has no default. It decides whether the fundamental ratios are
+    ranked against the market or mapped onto their fixed scale, which is a
+    difference in the rule rather than in the plumbing - and the signal is
+    stamped `STRATEGY_VERSION` either way, so a caller that silently inherited
+    None would persist rows labelled cross-sectional that were never ranked.
+    Passing None is allowed and is what scoring outside a universe means; it
+    just has to be said rather than fallen into.
 
     Returns None when there are no bars at all — distinct from abstaining,
     which is a judgement about a known-empty factor rather than an absence of
@@ -257,7 +265,7 @@ def _score_fundamental(
     asof: datetime,
     price: float,
     now: datetime,
-    peers: PeerLookup | None = None,
+    peers: PeerLookup | None,
 ) -> tuple[Factor, tuple[SignalReason, ...]]:
     """Score reported financials as of the same instant as the price data.
 

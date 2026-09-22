@@ -143,7 +143,7 @@ class TestScorerNeverLooksForward:
         seed_sessions(session, inst.instrument_id, 80)
 
         mid_session = KR.session_open(SESSION_DAY) + timedelta(hours=3)
-        signal = scoring_service.score_instrument(session, inst, now=mid_session)
+        signal = scoring_service.score_instrument(session, inst, now=mid_session, peers=None)
 
         assert signal is not None
         assert signal.data_asof <= mid_session, "scored from a bar that had not closed"
@@ -156,7 +156,7 @@ class TestScorerNeverLooksForward:
         seed_sessions(session, inst.instrument_id, 80)
 
         mid_session = KR.session_open(SESSION_DAY) + timedelta(hours=3)
-        signal = scoring_service.score_instrument(session, inst, now=mid_session)
+        signal = scoring_service.score_instrument(session, inst, now=mid_session, peers=None)
 
         assert signal is not None
         assert signal.data_asof < KR.session_open(SESSION_DAY)
@@ -168,7 +168,7 @@ class TestScorerNeverLooksForward:
         seed_sessions(session, inst.instrument_id, 80)
 
         after_close = KR.bar_available_at(KR.session_open(SESSION_DAY)) + timedelta(minutes=5)
-        signal = scoring_service.score_instrument(session, inst, now=after_close)
+        signal = scoring_service.score_instrument(session, inst, now=after_close, peers=None)
 
         assert signal is not None
         assert signal.data_asof == KR.bar_available_at(KR.session_open(SESSION_DAY))
@@ -180,7 +180,7 @@ class TestScorerNeverLooksForward:
         seed_sessions(session, inst.instrument_id, 80)
 
         after_close = KR.bar_available_at(KR.session_open(SESSION_DAY)) + timedelta(minutes=5)
-        signal = scoring_service.score_instrument(session, inst, now=after_close)
+        signal = scoring_service.score_instrument(session, inst, now=after_close, peers=None)
 
         assert signal is not None
         assert signal.earliest_execution_at > signal.decision_at
