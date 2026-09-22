@@ -17,6 +17,7 @@ from datetime import date
 
 import pytest
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
@@ -489,3 +490,83 @@ class TestTrackedOnAnExistingRow:
         session.commit()
 
         assert promoted.tracked is True
+
+
+class TestAnAnchorIsUnique:
+    """One corp code, one company. Enforced by the database, not by hope.
+
+    `upsert_instrument` looks a company up by its anchor and takes the first
+    row it finds. Two rows sharing an anchor would make that lookup return
+    whichever the planner happened to order first, and the two would then take
+    turns owning the same symbol history. The constraint is declared on the
+    model; this is here so that removing it fails something.
+    """
+
+    def test_the_database_rejects_a_duplicate_corp_code(self, session: Session) -> None:
+        session.execute(
+            text(
+                "INSERT INTO instrument (market, name, tracked, kr_corp_code) "
+                "VALUES ('KR', '제트제트앵커A', false, 'ZZ000201')"
+            )
+        )
+        session.commit()
+
+        with pytest.raises(IntegrityError):
+            session.execute(
+                text(
+                    "INSERT INTO instrument (market, name, tracked, kr_corp_code) "
+                    "VALUES ('KR', '제트제트앵커B', false, 'ZZ000201')"
+                )
+            )
+            session.commit()
+        session.rollback()
+
+    def test_the_database_rejects_a_duplicate_cik(self, session: Session) -> None:
+        session.execute(
+            text(
+                "INSERT INTO instrument (market, name, tracked, kr_corp_code) "
+                "VALUES ('US', '제트제트앵커C', false, 'ZZ000202')"
+            )
+        )
+        session.commit()
+        first = session.execute(
+            text("SELECT instrument_id FROM instrument WHERE kr_corp_code = 'ZZ000202'")
+        ).scalar_one()
+        session.execute(
+            text("UPDATE instrument SET us_cik = '0009999901' WHERE instrument_id = :i"),
+            {"i": first},
+        )
+        session.commit()
+
+        with pytest.raises(IntegrityError):
+            session.execute(
+                text(
+                    "INSERT INTO instrument (market, name, tracked, kr_corp_code, us_cik) "
+                    "VALUES ('US', '제트제트앵커D', false, 'ZZ000203', '0009999901')"
+                )
+            )
+            session.commit()
+        session.rollback()
+        session.execute(text("DELETE FROM instrument WHERE us_cik = '0009999901'"))
+        session.commit()
+
+    def test_many_rows_may_have_no_anchor_at_all(self, session: Session) -> None:
+        """A unique constraint permits repeated NULLs, and has to here.
+
+        Most of what the seed creates for a market we have not mapped yet
+        carries no code, and they are different companies.
+        """
+        for name in ("제트제트무앵커X", "제트제트무앵커Y"):
+            session.execute(
+                text("INSERT INTO instrument (market, name, tracked) VALUES ('KR', :n, false)"),
+                {"n": name},
+            )
+        session.commit()
+
+        count = session.execute(
+            text("SELECT count(*) FROM instrument WHERE name LIKE '제트제트무앵커%'")
+        ).scalar_one()
+        assert count >= 2
+
+        session.execute(text("DELETE FROM instrument WHERE name LIKE '제트제트무앵커%'"))
+        session.commit()

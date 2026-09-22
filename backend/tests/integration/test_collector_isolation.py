@@ -61,6 +61,7 @@ _TEST_SOURCES = (
     "TRANSPORT",
     "PARTIAL",
     "SELF_SKIPPING",
+    "KRX_MASTER",
 )
 
 
@@ -270,3 +271,50 @@ class TestFailureIsolation:
             run_collector(TransportFailureCollector(), session)
         except CollectorError:  # pragma: no cover
             pytest.fail("an external failure escaped the isolation boundary")
+
+
+class TestARefusedArchiveIsAnOutage:
+    """`corpCode.xml` answers refusals in the body, at HTTP 200.
+
+    A wrong key, a quota refusal or a maintenance window arrives as an XML
+    `<result><status>` where the ZIP was expected. Unchecked, `zipfile` raises
+    `BadZipFile`, which is not a `CollectorError` — so `run_collector` re-raises
+    it, the scheduled job dies, and the run is recorded as "internal error", the
+    status reserved for defects in our own code.
+
+    It is the first call every master run makes, so the whole sweep hangs on it.
+    """
+
+    @staticmethod
+    def refusing(status: str) -> object:
+        from app.collectors.krx_master import KrxMasterCollector
+
+        c = KrxMasterCollector(guard=None, fill_gaps=False)  # type: ignore[arg-type]
+        c._key = "test-key"
+        body = (
+            f"<result><status>{status}</status><message>테스트 거절</message></result>"
+        ).encode()
+        c._corp_code_archive = lambda _client: body  # type: ignore[assignment,method-assign]
+        return c
+
+    def test_a_quota_refusal_is_recorded_not_raised(self, session: Session) -> None:
+        run = run_collector(self.refusing("020"), session)  # type: ignore[arg-type]
+
+        assert run.status is CollectorStatus.FAILED
+        assert run.error is not None
+        assert "RateLimitedError" in run.error
+
+    def test_a_bad_key_is_recorded_as_an_upstream_failure(self, session: Session) -> None:
+        run = run_collector(self.refusing("010"), session)  # type: ignore[arg-type]
+
+        assert run.status is CollectorStatus.FAILED
+        assert run.error is not None
+        assert "UpstreamUnavailableError" in run.error
+        assert "internal error" not in run.error
+
+    def test_the_scheduled_job_survives_it(self, session: Session) -> None:
+        """The reason this matters: the worker runs unattended."""
+        try:
+            run_collector(self.refusing("800"), session)  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover
+            pytest.fail(f"a DART refusal escaped the isolation boundary: {exc!r}")

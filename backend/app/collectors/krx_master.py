@@ -66,6 +66,28 @@ PAGE_SIZE = 100
 # this exists to cover KOSPI and KOSDAQ, and `Listing` says so.
 BOARDS: Mapping[str, Listing] = {"Y": Listing.KOSPI, "K": Listing.KOSDAQ}
 
+# A ZIP begins with one of these. `corpCode.xml` answers with an archive when
+# it works and with an XML document when it does not, at HTTP 200 either way,
+# so the first four bytes are what tells them apart.
+ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
+# DART's published status codes. Kept here so a failure names what happened
+# instead of quoting a bare number at whoever reads the run afterwards.
+DART_STATUS: Mapping[str, str] = {
+    "010": "등록되지 않은 키",
+    "011": "사용할 수 없는 키",
+    "012": "접근할 수 없는 IP",
+    "013": "조회된 데이터 없음",
+    "014": "파일이 존재하지 않음",
+    "020": "요청 제한 초과",
+    "021": "조회 가능한 회사 개수 초과",
+    "100": "필드의 부적절한 값",
+    "101": "부적절한 접근",
+    "800": "시스템 점검",
+    "900": "정의되지 않은 오류",
+    "901": "오픈API 이용동의 필요",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class Candidate:
@@ -106,13 +128,61 @@ class KrxMasterCollector(BaseCollector):
     # --- pure conversion --------------------------------------------------
 
     @staticmethod
-    def parse_corp_codes(payload: bytes) -> list[Candidate]:
+    def check_archive(payload: bytes) -> None:
+        """Refuse an error document dressed up as an archive.
+
+        `corpCode.xml` returns a ZIP when it works and an XML `<result>` when
+        it does not — a key that is not registered, a quota refusal, a
+        maintenance window — and it answers HTTP 200 for all of them. Handed
+        straight to `zipfile`, every one of those becomes `BadZipFile`, which
+        is not a `CollectorError`; `run_collector` then re-raises it and files
+        the run as "internal error". An outage would be indistinguishable from
+        a bug in this file, and telling those apart is the one thing the error
+        taxonomy exists to do.
+
+        The sibling endpoints already classify status `020`. This one did not,
+        and it is the first call every run makes.
+        """
+        if payload[:4] in ZIP_MAGIC:
+            return
+
+        status: str | None = None
+        message: str | None = None
+        try:
+            root = ET.fromstring(payload.decode("utf-8", errors="replace"))
+        except ET.ParseError:
+            root = None
+        if root is not None:
+            status = (root.findtext("status") or "").strip() or None
+            message = (root.findtext("message") or "").strip() or None
+
+        if status == "020":
+            # Their counter and ours disagree, which makes our accounting
+            # wrong. Loud, for the same reason it is loud in `_get_json`.
+            raise RateLimitedError(
+                "DART refused corpCode.xml as over quota, but our ledger had room. "
+                "The ledger is wrong; check the budget before collecting again"
+            )
+        if status is not None:
+            raise UpstreamUnavailableError(
+                f"DART corpCode.xml returned status {status} "
+                f"({DART_STATUS.get(status, 'undocumented')}): {message}"
+            )
+        raise UpstreamUnavailableError(
+            "DART corpCode.xml returned neither an archive nor a status document "
+            f"({len(payload)} bytes beginning {payload[:16]!r})"
+        )
+
+    @classmethod
+    def parse_corp_codes(cls, payload: bytes) -> list[Candidate]:
         """Listed companies out of the `corpCode.xml` archive.
 
         A blank `stock_code` is an unlisted company, of which DART has far more
         than listed ones. `.strip()` matters: the field is space-padded rather
         than empty for many rows.
         """
+        cls.check_archive(payload)
+
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             name = next(n for n in archive.namelist() if n.lower().endswith(".xml"))
             root = ET.fromstring(archive.read(name).decode("utf-8"))
