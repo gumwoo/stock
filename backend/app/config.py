@@ -150,13 +150,18 @@ class Settings(BaseSettings):
         description=(
             "Pages of 100 per instrument per run. One, because the worst case "
             "has to fit the budget rather than merely be refused by it: the "
-            "Korean master holds about 3,990 listed names, and at two pages "
-            "twice a day that is 15,960 calls against a budget of 12,500. The "
-            "guard would stop the second sweep partway through, every day, "
-            "and a run that never completes pins the window at its seven-day "
-            "floor. Raising this needs the arithmetic redone, and adding "
+            "Korean master holds 3,991 listed candidates (measured), and at "
+            "two pages twice a day that is 15,964 calls against a budget of "
+            "12,500. The guard would stop the second sweep partway through "
+            "every day, and a sweep that never finishes never advances the "
+            "watermark. Raising this needs the arithmetic redone, and adding "
             "another Naver search consumer needs it redone again — they share "
-            "one published cap."
+            "one published cap. Note that one page does not make PARTIAL rare: "
+            "any company with more than 100 articles inside the window fills "
+            "its page and the run reports truncation, so on a busy day every "
+            "run is PARTIAL and the window sits at its lookback floor. That is "
+            "bounded rather than growing, and the fix for it is a per-instrument "
+            "cursor, not a larger page budget."
         ),
     )
 

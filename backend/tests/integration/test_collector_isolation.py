@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.collectors.base import (
@@ -63,6 +63,7 @@ _TEST_SOURCES = (
     "SELF_SKIPPING",
     "KRX_MASTER",
     "POISONING",
+    "SUCCEEDING_BADLY",
 )
 
 
@@ -396,3 +397,178 @@ class TestTheRunIsRecordedEvenThen:
             text("SELECT count(*) FROM instrument WHERE name LIKE :n"), {"n": "가" * 900}
         ).scalar_one()
         assert left == 0
+
+
+class SucceedingBadlyCollector(BaseCollector):
+    """Reports success over rows it never committed."""
+
+    name = "SUCCEEDING_BADLY"
+
+    def collect(self, session: Session) -> CollectionResult:
+        from app.core.calendar import Market
+        from app.models import Instrument
+
+        # Added, not executed: the row stays pending, so nothing fails until
+        # something commits. That something is the run recorder, which is the
+        # whole point — the collector has already returned SUCCESS by then.
+        session.add(Instrument(market=Market.KR, name="가" * 900, tracked=False))
+        return CollectionResult(items_read=7, items_saved=7)
+
+
+class TestARunThatCouldNotCommitDidNotSucceed:
+    """The rollback that saves the record must not preserve a false claim.
+
+    `_record` rolls back so the run row survives a session the collector broke.
+    That rollback also discards whatever the collector had not committed — so a
+    row still saying SUCCESS would be claiming work that no longer exists.
+    Measured before the fix: a collector returning SUCCESS over seven unsaved
+    rows was recorded as having saved seven, and the table held none.
+
+    Every collector commits before returning today, which makes this
+    unreachable. Nothing enforces that, which is why it is handled.
+    """
+
+    def latest(self, session: Session) -> CollectorRun | None:
+        return (
+            session.execute(
+                select(CollectorRun)
+                .where(CollectorRun.source == "SUCCEEDING_BADLY")
+                .order_by(CollectorRun.started_at.desc())
+            )
+            .scalars()
+            .first()
+        )
+
+    def test_the_status_is_not_success(self, session: Session) -> None:
+        run_collector(SucceedingBadlyCollector(), session)
+        session.rollback()
+
+        row = self.latest(session)
+        assert row is not None
+        assert row.status is CollectorStatus.FAILED
+
+    def test_it_does_not_claim_rows_that_are_gone(self, session: Session) -> None:
+        from sqlalchemy import text
+
+        run_collector(SucceedingBadlyCollector(), session)
+        session.rollback()
+
+        row = self.latest(session)
+        assert row is not None
+        assert row.items_saved == 0
+        assert row.error is not None
+
+        left = session.execute(
+            text("SELECT count(*) FROM instrument WHERE name LIKE :n"), {"n": "가" * 900}
+        ).scalar_one()
+        assert left == 0
+
+
+class TestTheMasterReportsWhatItCouldNotStore:
+    """A company that leaves the master without a word is a silent loss.
+
+    Dropping a row whose fields are wider than their columns is right: one
+    malformed record must not cost a sweep of four thousand. Dropping it
+    quietly is the failure mode this repository argues against everywhere
+    else — if DART widened a field, companies would vanish and nothing would
+    say so.
+    """
+
+    @staticmethod
+    def loaded(monkeypatch: pytest.MonkeyPatch, *, archive: bytes, profile: object) -> object:
+        import httpx
+
+        from app.collectors import krx_master as module
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "list.json" in str(request.url):
+                return httpx.Response(200, json={"status": "000", "total_page": 0, "list": []})
+            return httpx.Response(200, json=profile)
+
+        # The real class, captured before the patch. `module.httpx` *is* the
+        # httpx module, so a lambda that calls `httpx.Client` calls the patch.
+        real_client = httpx.Client
+        monkeypatch.setattr(
+            module.httpx,
+            "Client",
+            lambda *a, **k: real_client(transport=httpx.MockTransport(handler)),
+        )
+
+        class NoWait:
+            def acquire(self) -> None:
+                return None
+
+        class FreeGuard:
+            def reserve(
+                self, group: str, endpoint: str, *, calls: int = 1, now: object = None
+            ) -> None:
+                return None
+
+        c = module.KrxMasterCollector(guard=FreeGuard())  # type: ignore[arg-type]
+        c._key = "test-key"
+        c._bucket = NoWait()  # type: ignore[assignment]
+        c._corp_code_archive = lambda _client: archive  # type: ignore[assignment,method-assign]
+        return c
+
+    def test_the_dropped_count_reaches_the_run(
+        self, session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.unit.test_krx_master import archive as make_archive
+
+        collector = self.loaded(
+            monkeypatch,
+            archive=make_archive(("00126380", "가" * 900, "005930")),
+            profile={"status": "000", "corp_cls": "Y"},
+        )
+        collector.name = "KRX_MASTER"  # type: ignore[attr-defined]
+
+        with pytest.raises(Exception, match="held no listed companies"):
+            collector.collect(session)  # type: ignore[attr-defined]
+
+    def test_a_dropped_row_does_not_stop_the_good_ones(
+        self, session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.unit.test_krx_master import archive as make_archive
+
+        collector = self.loaded(
+            monkeypatch,
+            archive=make_archive(
+                ("00126380", "가" * 900, "005930"),
+                ("00999801", "제트제트마스터갑", "998801"),
+            ),
+            profile={"status": "000", "corp_cls": "Y"},
+        )
+        collector.name = "KRX_MASTER"  # type: ignore[attr-defined]
+
+        result = collector.collect(session)  # type: ignore[attr-defined]
+
+        assert result.partial is True
+        assert any("cannot store" in w for w in result.warnings)
+        assert "1 dropped as malformed" in (result.detail or "")
+
+        session.execute(
+            text(
+                "DELETE FROM symbol_history WHERE instrument_id IN "
+                "(SELECT instrument_id FROM instrument WHERE kr_corp_code = '00999801')"
+            )
+        )
+        session.execute(text("DELETE FROM instrument WHERE kr_corp_code = '00999801'"))
+        session.commit()
+
+    def test_a_numeric_board_leaves_the_company_unplaced(
+        self, session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`corp_cls` as a JSON number is not a board, and must not be read as one."""
+        from tests.unit.test_krx_master import archive as make_archive
+
+        collector = self.loaded(
+            monkeypatch,
+            archive=make_archive(("00999802", "제트제트마스터을", "998802")),
+            profile={"status": "000", "corp_cls": 1},
+        )
+        collector.name = "KRX_MASTER"  # type: ignore[attr-defined]
+
+        result = collector.collect(session)  # type: ignore[attr-defined]
+
+        assert result.items_saved == 0
+        assert "1 skipped" in (result.detail or "")

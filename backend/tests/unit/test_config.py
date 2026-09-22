@@ -74,3 +74,38 @@ class TestDiagnostics:
             if d["name"] == "llm_sentiment"  # type: ignore[index]
         )
         assert "fallback" in str(llm["effect"])  # type: ignore[index]
+
+
+class TestTheNewsPageDefaultIsAnArithmetic:
+    """One page, because the worst case has to fit rather than be refused.
+
+    The Korean listing master holds 3,991 candidates, measured on the real
+    `corpCode.xml`. At one page per company, twice a day, that is 7,982 calls
+    against a budget of 12,500. At two it is 15,964, and the guard would stop
+    the second sweep partway through every single day — the cap would hold and
+    the collection would never complete.
+
+    Nothing else in the suite noticed when this default moved back to two, so
+    the number and the reasoning are pinned here together.
+    """
+
+    CANDIDATES = 3_991
+    SWEEPS_PER_DAY = 2
+
+    def test_the_default_is_one_page(self) -> None:
+        # `bare()`, so this asserts the default and not a local `.env`.
+        assert bare().naver_news_max_pages == 1
+
+    def test_a_day_of_sweeping_fits_the_budget(self) -> None:
+        settings = bare()
+        worst = self.CANDIDATES * settings.naver_news_max_pages * self.SWEEPS_PER_DAY
+        allowed = int(settings.naver_search_daily_limit * settings.quota_budget_fraction)
+
+        assert worst <= allowed, f"{worst} calls against a budget of {allowed}"
+
+    def test_two_pages_would_not_fit(self) -> None:
+        """The control: without it the assertion above passes trivially."""
+        settings = bare()
+        allowed = int(settings.naver_search_daily_limit * settings.quota_budget_fraction)
+
+        assert allowed < self.CANDIDATES * 2 * self.SWEEPS_PER_DAY

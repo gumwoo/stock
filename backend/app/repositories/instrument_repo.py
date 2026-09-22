@@ -123,6 +123,30 @@ def upsert_instrument(
     changed, and a new row starts untracked: a listing master establishes that
     a company exists, not that anyone follows it. Seeding passes True.
     """
+    # One writer at a time per market, held to the end of the caller's
+    # transaction and taken before the first read.
+    #
+    # Everything below is read-modify-write with nothing underneath it to catch
+    # a race. `symbol_history` has indexes and no uniqueness, so two processes
+    # reading "nobody holds this code" at the same moment both open a window at
+    # the placeholder date, and it does not heal by itself. The anchor lookup
+    # has the same shape: two processes finding no row both insert one, and the
+    # second gets an `IntegrityError` that is neither a `CollectorError` nor an
+    # external failure, so the run is filed as a defect in our code.
+    #
+    # **Keyed on the market, not the company.** A finer key would be the
+    # narrower lock and the wrong one: a master load upserts some four thousand
+    # companies inside one transaction, so four thousand transaction-scoped
+    # advisory locks would pile into a shared table holding 6,400
+    # (`max_locks_per_transaction` 64 times `max_connections` 100, measured).
+    # Two loads at once would exhaust it — the exact situation this lock exists
+    # to make safe. Contention costs nothing: these are batch collectors, and
+    # only one should be writing instruments at a time anyway.
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": _lock_key(f"instrument:{market.value}")},
+    )
+
     existing: Instrument | None = None
     if us_cik:
         existing = (
@@ -231,28 +255,6 @@ def _earliest_free(
     companies claim the code on one day, because one contradictory row must not
     cost a sweep of several thousand.
     """
-    # One writer at a time, held to the end of the caller's transaction.
-    # What follows is read-modify-write with no constraint underneath it:
-    # `symbol_history` has indexes and no uniqueness, so two processes reading
-    # "nobody holds this code" at the same moment both open a window at the
-    # placeholder date. Reproduced with two sessions — and it does not heal by
-    # itself, because a later pass finds its own symbol already current. Two
-    # collectors started by hand at once is all it takes, and `cmd_collect`
-    # holds no lock of its own.
-    #
-    # **Keyed on the market, not the ticker.** A per-ticker key would be the
-    # narrower lock and the wrong one: a master load upserts some four thousand
-    # companies inside a single transaction, so four thousand transaction-scoped
-    # advisory locks would pile up in a shared table with 6,400 slots
-    # (`max_locks_per_transaction` 64 times `max_connections` 100). Two loads at
-    # once would exhaust it and fail — which is the exact situation this lock
-    # exists to make safe. Contention costs nothing here: these are batch
-    # collectors, and only one of them should be writing symbols anyway.
-    session.execute(
-        text("SELECT pg_advisory_xact_lock(:k)"),
-        {"k": _lock_key(f"symbol_history:{market.value}")},
-    )
-
     held = list(
         session.execute(
             select(SymbolHistory)

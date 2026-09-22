@@ -27,7 +27,7 @@ import httpx
 import pytest
 
 from app.collectors.base import CollectorError, RateLimitedError, UpstreamUnavailableError
-from app.collectors.krx_master import MAX_PAGES_PER_QUARTER, KrxMasterCollector
+from app.collectors.krx_master import MAX_PAGES_PER_QUARTER, KrxMasterCollector, field
 
 
 def archive(*rows: tuple[str, str, str]) -> bytes:
@@ -53,7 +53,7 @@ def refusal(status: str, message: str = "오류") -> bytes:
 
 class TestAnArchiveIsParsed:
     def test_listed_companies_come_back(self) -> None:
-        found = KrxMasterCollector.parse_corp_codes(
+        found, _ = KrxMasterCollector.parse_corp_codes(
             archive(("00126380", "삼성전자", "005930"), ("00164779", "SK하이닉스", "000660"))
         )
 
@@ -61,7 +61,7 @@ class TestAnArchiveIsParsed:
 
     def test_an_unlisted_company_is_dropped(self) -> None:
         """A padded, blank `stock_code` is most of the file."""
-        found = KrxMasterCollector.parse_corp_codes(
+        found, _ = KrxMasterCollector.parse_corp_codes(
             archive(("00126380", "삼성전자", "005930"), ("00999999", "비상장회사", "  "))
         )
 
@@ -95,6 +95,50 @@ def member_not_utf8() -> bytes:
     return buffer.getvalue()
 
 
+def encrypted_member() -> bytes:
+    """A ZIP whose member needs a password. `zipfile` raises `RuntimeError`."""
+    good = bytearray(archive(("00126380", "삼성전자", "005930")))
+    # Set the encrypted bit in the local header and the central directory.
+    good[6] |= 0x01
+    index = good.rfind(b"PK\x01\x02")
+    good[index + 8] |= 0x01
+    return bytes(good)
+
+
+def unsupported_compression() -> bytes:
+    """Compression method 99, which WinZip uses for AES.
+
+    `zipfile` raises `NotImplementedError` — not a `CollectorError`, and not an
+    external failure either, so it used to be filed as a defect in our code.
+    """
+    good = bytearray(archive(("00126380", "삼성전자", "005930")))
+    good[8:10] = (99).to_bytes(2, "little")
+    index = good.rfind(b"PK\x01\x02")
+    good[index + 10 : index + 12] = (99).to_bytes(2, "little")
+    return bytes(good)
+
+
+def corrupt_lzma_member() -> bytes:
+    """An lzma member whose compressed payload is damaged: `LZMAError`.
+
+    The damage has to land inside the member's own data. Corrupting the
+    central directory instead just gives `BadZipFile`, which is a different
+    failure and was already covered.
+    """
+    body = "<result>" + "<list><corp_code>0012</corp_code></list>" * 400 + "</result>"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_LZMA) as zf:
+        zf.writestr("CORPCODE.xml", body)
+    raw = bytearray(buffer.getvalue())
+
+    with zipfile.ZipFile(io.BytesIO(bytes(raw))) as archive_in:
+        info = archive_in.getinfo("CORPCODE.xml")
+    data_at = info.header_offset + 30 + len(info.filename) + len(info.extra)
+    # Past the 9-byte LZMA properties header, well inside the stream.
+    raw[data_at + 30 : data_at + 60] = bytes(30)
+    return bytes(raw)
+
+
 def member_not_xml() -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
@@ -112,8 +156,17 @@ class TestAnArchiveThatBeginsPKIsStillNotTrusted:
     """
 
     def test_an_archive_without_an_xml_member_is_an_outage(self) -> None:
-        with pytest.raises(UpstreamUnavailableError, match="no XML member"):
+        with pytest.raises(UpstreamUnavailableError) as raised:
             KrxMasterCollector.parse_corp_codes(no_xml_member())
+
+        message = str(raised.value)
+        assert "no XML member" in message
+        # Not wrapped a second time by the broad catch around it. Without the
+        # `except CollectorError: raise` ahead of that catch, this arrives as
+        # "archive is unreadable: UpstreamUnavailableError: ...", which still
+        # contains the words above and says the wrong thing about the cause.
+        assert "unreadable" not in message
+        assert raised.value.__cause__ is None
 
     def test_a_damaged_member_is_an_outage(self) -> None:
         with pytest.raises(UpstreamUnavailableError, match="unreadable"):
@@ -178,6 +231,12 @@ class TestARefusalIsNotAnArchive:
             member_not_utf8(),
             member_not_xml(),
             archive(("00126380", "삼성전자", "005930"))[:200],
+            # The three the broad catch was written for. Listing exception
+            # types instead of catching broadly left all three escaping, and
+            # the commit that claimed to fix them had no test that touched one.
+            encrypted_member(),
+            unsupported_compression(),
+            corrupt_lzma_member(),
         ],
         # Named explicitly. A ZIP carries the moment it was written, so the
         # generated ids differ between xdist workers and collection disagrees.
@@ -191,6 +250,9 @@ class TestARefusalIsNotAnArchive:
             "zip-member-not-utf8",
             "zip-member-not-xml",
             "zip-truncated",
+            "zip-encrypted-member",
+            "zip-unsupported-compression",
+            "zip-corrupt-lzma-member",
         ],
     )
     def test_nothing_escapes_as_a_bare_zip_error(self, payload: bytes) -> None:
@@ -337,7 +399,7 @@ class TestAFieldWiderThanItsColumn:
     """
 
     def test_an_overlong_name_drops_that_candidate_only(self) -> None:
-        found = KrxMasterCollector.parse_corp_codes(
+        found, _ = KrxMasterCollector.parse_corp_codes(
             archive(
                 ("00126380", "삼성전자", "005930"),
                 ("00164779", "가" * 900, "000660"),
@@ -347,15 +409,112 @@ class TestAFieldWiderThanItsColumn:
         assert [c.name for c in found] == ["삼성전자"]
 
     def test_an_overlong_corp_code_drops_that_candidate(self) -> None:
-        found = KrxMasterCollector.parse_corp_codes(
+        found, _ = KrxMasterCollector.parse_corp_codes(
             archive(("0" * 40, "긴코드회사", "005931"), ("00126380", "삼성전자", "005930"))
         )
 
         assert [c.corp_code for c in found] == ["00126380"]
 
     def test_an_overlong_stock_code_drops_that_candidate(self) -> None:
-        found = KrxMasterCollector.parse_corp_codes(
+        found, _ = KrxMasterCollector.parse_corp_codes(
             archive(("00126380", "삼성전자", "005930"), ("00164779", "긴종목", "9" * 40))
         )
 
         assert [c.stock_code for c in found] == ["005930"]
+
+
+class TestTheDropIsReported:
+    """A company that leaves the master without a word is a silent loss."""
+
+    def test_the_count_comes_back_with_the_candidates(self) -> None:
+        found, dropped = KrxMasterCollector.parse_corp_codes(
+            archive(
+                ("00126380", "삼성전자", "005930"),
+                ("00164779", "가" * 900, "000660"),
+                ("0" * 40, "긴코드", "000661"),
+            )
+        )
+
+        assert [c.name for c in found] == ["삼성전자"]
+        assert dropped == 2
+
+    def test_a_clean_archive_drops_nothing(self) -> None:
+        _, dropped = KrxMasterCollector.parse_corp_codes(
+            archive(("00126380", "삼성전자", "005930"))
+        )
+
+        assert dropped == 0
+
+
+class TestTheArchiveFailuresTheCatchIsFor:
+    """Named one by one, because listing exception types missed all three.
+
+    `zipfile` raises `RuntimeError` for an encrypted member,
+    `NotImplementedError` for a compression method it does not implement, and
+    `LZMAError` for a damaged lzma payload. None of them is a `CollectorError`
+    or an `OSError`, so each was recorded as a defect in this file and the
+    sweep died. The broad catch is what covers them; these say so.
+    """
+
+    def test_an_encrypted_member_is_an_outage(self) -> None:
+        with pytest.raises(UpstreamUnavailableError, match="unreadable"):
+            KrxMasterCollector.parse_corp_codes(encrypted_member())
+
+    def test_an_unsupported_compression_method_is_an_outage(self) -> None:
+        with pytest.raises(UpstreamUnavailableError, match="unreadable"):
+            KrxMasterCollector.parse_corp_codes(unsupported_compression())
+
+    def test_a_damaged_lzma_member_is_an_outage(self) -> None:
+        with pytest.raises(UpstreamUnavailableError, match="unreadable"):
+            KrxMasterCollector.parse_corp_codes(corrupt_lzma_member())
+
+
+class TestAFieldIsNotAStringBecauseTheRowIsADict:
+    """The same guard, one layer down.
+
+    `isinstance(row, dict)` stops a scalar row and then `row["corp_code"]`
+    raises anyway when the field itself arrived as a JSON number.
+    """
+
+    def test_a_numeric_row_field_is_an_absent_field(self) -> None:
+        c, client = answering(
+            lambda _r: httpx.Response(
+                200,
+                json={
+                    "status": "000",
+                    "total_page": 1,
+                    "list": [
+                        {"corp_code": 126380, "corp_cls": "Y"},
+                        {"corp_code": "00164779", "corp_cls": "K"},
+                    ],
+                },
+            )
+        )
+        with client:
+            boards, stopped = c.boards_from_filings(client, end=date(2026, 9, 22))
+
+        assert stopped is None
+        assert boards == {"00164779": "K"}
+
+    def test_a_numeric_board_is_an_absent_board(self) -> None:
+        c, client = answering(
+            lambda _r: httpx.Response(
+                200,
+                json={
+                    "status": "000",
+                    "total_page": 1,
+                    "list": [{"corp_code": "00126380", "corp_cls": 1}],
+                },
+            )
+        )
+        with client:
+            boards, _ = c.boards_from_filings(client, end=date(2026, 9, 22))
+
+        assert boards == {}
+
+    def test_a_number_is_never_coerced_into_a_code(self) -> None:
+        """`00126380` as a JSON number is 126380, and the zeros are the code."""
+        assert field({"corp_code": 126380}, "corp_code") == ""
+        assert field({"corp_code": "00126380"}, "corp_code") == "00126380"
+        assert field({"corp_code": None}, "corp_code") == ""
+        assert field({}, "corp_code") == ""

@@ -200,9 +200,20 @@ def _record(session: Session, run: CollectorRun) -> None:
         session.commit()
         return
     except SQLAlchemyError:
-        logger.warning("%s: the session could not record the run; retrying clean", run.source)
-        session.rollback()
+        logger.exception("%s: the session could not record the run; retrying clean", run.source)
 
+    # The rollback discards whatever the collector left uncommitted, so a run
+    # still claiming SUCCESS would be claiming rows that no longer exist —
+    # reproduced: a collector that returned SUCCESS with seven unsaved rows was
+    # recorded as having saved seven, and the table held none. Collectors all
+    # commit before returning today, which makes this unreachable; nothing
+    # enforces that, which is why it is handled rather than asserted.
+    if run.status in (CollectorStatus.SUCCESS, CollectorStatus.PARTIAL):
+        run.status = CollectorStatus.FAILED
+        run.error = "the run could not be committed; anything it had not saved is gone"
+        run.items_saved = 0
+
+    session.rollback()
     session.add(run)
     session.commit()
 

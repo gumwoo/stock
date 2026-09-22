@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 import pytest
 
+from app.collectors.base import UpstreamUnavailableError
 from app.collectors.naver_news import PAGE_SIZE, NaverNewsCollector
 from app.collectors.quota import QuotaExhausted
 from app.core.quota import LimitSource, Quota
@@ -573,3 +574,53 @@ class TestWhereASpaceMayFall:
 
     def test_punctuation_still_takes_a_space(self) -> None:
         assert NaverNewsCollector.match_method("KT & G 매출", name="KT&G") is MatchMethod.NAME
+
+
+class TestWhatCameBackHasToBeTheShapeItClaims:
+    """Naver's answer is a stranger's JSON, and `.get` is not a type check.
+
+    A body that parses but is the wrong shape raises `AttributeError` or
+    `TypeError` deep inside the sweep. Neither is a `CollectorError`, so
+    `run_collector` re-raises and records the run as a defect in our code —
+    an outage filed as a bug, which is the one distinction the error taxonomy
+    exists to make. The listing master turns this collector loose on nearly
+    four thousand names, so a bad answer to one of them must not end the run.
+    """
+
+    @staticmethod
+    def serving(body: object) -> tuple[NaverNewsCollector, httpx.Client]:
+        c = NaverNewsCollector(guard=FakeGuard(), max_pages=2)  # type: ignore[arg-type]
+        c._client_id = "id"
+        c._client_secret = "secret"
+        c._bucket = type("NoWait", (), {"acquire": lambda self: None})()  # type: ignore[assignment]
+        return c, httpx.Client(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200, json=body))
+        )
+
+    def test_a_payload_that_is_not_an_object_is_an_outage(self) -> None:
+        c, client = self.serving([1, 2, 3])
+        with client, pytest.raises(UpstreamUnavailableError, match="not an object"):
+            c._get(client, query="삼성전자", start=1)
+
+    def test_results_that_are_not_a_list_are_an_outage(self) -> None:
+        c, client = self.serving({"items": "삼성전자 기사 하나"})
+        with client, pytest.raises(UpstreamUnavailableError, match="where the results"):
+            c._sweep(client, query="삼성전자", since=SINCE)
+
+    def test_a_result_that_is_not_an_object_is_counted_unusable(self) -> None:
+        """One malformed entry costs that entry, the way a missing date does."""
+        rows, skipped, _ = NaverNewsCollector.to_rows(
+            ["nonsense", 7, item(originallink="https://e.com/ok")],  # type: ignore[list-item]
+            since=None,
+        )
+
+        assert len(rows) == 1
+        assert skipped == 2
+
+    def test_a_page_of_nothing_but_rubbish_does_not_raise(self) -> None:
+        c, client = self.serving({"items": ["rubbish", 1, None]})
+        with client:
+            sweep = c._sweep(client, query="삼성전자", since=SINCE)
+
+        assert sweep.rows == []
+        assert sweep.skipped == 3

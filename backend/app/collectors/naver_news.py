@@ -453,6 +453,11 @@ class NaverNewsCollector(BaseCollector):
         exhausted = False
 
         for item in items:
+            if not isinstance(item, Mapping):
+                # One malformed entry costs that entry. Counting it as unusable
+                # is what the caller already does with a missing date or link.
+                skipped += 1
+                continue
             published = cls.parse_pub_date(str(item.get("pubDate", "")))
             canonical = cls.canonical_url(
                 originallink=str(item.get("originallink", "")),
@@ -536,10 +541,15 @@ class NaverNewsCollector(BaseCollector):
             )
 
         try:
-            payload: dict[str, Any] = response.json()
+            payload = response.json()
         except ValueError as exc:
             raise UpstreamUnavailableError("Naver returned non-JSON for a news search") from exc
-        return payload
+        if not isinstance(payload, dict):
+            raise UpstreamUnavailableError(
+                f"Naver returned {type(payload).__name__}, not an object, for a news search"
+            )
+        parsed: dict[str, Any] = payload
+        return parsed
 
     # --- collection -------------------------------------------------------
 
@@ -700,6 +710,10 @@ class NaverNewsCollector(BaseCollector):
                     rows=rows, read=read, skipped=skipped, hit_page_cap=False, exhausted=refused
                 )
             items = payload.get("items") or []
+            if not isinstance(items, list):
+                raise UpstreamUnavailableError(
+                    f"Naver gave a {type(items).__name__} where the results were expected"
+                )
             read += len(items)
 
             page_rows, page_skipped, exhausted = self.to_rows(items, since=since)

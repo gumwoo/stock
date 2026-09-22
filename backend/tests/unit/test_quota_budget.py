@@ -74,15 +74,26 @@ class TestBudgets:
         assert budget(quota(official_limit=1_001)) == 500
 
     def test_a_fraction_means_the_decimal_that_was_written(self) -> None:
-        """`0.3` is three tenths, not the binary value nearest to it.
+        """`0.7` is seven tenths, not the binary value nearest to it.
 
-        The two disagree by a whole call at this size: read as decimal the
-        product is exactly 1,221,645, read as the float's true binary value it
-        is 1,221,644.99999..., and flooring those gives different budgets.
-        Taking the decimal makes the budget the number the operator wrote, and
-        makes it the same on every machine.
+        70 of 90 times 0.7 is exactly 63. In binary floating point the product
+        is 62.99999999999999, and flooring that gives 62 — a whole call below
+        the share the operator wrote down. Taking the decimal makes the budget
+        the number on the page, and the same number on every machine.
+
+        The example matters. This assertion used to be 4,072,150 at 0.3, whose
+        product is exact in float too, so it passed whichever arithmetic the
+        code used and proved nothing. A sweep of 1..2,999 against eight
+        fractions finds 70 pairs that do disagree; this is the smallest.
         """
-        assert budget(quota(official_limit=4_072_150), fraction=0.3) == 1_221_645
+        assert budget(quota(official_limit=90), fraction=0.7) == 63
+
+    def test_the_two_arithmetics_really_do_disagree_here(self) -> None:
+        """Guards the example itself, so it cannot decay into a tautology."""
+        import math
+
+        assert math.floor(90 * 0.7) == 62
+        assert budget(quota(official_limit=90), fraction=0.7) == 63
 
     def test_fraction_must_be_a_fraction(self) -> None:
         for bad in (0.0, -0.5, 1.5):

@@ -103,6 +103,24 @@ DART_STATUS: Mapping[str, str] = {
 }
 
 
+def field(row: Mapping[str, Any], key: str) -> str:
+    """A DART field as text, or empty when it did not arrive as text.
+
+    Three rounds of review found the same shape three times: a guard placed one
+    layer above the value that actually breaks. `isinstance(row, dict)` stops a
+    scalar row, and then `row.get("corp_code").strip()` raises anyway because
+    the *field* was a JSON number. `AttributeError` is not a `CollectorError`,
+    so the run is filed as a defect in our code and the sweep dies.
+
+    A numeric `corp_code` is not salvageable by converting it: `00126380` comes
+    back as 126380, and the leading zeros are what make it a code. So a field
+    of the wrong type counts as absent, the candidate is dropped, and the run
+    says how many it dropped.
+    """
+    value = row.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
 @dataclass(frozen=True, slots=True)
 class Candidate:
     """A listed company from `corpCode.xml`, before its board is known."""
@@ -188,12 +206,19 @@ class KrxMasterCollector(BaseCollector):
         )
 
     @classmethod
-    def parse_corp_codes(cls, payload: bytes) -> list[Candidate]:
-        """Listed companies out of the `corpCode.xml` archive.
+    def parse_corp_codes(cls, payload: bytes) -> tuple[list[Candidate], int]:
+        """Listed companies out of the `corpCode.xml` archive, and what it dropped.
 
         A blank `stock_code` is an unlisted company, of which DART has far more
         than listed ones. `.strip()` matters: the field is space-padded rather
         than empty for many rows.
+
+        The count is of rows that looked listed and had a field too wide for
+        its column. Dropping them is right, because one malformed row must not
+        cost a sweep of four thousand. Dropping them without saying so is the
+        silent loss this repository argues against everywhere else: if DART
+        ever widens a field, companies would leave the master and nothing would
+        report it. The run puts the number in its detail.
         """
         cls.check_archive(payload)
 
@@ -242,6 +267,7 @@ class KrxMasterCollector(BaseCollector):
             ) from exc
 
         found: list[Candidate] = []
+        malformed = 0
         for node in root.iter("list"):
             stock_code = (node.findtext("stock_code") or "").strip()
             corp_code = (node.findtext("corp_code") or "").strip()
@@ -257,9 +283,10 @@ class KrxMasterCollector(BaseCollector):
                 or len(corp_name) > MAX_NAME
                 or len(stock_code) > MAX_SYMBOL
             ):
+                malformed += 1
                 continue
             found.append(Candidate(corp_code=corp_code, name=corp_name, stock_code=stock_code))
-        return found
+        return found, malformed
 
     @staticmethod
     def quarters(*, end: date, years_back: int) -> Iterator[tuple[date, date]]:
@@ -365,8 +392,8 @@ class KrxMasterCollector(BaseCollector):
                 for row in rows:
                     if not isinstance(row, dict):
                         continue
-                    corp_code = (row.get("corp_code") or "").strip()
-                    corp_cls = (row.get("corp_cls") or "").strip()
+                    corp_code = field(row, "corp_code")
+                    corp_cls = field(row, "corp_cls")
                     if corp_code and corp_cls:
                         boards.setdefault(corp_code, corp_cls)
 
@@ -393,7 +420,11 @@ class KrxMasterCollector(BaseCollector):
             # carries the reason.
             archive = self._corp_code_archive(client)
 
-            candidates = self.parse_corp_codes(archive)
+            candidates, malformed = self.parse_corp_codes(archive)
+            if malformed:
+                warnings.append(
+                    f"{malformed} listed companies had a field this schema cannot store"
+                )
             if not candidates:
                 raise UpstreamUnavailableError("corpCode.xml held no listed companies")
 
@@ -412,7 +443,7 @@ class KrxMasterCollector(BaseCollector):
                     except QuotaExhausted as refused:
                         warnings.append(f"profile lookup stopped: {refused}")
                         break
-                    corp_cls = (payload.get("corp_cls") or "").strip()
+                    corp_cls = field(payload, "corp_cls")
                     if corp_cls:
                         boards[candidate.corp_code] = corp_cls
                     profiled += 1
@@ -450,7 +481,8 @@ class KrxMasterCollector(BaseCollector):
             partial=bool(warnings),
             warnings=warnings,
             detail=(
-                f"{len(candidates)} listed candidates, {len(boards)} boards resolved "
+                f"{len(candidates)} listed candidates ({malformed} dropped as malformed), "
+                f"{len(boards)} boards resolved "
                 f"({profiled} by profile lookup), {written} stored as KOSPI or KOSDAQ, "
                 f"{skipped_board} skipped as KONEX, other or unresolved"
             ),
