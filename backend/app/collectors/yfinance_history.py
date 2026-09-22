@@ -36,16 +36,32 @@ from app.collectors.base import (
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.models import FxRate, Interval
+from app.models.instrument import Listing
 from app.repositories import candle_repo, instrument_repo
 from app.repositories.candle_repo import CandleRow
 
 logger = logging.getLogger(__name__)
 
-# yfinance addresses Korean listings with a .KS suffix for KOSPI.
+# yfinance addresses Korean listings by board: .KS for KOSPI, .KQ for KOSDAQ.
+# A KOSDAQ ticker asked for with .KS returns an empty frame rather than an
+# error, so getting this wrong looks like a company with no price history.
 _YF_SUFFIX: dict[Market, str] = {Market.KR: ".KS", Market.US: ""}
+_YF_LISTING: dict[Listing, str] = {
+    Listing.KOSPI: ".KS",
+    Listing.KOSDAQ: ".KQ",
+    Listing.NYSE: "",
+    Listing.NASDAQ: "",
+}
 
 
-def yf_ticker(symbol: str, market: Market) -> str:
+def yf_ticker(symbol: str, market: Market, listing: Listing | None = None) -> str:
+    """The ticker yfinance knows this instrument by.
+
+    Falls back to the market default when the board is unknown, which is what
+    every row seeded before the listing master had.
+    """
+    if listing is not None:
+        return f"{symbol}{_YF_LISTING[listing]}"
     return f"{symbol}{_YF_SUFFIX[market]}"
 
 
@@ -61,7 +77,9 @@ class YFinanceHistoryCollector(BaseCollector):
         import yfinance as yf
 
         today = utc_now().date()
-        instruments = instrument_repo.list_active(session, asof=today)
+        # Tracked only: a name from the listing master has no reason to be
+        # asked about, and asking is a network round trip each.
+        instruments = instrument_repo.list_active(session, asof=today, tracked=True)
         if not instruments:
             return CollectionResult(detail="no active instruments to collect")
 
@@ -74,7 +92,7 @@ class YFinanceHistoryCollector(BaseCollector):
                 warnings.append(f"instrument {instrument.instrument_id} has no current symbol")
                 continue
 
-            ticker = yf_ticker(symbol, instrument.market)
+            ticker = yf_ticker(symbol, instrument.market, instrument.listing)
             calendar = MarketCalendar(instrument.market)
 
             try:

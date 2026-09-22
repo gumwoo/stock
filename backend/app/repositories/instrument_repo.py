@@ -59,17 +59,34 @@ def current_symbol(session: Session, instrument_id: int) -> str | None:
     return session.execute(stmt).scalars().first()
 
 
-def list_active(session: Session, *, asof: date) -> list[Instrument]:
+def list_active(
+    session: Session,
+    *,
+    asof: date,
+    market: Market | None = None,
+    tracked: bool | None = None,
+) -> list[Instrument]:
     """Instruments listed and not yet delisted as of `asof`.
 
     This is the point-in-time universe. Using today's listed names for a past
     period silently drops everything that delisted in between and inflates the
     result — the classic survivorship bias.
+
+    `tracked` splits two different questions and both callers exist. Scoring
+    and cross-sectional ranking want `tracked=True`: a name we know only from
+    a listing master has no prices and no financials, so putting it in a peer
+    group is not a comparison, and scoring it is not possible. News collection
+    wants every row, because finding a company worth looking at is the whole
+    point of reading the news. Left unset, everything comes back.
     """
     stmt = select(Instrument).where(
         (Instrument.listed_at.is_(None)) | (Instrument.listed_at <= asof),
         (Instrument.delisted_at.is_(None)) | (Instrument.delisted_at > asof),
     )
+    if market is not None:
+        stmt = stmt.where(Instrument.market == market)
+    if tracked is not None:
+        stmt = stmt.where(Instrument.tracked == tracked)
     return list(session.execute(stmt).scalars().all())
 
 
@@ -85,12 +102,24 @@ def upsert_instrument(
     listed_at: date | None = None,
     symbol_valid_from: date | None = None,
     symbol_source: str = "SEED",
+    tracked: bool | None = None,
 ) -> Instrument:
     """Create or update an instrument, keyed on its stable external anchor.
 
     Matching is done on CIK or DART corp code rather than on the symbol,
-    because those are the identifiers that survive a rename. Falling back to
-    (market, name) is a convenience for seeding only.
+    because those are the identifiers that survive a rename.
+
+    **The (market, name) fallback runs only when no anchor was given.** Korean
+    company names are not unique — the real `corpCode.xml` holds thirty pairs
+    of listed companies sharing a name, among them SK and 삼성물산 — so a
+    caller that supplied a corp code and still fell through to the name would
+    merge two different companies onto one row, overwrite the anchor with the
+    second one's, and leave the symbol history with a window that ends before
+    it starts. That row's symbol then resolves to nothing, permanently.
+
+    `tracked` says whether this name is scoreable. Left unset it is not
+    changed, and a new row starts untracked: a listing master establishes that
+    a company exists, not that anyone follows it. Seeding passes True.
     """
     existing: Instrument | None = None
     if us_cik:
@@ -103,8 +132,7 @@ def upsert_instrument(
             .scalars()
             .first()
         )
-
-    if existing is None:
+    elif not us_cik and not kr_corp_code:
         existing = (
             session.execute(
                 select(Instrument).where(Instrument.market == market, Instrument.name == name)
@@ -121,6 +149,7 @@ def upsert_instrument(
             us_cik=us_cik,
             kr_corp_code=kr_corp_code,
             listed_at=listed_at,
+            tracked=bool(tracked),
         )
         session.add(existing)
         session.flush()
@@ -134,6 +163,8 @@ def upsert_instrument(
             existing.kr_corp_code = kr_corp_code
         if listed_at:
             existing.listed_at = listed_at
+        if tracked is not None:
+            existing.tracked = tracked
 
     _ensure_symbol(
         session,
@@ -174,6 +205,17 @@ def _ensure_symbol(
     if current is not None:
         if current.symbol == symbol:
             return
+        if valid_from <= current.valid_from:
+            # The replacement would have to start on or before the window it
+            # replaces, which closes that window on a day earlier than it
+            # opened. `resolve_symbol` then matches neither row and the
+            # instrument has no symbol on any date. Refuse rather than write
+            # it: silence here is a lookup that fails forever.
+            raise ValueError(
+                f"instrument {instrument_id}: symbol {symbol!r} would start "
+                f"{valid_from}, on or before the current window for "
+                f"{current.symbol!r} which opened {current.valid_from}"
+            )
         # The ticker changed under us. Close the old window on the day *before*
         # the new one opens rather than deleting it: the old mapping was true
         # then. Both bounds are inclusive, matching the `valid_from <= asof <=

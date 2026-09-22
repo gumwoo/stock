@@ -293,7 +293,11 @@ class DartFundamentalCollector(BaseCollector):
         today = utc_now().date()
         instruments = [
             i
-            for i in instrument_repo.list_active(session, asof=today)
+            # Tracked only. The listing master adds some 3,950 Korean names
+            # with neither prices nor a reason to read their filings, and at
+            # roughly six calls each that sweep is about 24,000 — over the
+            # DART budget and over the published cap behind it.
+            for i in instrument_repo.list_active(session, asof=today, tracked=True)
             if i.market is Market.KR and i.kr_corp_code
         ]
         if not instruments:

@@ -15,22 +15,25 @@ from app.models.fundamental import (
     Fundamental,
     FundamentalSource,
 )
-from app.models.instrument import Instrument, SymbolHistory
+from app.models.instrument import Instrument, Listing, SymbolHistory
 from app.models.market import (
     Candle,
     CorporateAction,
     CorporateActionType,
     FxRate,
 )
+from app.models.news import MatchMethod, NewsItem, NewsMention, NewsSource
 from app.models.portfolio import (
     Holding,
     PortfolioSnapshot,
     Transaction,
     TransactionSide,
 )
+from app.models.quota import ApiCallBucket
 from app.models.signal import Signal, SignalFactor, StrategyConfig
 
 __all__ = [
+    "ApiCallBucket",
     "BacktestRun",
     "BacktestWindow",
     "Base",
@@ -47,6 +50,11 @@ __all__ = [
     "Holding",
     "Instrument",
     "Interval",
+    "Listing",
+    "MatchMethod",
+    "NewsItem",
+    "NewsMention",
+    "NewsSource",
     "PortfolioSnapshot",
     "SampleType",
     "Signal",

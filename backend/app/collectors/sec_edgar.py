@@ -162,7 +162,9 @@ class SecEdgarCollector(BaseCollector):
 
     def collect(self, session: Session) -> CollectionResult:
         instruments = [
-            i for i in instrument_repo.list_active(session, asof=utc_now().date()) if i.us_cik
+            i
+            for i in instrument_repo.list_active(session, asof=utc_now().date(), tracked=True)
+            if i.us_cik
         ]
         if not instruments:
             return CollectionResult(detail="no US instruments with a CIK")

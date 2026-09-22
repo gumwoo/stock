@@ -17,13 +17,19 @@ import logging
 import signal
 import sys
 from collections.abc import Callable
+from functools import partial
 from types import FrameType
 
 from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.cron import CronTrigger
 
-from app.collectors.base import CollectorError
+from app.collectors.base import CollectorError, run_collector
+from app.collectors.naver_news import NaverNewsCollector
+from app.collectors.quota import QuotaGuard
 from app.config import get_settings
 from app.core import logging as logging_setup
+from app.core.calendar import Market, MarketCalendar
+from app.core.clock import utc_now
 from app.db import advisory_lock, session_scope
 
 logger = logging.getLogger("app.worker")
@@ -57,6 +63,43 @@ def guarded(job_name: str, fn: Callable[[], None]) -> Callable[[], None]:
     return run
 
 
+# Twice a day: an hour before the opening bell, and after the close. Written
+# in the market's own timezone rather than UTC, which is what keeps NYSE from
+# drifting an hour twice a year — it closes at 21:00 UTC in winter and 20:00 in
+# summer. The times are margin, not precision; `has_closed` does the deciding.
+_KR_PRE_OPEN = CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone="Asia/Seoul")
+_KR_AFTER_CLOSE = CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone="Asia/Seoul")
+
+
+def _collect_korean_news(*, require_close: bool) -> None:
+    """Sweep Korean news, if today is a day worth sweeping.
+
+    The pre-open run wants a session today; the post-close run wants that
+    session to be over. A holiday fails both, which saves the calls and keeps
+    `collector_run` from filling with rows that look like ordinary weekdays.
+    """
+    calendar = MarketCalendar(Market.KR)
+    now = utc_now()
+    today = calendar.local_today(now)
+
+    if not calendar.is_session(today):
+        logger.info("naver_news: KRX is closed on %s", today)
+        return
+    if require_close and not calendar.has_closed(now):
+        logger.info("naver_news: KRX session on %s has not finished", today)
+        return
+
+    # Buckets past every window answer nothing. Pruned here rather than on a
+    # timer of its own: a table that only grows is a slow leak, and the tidying
+    # belongs with the job that fills it.
+    dropped = QuotaGuard().prune()
+    if dropped:
+        logger.info("quota ledger: pruned %d spent buckets", dropped)
+
+    with session_scope() as session:
+        run_collector(NaverNewsCollector(), session)
+
+
 def build_scheduler() -> BlockingScheduler:
     """Assemble the job schedule.
 
@@ -66,9 +109,26 @@ def build_scheduler() -> BlockingScheduler:
     """
     scheduler = BlockingScheduler(timezone="UTC")
 
-    # Phase 1 registers no jobs yet: the collectors land in the next step.
-    # Keeping the process here, with its lock discipline already in place,
-    # means jobs get added to a structure that is already correct.
+    # `coalesce` and `misfire_grace_time` are not tidiness. This runs on a
+    # laptop that sleeps: without them, a machine waking after three days fires
+    # three times in a row, which is precisely the runaway the quota ledger
+    # exists to prevent. The ledger would still hold, but two defences are
+    # right for the one requirement that has no acceptable failure.
+    for job_id, trigger, require_close in (
+        ("naver_news_pre_open", _KR_PRE_OPEN, False),
+        ("naver_news_after_close", _KR_AFTER_CLOSE, True),
+    ):
+        scheduler.add_job(
+            guarded(job_id, partial(_collect_korean_news, require_close=require_close)),
+            trigger,
+            id=job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+
+    # Market.US waits for Threads and Reddit, whose caps are small enough that
+    # reach has to follow the tracked set rather than the listing master.
 
     return scheduler
 

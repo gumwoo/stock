@@ -111,6 +111,42 @@ class Settings(BaseSettings):
     toss_rate_market_data: float = Field(default=15.0, description="Toss Market Data group")
     toss_rate_charts: float = Field(default=20.0, description="Toss Charts group")
     sec_rate: float = Field(default=8.0, description="SEC allows 10/s; stay under it")
+    naver_rate: float = Field(default=5.0, gt=0.0, description="Naver allows ~10/s; hold at half")
+
+    # --- quota budgets ----------------------------------------------------
+    # Published caps, and the share of each we allow ourselves. Exposed as
+    # settings for one practical reason: checking that the refusal path works
+    # should cost two calls rather than twelve thousand.
+    #
+    # Named after the quota *group*, not an endpoint. Naver meters its whole
+    # search family against one cap, so a `naver_news_daily_limit` would invite
+    # a second copy of the same allowance the day a blog collector arrives.
+    quota_budget_fraction: float = Field(
+        default=0.5, gt=0.0, le=1.0, description="Share of each published cap we will spend"
+    )
+    naver_search_daily_limit: int = Field(
+        default=25_000, gt=0, description="Naver search calls per day, shared across the family"
+    )
+    naver_search_internal_31d_limit: int = Field(
+        default=775_000,
+        gt=0,
+        description="Our own 31-day ceiling. Not published by Naver; taken from the console",
+    )
+    naver_datalab_monthly_limit: int = Field(
+        default=50_000, gt=0, description="API Hub DataLab search-trend calls per month"
+    )
+    dart_daily_limit: int = Field(
+        default=20_000, gt=0, description="DART's usual daily threshold; varies by account"
+    )
+
+    # How deep to page per instrument per run. The binding constraint is not
+    # quota but what the next increment will pay to score: three hundred
+    # articles a name per run is already more than anyone wants graded. Raise
+    # with care once a second Naver search collector exists — news alone at
+    # two pages is 80% of the group budget in the worst case.
+    naver_news_max_pages: int = Field(
+        default=2, gt=0, description="Pages of 100 per instrument per run"
+    )
 
     # ---------------------------------------------------------------------
     # capability resolution

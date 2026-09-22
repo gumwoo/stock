@@ -19,6 +19,7 @@ from app.repositories import bulk
 from app.repositories.candle_repo import CandleRow
 from app.repositories.filing_repo import FilingRow
 from app.repositories.fundamental_repo import FundamentalRow
+from app.repositories.news_repo import NewsItemRow, NewsMentionRow
 
 
 class TestEveryBatchFits:
@@ -75,6 +76,12 @@ class TestTheWidthsTheRepositoriesPass:
 
     def test_a_filing_row_binds_seven(self) -> None:
         assert len(FilingRow._fields) == 7
+
+    def test_a_news_item_row_binds_nine(self) -> None:
+        assert len(NewsItemRow._fields) == 9
+
+    def test_a_news_mention_row_binds_four(self) -> None:
+        assert len(NewsMentionRow._fields) == 4
 
     def test_a_fundamental_row_binds_sixteen(self) -> None:
         assert len(FundamentalRow._fields) == 16

@@ -370,9 +370,14 @@ def persist_signal(session: Session, signal: ScoredSignal) -> Signal:
 def score_all(session: Session, *, now: datetime | None = None) -> list[Signal]:
     """Score every active instrument and persist the results."""
     now = now or utc_now()
-    instruments = instrument_repo.list_active(session, asof=now.date())
+    # Tracked only, and for two separate reasons. Scoring a name we hold no
+    # prices or filings for is not possible; scoring one whose prices we happen
+    # to have but whose coverage we never established would persist a signal
+    # for an instrument nobody chose to follow. A listing master makes both
+    # reachable, since it adds thousands of rows that are names and nothing else.
+    instruments = instrument_repo.list_active(session, asof=now.date(), tracked=True)
 
-    # The whole active universe, grouped by market, so each instrument is
+    # The tracked universe, grouped by market, so each instrument is
     # ranked against the peers it actually has. Scoring one instrument alone
     # cannot build this, which is why the lookup is assembled here and passed
     # down rather than being reached for inside the scorer.

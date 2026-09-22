@@ -86,8 +86,10 @@ def _to_signal_out(session: Session, row: Signal, instrument: Instrument) -> Sig
 
 @router.get("/instruments", response_model=list[InstrumentOut])
 def list_instruments(session: SessionDep) -> list[InstrumentOut]:
-    """Every instrument in the point-in-time universe as of today."""
-    instruments = instrument_repo.list_active(session, asof=utc_now().date())
+    """Every scoreable instrument in the point-in-time universe as of today."""
+    # Tracked only. The listing master holds thousands of names with no price
+    # and no score, and listing them here would bury the ones that have both.
+    instruments = instrument_repo.list_active(session, asof=utc_now().date(), tracked=True)
 
     out: list[InstrumentOut] = []
     for instrument in instruments:
@@ -117,8 +119,8 @@ def list_instruments(session: SessionDep) -> list[InstrumentOut]:
 
 @router.get("/signals", response_model=list[SignalOut])
 def list_signals(session: SessionDep) -> list[SignalOut]:
-    """The latest signal for each instrument."""
-    instruments = instrument_repo.list_active(session, asof=utc_now().date())
+    """The latest signal for each tracked instrument."""
+    instruments = instrument_repo.list_active(session, asof=utc_now().date(), tracked=True)
 
     out: list[SignalOut] = []
     for instrument in instruments:

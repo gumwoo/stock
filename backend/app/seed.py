@@ -237,6 +237,10 @@ def seed_watchlist(session: Session) -> list[int]:
             kr_corp_code=entry.get("kr_corp_code"),
             listed_at=entry.get("listed_at"),
             symbol_source="SEED",
+            # The watchlist is what gets prices, filings and a score. Without
+            # this the column's server default leaves every seeded row
+            # untracked, and `score_all` on a fresh database scores nothing.
+            tracked=True,
         )
         ids.append(instrument.instrument_id)
         logger.info(

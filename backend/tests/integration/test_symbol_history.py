@@ -56,6 +56,13 @@ def session(engine: object) -> Iterator[Session]:
         # derived identifier, so every run left another Boundary Test Corp in
         # the development database and nothing failed.
         s.execute(text("DELETE FROM instrument WHERE us_cik = :cik"), {"cik": CIK})
+        s.execute(
+            text(
+                "DELETE FROM symbol_history WHERE instrument_id IN "
+                "(SELECT instrument_id FROM instrument WHERE kr_corp_code LIKE 'ZZ%')"
+            )
+        )
+        s.execute(text("DELETE FROM instrument WHERE kr_corp_code LIKE 'ZZ%'"))
         s.commit()
 
 
@@ -149,3 +156,158 @@ class TestTickerChange:
             .one()
         )
         assert new.source == "OBSERVED"
+
+
+class TestTwoCompaniesOneName:
+    """Korean company names are not unique.
+
+    The real `corpCode.xml` holds thirty pairs of listed companies sharing a
+    name, SK and 삼성물산 among them. Matching on the name after a corp code
+    was already given would put both on one row, overwrite the corp code with
+    the second one's, and then close the symbol window on a day before it
+    opened — after which neither code resolves to anything, ever.
+    """
+
+    def test_a_shared_name_with_different_corp_codes_stays_two_rows(self, session: Session) -> None:
+        first = instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트테스트",
+            symbol="990001",
+            kr_corp_code="ZZ000001",
+            symbol_source="MASTER",
+        )
+        second = instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트테스트",
+            symbol="990002",
+            kr_corp_code="ZZ000002",
+            symbol_source="MASTER",
+        )
+        session.commit()
+
+        assert first.instrument_id != second.instrument_id
+        assert first.kr_corp_code == "ZZ000001"
+        assert second.kr_corp_code == "ZZ000002"
+
+    def test_each_one_still_resolves_to_its_own_symbol(self, session: Session) -> None:
+        for code, symbol in (("ZZ000001", "990001"), ("ZZ000002", "990002")):
+            instrument_repo.upsert_instrument(
+                session,
+                market=Market.KR,
+                name="제트제트테스트",
+                symbol=symbol,
+                kr_corp_code=code,
+                symbol_source="MASTER",
+            )
+        session.commit()
+
+        for symbol in ("990001", "990002"):
+            found = instrument_repo.resolve_symbol(
+                session, symbol, Market.KR, asof=date(2026, 9, 22)
+            )
+            assert found is not None, f"{symbol} resolves to nothing"
+
+    def test_a_name_without_an_anchor_still_finds_its_row(self, session: Session) -> None:
+        """The fallback has a job; narrowing it must not remove the job."""
+        made = instrument_repo.upsert_instrument(
+            session, market=Market.KR, name="제트제트무앵커", symbol="990003"
+        )
+        session.commit()
+        again = instrument_repo.upsert_instrument(
+            session, market=Market.KR, name="제트제트무앵커", symbol="990003"
+        )
+        session.commit()
+
+        assert made.instrument_id == again.instrument_id
+        session.execute(
+            text("DELETE FROM symbol_history WHERE instrument_id = :i"),
+            {"i": made.instrument_id},
+        )
+        session.execute(
+            text("DELETE FROM instrument WHERE instrument_id = :i"), {"i": made.instrument_id}
+        )
+        session.commit()
+
+
+class TestAWindowMayNotEndBeforeItBegins:
+    def test_a_backdated_symbol_is_refused(self, session: Session) -> None:
+        """Written, it closes the live window on a day earlier than its start.
+
+        `resolve_symbol` then matches neither row and the instrument has no
+        symbol on any date at all. A refusal is loud; the write is silent and
+        permanent.
+        """
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트역전",
+            symbol="990004",
+            kr_corp_code="ZZ000004",
+            symbol_valid_from=date(2020, 1, 1),
+        )
+        session.commit()
+
+        with pytest.raises(ValueError, match="on or before"):
+            instrument_repo.upsert_instrument(
+                session,
+                market=Market.KR,
+                name="제트제트역전",
+                symbol="990005",
+                kr_corp_code="ZZ000004",
+                symbol_valid_from=date(2019, 1, 1),
+            )
+        session.rollback()
+
+
+class TestTrackedIsSetWhereItIsMeant:
+    def test_a_master_row_starts_untracked(self, session: Session) -> None:
+        """A listing master says a company exists, not that anyone follows it."""
+        made = instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트마스터",
+            symbol="990006",
+            kr_corp_code="ZZ000006",
+            symbol_source="MASTER",
+        )
+        session.commit()
+
+        assert made.tracked is False
+
+    def test_seeding_marks_the_row_tracked(self, session: Session) -> None:
+        """Otherwise the column default wins and `score_all` scores nothing."""
+        made = instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트시드",
+            symbol="990007",
+            kr_corp_code="ZZ000007",
+            tracked=True,
+        )
+        session.commit()
+
+        assert made.tracked is True
+
+    def test_a_later_master_pass_does_not_untrack_it(self, session: Session) -> None:
+        instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트유지",
+            symbol="990008",
+            kr_corp_code="ZZ000008",
+            tracked=True,
+        )
+        session.commit()
+        again = instrument_repo.upsert_instrument(
+            session,
+            market=Market.KR,
+            name="제트제트유지",
+            symbol="990008",
+            kr_corp_code="ZZ000008",
+            symbol_source="MASTER",
+        )
+        session.commit()
+
+        assert again.tracked is True

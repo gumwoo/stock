@@ -25,12 +25,37 @@ inferred are distinguishable from ones we actually observed.
 from __future__ import annotations
 
 from datetime import date
+from enum import StrEnum
 
-from sqlalchemy import BigInteger, Date, Enum, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    Enum,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.calendar import Market
 from app.models.base import Base, BigIntPk, IngestedAt
+
+
+class Listing(StrEnum):
+    """Which exchange a company is listed on.
+
+    `Market` says which country's rules and calendar apply; this says which
+    board inside it. The distinction is not cosmetic: yfinance needs `.KS`
+    for KOSPI and `.KQ` for KOSDAQ, and with only `Market.KR` to go on the
+    ticker mapping had to assume one of them.
+    """
+
+    KOSPI = "KOSPI"
+    KOSDAQ = "KOSDAQ"
+    NYSE = "NYSE"
+    NASDAQ = "NASDAQ"
 
 
 class Instrument(Base):
@@ -46,6 +71,25 @@ class Instrument(Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     sector: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    listing: Mapped[Listing | None] = mapped_column(
+        Enum(Listing, name="listing", native_enum=False, length=8),
+        nullable=True,
+        doc="Exchange within the market. NULL where it has not been established; "
+        "the price collector needs it to pick between the .KS and .KQ suffixes.",
+    )
+
+    tracked: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default="false",
+        doc="Whether prices and financials are collected for this company, making "
+        "it scoreable and a member of its market's peer group. False means we "
+        "know the name and nothing else, which is what most of a full listing "
+        "master is. Scoring and cross-sectional ranking read only tracked rows: "
+        "a name-only universe would otherwise redefine every peer group and "
+        "score instruments whose data we never gathered.",
+    )
 
     # Listing window. Required for point-in-time universe reconstruction: a
     # backtest over 2023-2026 that uses today's listed names silently drops

@@ -141,7 +141,11 @@ def market(db: object) -> Iterator[tuple[Session, list[Instrument]]]:
     with factory() as s:
         made: list[Instrument] = []
         for index in range(MEMBERS):
-            inst = Instrument(market=Market.US, name=f"PEER {index} CORP", us_cik=_cik(index))
+            # Tracked, because a peer group is drawn from tracked rows only:
+            # a name-only listing has no financials to rank.
+            inst = Instrument(
+                market=Market.US, name=f"PEER {index} CORP", us_cik=_cik(index), tracked=True
+            )
             s.add(inst)
             s.flush()
             made.append(inst)

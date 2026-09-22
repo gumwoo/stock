@@ -261,6 +261,13 @@ class CollectorStatusLookup:
         self._session = session
 
     def last_success(self, source: object) -> datetime | None:
+        """The newest run that got somewhere, complete or not.
+
+        PARTIAL counts because for freshness the question is whether we are
+        still reaching the source at all, and a run that fetched most of what
+        it wanted plainly was. **That reading is wrong for a collection
+        watermark** — see `last_full_success`.
+        """
         from sqlalchemy import select
 
         name = getattr(source, "value", str(source))
@@ -269,6 +276,34 @@ class CollectorStatusLookup:
             .where(
                 CollectorRun.source.like(f"{name}%"),
                 CollectorRun.status.in_([CollectorStatus.SUCCESS, CollectorStatus.PARTIAL]),
+                CollectorRun.finished_at.is_not(None),
+            )
+            .order_by(CollectorRun.finished_at.desc())
+            .limit(1)
+        )
+        return self._session.execute(stmt).scalars().first()
+
+    def last_full_success(self, source: object) -> datetime | None:
+        """The newest run that finished everything it set out to do.
+
+        A collector that resumes from where it left off must use this and not
+        `last_success`. A run over 2,500 instruments that covered 700 of them
+        and ended PARTIAL did not reach the rest, so advancing the watermark to
+        its finish time would skip, silently and permanently, the window those
+        1,800 instruments were never asked about.
+
+        Taking the earlier timestamp means the next run re-reads a longer
+        stretch. That costs calls and loses nothing, which is the direction to
+        be wrong in.
+        """
+        from sqlalchemy import select
+
+        name = getattr(source, "value", str(source))
+        stmt = (
+            select(CollectorRun.finished_at)
+            .where(
+                CollectorRun.source.like(f"{name}%"),
+                CollectorRun.status == CollectorStatus.SUCCESS,
                 CollectorRun.finished_at.is_not(None),
             )
             .order_by(CollectorRun.finished_at.desc())

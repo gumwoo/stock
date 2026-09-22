@@ -272,6 +272,12 @@ def market_universe(session: Session, instrument: Instrument, *, asof: date) -> 
     Sorted, so two callers building the same group produce the same stored
     coordinate and a run can be compared against itself.
 
+    Only tracked instruments. A listing master brings in thousands of names we
+    know nothing else about, and a peer group holding companies with no
+    financials is not a wider comparison — it is the same comparison with
+    silence padded around it. Worse, the peer cache would walk every one of
+    them on every session.
+
     This is the universe as it stands at `asof`, which for a historical window
     is not the universe that stood then. Fixing that needs a security master
     carrying delisted names, which this project has declared it will not build
@@ -280,8 +286,9 @@ def market_universe(session: Session, instrument: Instrument, *, asof: date) -> 
     return tuple(
         sorted(
             i.instrument_id
-            for i in instrument_repo.list_active(session, asof=asof)
-            if i.market == instrument.market
+            for i in instrument_repo.list_active(
+                session, asof=asof, market=instrument.market, tracked=True
+            )
         )
     )
 

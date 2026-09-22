@@ -20,8 +20,9 @@ from datetime import UTC, date, datetime
 import pandas as pd
 import pytest
 
-from app.collectors.yfinance_history import YFinanceHistoryCollector
+from app.collectors.yfinance_history import YFinanceHistoryCollector, yf_ticker
 from app.core.calendar import Market, MarketCalendar
+from app.models.instrument import Listing
 
 NOW = datetime(2026, 9, 21, tzinfo=UTC)
 US = MarketCalendar(Market.US)
@@ -116,3 +117,25 @@ class TestTheRestOfTheConversionIsUnchanged:
         assert produced[0]["available_at"] == US.bar_available_at(  # type: ignore[index]
             US.session_open(day)
         )
+
+
+class TestTheBoardDecidesTheTicker:
+    """KOSPI is `.KS` and KOSDAQ is `.KQ`, and yfinance does not say which.
+
+    Asked for a KOSDAQ code with `.KS` it returns an empty frame rather than an
+    error, so the whole listing looks like a company with no price history. The
+    `listing` column exists for this and had no reader until now.
+    """
+
+    def test_kospi_keeps_the_ks_suffix(self) -> None:
+        assert yf_ticker("005930", Market.KR, Listing.KOSPI) == "005930.KS"
+
+    def test_kosdaq_gets_the_kq_suffix(self) -> None:
+        assert yf_ticker("247540", Market.KR, Listing.KOSDAQ) == "247540.KQ"
+
+    def test_an_unknown_board_falls_back_to_the_market_default(self) -> None:
+        """Every row seeded before the listing master has a null board."""
+        assert yf_ticker("005930", Market.KR, None) == "005930.KS"
+
+    def test_us_listings_take_no_suffix(self) -> None:
+        assert yf_ticker("AAPL", Market.US, Listing.NASDAQ) == "AAPL"

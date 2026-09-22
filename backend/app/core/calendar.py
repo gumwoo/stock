@@ -76,6 +76,33 @@ class MarketCalendar:
             raise ValueError(f"{day} is not a {self.market} trading session")
         return ensure_utc(self._cal.session_open(ts).to_pydatetime(), field="session_open")
 
+    def local_today(self, now: datetime) -> date:
+        """`now` as a date in the exchange's own timezone.
+
+        Asked in UTC instead, a KRX session closing at 06:30 UTC would belong
+        to the previous UTC date for most of the trading day.
+        """
+        return ensure_utc(now, field="now").astimezone(self._cal.tz).date()
+
+    def has_closed(self, now: datetime) -> bool:
+        """Did this market open today, in its own timezone, and has it finished?
+
+        One question rather than two, because a scheduled job wants a single
+        answer: a holiday and a session still in progress both mean "not yet",
+        and neither is a reason to collect.
+
+        The job itself is fired by a cron in the market's own timezone, which
+        is what keeps a fixed UTC time from drifting an hour twice a year — NYSE
+        closes at 21:00 UTC in winter and 20:00 in summer. This method is the
+        check behind that trigger rather than a replacement for it: it refuses
+        holidays, and it refuses an early firing on a half day.
+        """
+        moment = ensure_utc(now, field="now")
+        today = self.local_today(moment)
+        if not self.is_session(today):
+            return False
+        return moment >= self.session_close(today)
+
     def session_close(self, day: date) -> datetime:
         """Closing instant of the session on `day`.
 

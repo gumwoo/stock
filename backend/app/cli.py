@@ -24,6 +24,9 @@ import sys
 from app import cli_backtest
 from app.collectors.base import run_collector
 from app.collectors.dart_fundamental import MAX_YEARS_BACK, DartFundamentalCollector
+from app.collectors.krx_master import KrxMasterCollector
+from app.collectors.naver_news import NaverNewsCollector
+from app.collectors.quota import QuotaGuard
 from app.collectors.sec_edgar import SecEdgarCollector
 from app.collectors.yfinance_history import FxRateCollector, YFinanceHistoryCollector
 from app.config import get_settings
@@ -42,6 +45,8 @@ COLLECTORS = {
     "fx": FxRateCollector,
     "sec": SecEdgarCollector,
     "dart": DartFundamentalCollector,
+    "naver": NaverNewsCollector,
+    "krx": KrxMasterCollector,
 }
 
 # How far back a collection reaches, in one vocabulary for every source that
@@ -59,7 +64,7 @@ PERIODS: dict[str, int] = {"2y": 2, "5y": 5, "10y": 10, "max": MAX_YEARS_BACK}
 # Sources whose range is decided by the source, not by us. SEC's companyfacts
 # is the filer's entire XBRL history in a single document; there is no shorter
 # request to make, so a period given here would be silently discarded.
-FIXED_RANGE = frozenset({"sec"})
+FIXED_RANGE = frozenset({"sec", "naver"})
 
 
 def cmd_config() -> int:
@@ -91,7 +96,23 @@ def cmd_seed() -> int:
     return 0
 
 
-def cmd_collect(source: str, period: str | None = None) -> int:
+def cmd_quota() -> int:
+    """What is left of each budget. Costs no quota, which is the point."""
+    guard = QuotaGuard()
+    print(f"{'quota':26s} {'spent':>8s} {'budget':>10s} {'left':>8s}  window / source")
+    print("-" * 78)
+    for quota, spent, allowed in guard.report():
+        print(
+            f"{quota.key:26s} {spent:>8,d} {allowed:>10,d} {max(0, allowed - spent):>8,d}"
+            f"  {quota.window} [{quota.limit_source}]"
+        )
+    print()
+    print("Budgets are a share of each published cap; a window is rolling, never a")
+    print("calendar day, so no reset hour has to be known. See app/core/quota.py.")
+    return 0
+
+
+def cmd_collect(source: str, period: str | None = None, limit: int | None = None) -> int:
     factory = COLLECTORS.get(source)
     if factory is None:
         print(f"unknown source {source!r}; known: {', '.join(sorted(COLLECTORS))}")
@@ -109,7 +130,17 @@ def cmd_collect(source: str, period: str | None = None) -> int:
     # cannot be asked for different eras by accident.
     kwargs: dict[str, object] = {}
     if period is not None:
-        kwargs = {"years_back": PERIODS[period]} if source == "dart" else {"period": period}
+        kwargs = (
+            {"years_back": PERIODS[period]} if source in {"dart", "krx"} else {"period": period}
+        )
+
+    # A deliberately tiny sweep, so the end-to-end check costs one call rather
+    # than a pass over the whole listing master.
+    if limit is not None:
+        if source != "naver":
+            print(f"--limit applies to naver only, not to {source}")
+            return 2
+        kwargs = {"max_instruments": limit, "max_pages": 1}
 
     with session_scope() as session:
         run = run_collector(factory(**kwargs), session)
@@ -175,9 +206,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("config", help="show enabled/disabled capabilities")
     sub.add_parser("seed", help="create the starting watchlist")
     sub.add_parser("runs", help="recent collector runs")
+    sub.add_parser("quota", help="how much of each API budget is left")
 
     collect = sub.add_parser("collect", help="run one collector")
     collect.add_argument("--source", required=True, choices=sorted(COLLECTORS))
+    collect.add_argument(
+        "--limit",
+        type=int,
+        help="naver only: sweep at most N instruments, one page each. For "
+        "checking the pipe end to end without spending a day's budget",
+    )
     collect.add_argument(
         "--period",
         choices=sorted(PERIODS),
@@ -203,8 +241,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_seed()
         case "runs":
             return cmd_runs()
+        case "quota":
+            return cmd_quota()
         case "collect":
-            return cmd_collect(args.source, args.period)
+            return cmd_collect(args.source, args.period, args.limit)
         case "backtest":
             return cli_backtest.dispatch(args)
         case "candles":
