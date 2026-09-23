@@ -31,6 +31,7 @@ from app.core import logging as logging_setup
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import advisory_lock, session_scope
+from app.services import llm_service
 
 logger = logging.getLogger("app.worker")
 
@@ -69,6 +70,10 @@ def guarded(job_name: str, fn: Callable[[], None]) -> Callable[[], None]:
 # summer. The times are margin, not precision; `has_closed` does the deciding.
 _KR_PRE_OPEN = CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone="Asia/Seoul")
 _KR_AFTER_CLOSE = CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone="Asia/Seoul")
+# After the morning sweep has landed and well before the 15:30 close. A signal
+# is judged at the close and sees only news read by then; reading the morning's
+# articles after the close would put them in tomorrow's signal instead.
+_KR_READ_BEFORE_CLOSE = CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone="Asia/Seoul")
 
 
 def _collect_korean_news(*, require_close: bool) -> None:
@@ -100,6 +105,26 @@ def _collect_korean_news(*, require_close: bool) -> None:
         run_collector(NaverNewsCollector(), session)
 
 
+def _read_korean_news() -> None:
+    """Judge undecided hits and read confirmed articles for tracked names.
+
+    Tracked names only, and a bounded number of each, within the
+    subscription's limits: this is the owner's Claude usage, spent unattended.
+    """
+    calendar = MarketCalendar(Market.KR)
+    if not calendar.is_session(calendar.local_today(utc_now())):
+        return
+    limit = get_settings().llm_scheduled_limit
+    with session_scope() as session:
+        tracked = llm_service.tracked_ids(session)
+        judged = llm_service.judge_pending(session, limit=limit, instrument_ids=tracked)
+        logger.info("judge-news: %s", judged)
+        if judged.stopped:
+            return
+        read = llm_service.read_confirmed(session, limit=limit, instrument_ids=tracked)
+        logger.info("read-news: %s", read)
+
+
 def build_scheduler() -> BlockingScheduler:
     """Assemble the job schedule.
 
@@ -122,6 +147,16 @@ def build_scheduler() -> BlockingScheduler:
             guarded(job_id, partial(_collect_korean_news, require_close=require_close)),
             trigger,
             id=job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+
+    if get_settings().llm_schedule_enabled:
+        scheduler.add_job(
+            guarded("news_reading_before_close", _read_korean_news),
+            _KR_READ_BEFORE_CLOSE,
+            id="news_reading_before_close",
             max_instances=1,
             coalesce=True,
             misfire_grace_time=3600,

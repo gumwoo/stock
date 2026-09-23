@@ -55,6 +55,33 @@ class ReasonOut(BaseModel):
     metric_name: str | None = None
 
 
+class OverlayEventOut(BaseModel):
+    event_type: str
+    first_at: datetime
+    articles: int
+    sentiment: float
+    intensity: float
+    confidence: float
+    decay: float
+    contribution: float
+    title: str
+
+
+class OverlayOut(BaseModel):
+    """News events beside the score. Not part of `total_score` or `action`."""
+
+    points: float = Field(description="Bounded; what the news of the moment would add")
+    events: int
+    readings_used: int
+    unread_articles: int = Field(
+        description="Confirmed articles with no reading yet; the overlay lags by this much"
+    )
+    news_freshness: str
+    asof: datetime
+    overlay_version: int
+    top_events: list[OverlayEventOut]
+
+
 class SignalOut(BaseModel):
     id: int
     instrument_id: int
@@ -80,6 +107,7 @@ class SignalOut(BaseModel):
 
     factors: list[FactorOut]
     reasons: list[ReasonOut]
+    overlay: OverlayOut | None = None
 
     @property
     def effective_weight_total(self) -> float:

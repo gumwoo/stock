@@ -28,6 +28,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     String,
 )
 from sqlalchemy import (
@@ -204,3 +205,50 @@ class StrategyConfig(Base):
 
     def __repr__(self) -> str:
         return f"<StrategyConfig {self.version}>"
+
+
+class SignalOverlay(Base):
+    """The news-event overlay that stood beside a signal when it was made.
+
+    Beside, not inside: `total_score` and `action` are the base strategy's,
+    unchanged. This records how many points the news of the moment would have
+    moved the score by, and why, so that forward testing can later compare the
+    two — the only test available to something with no history.
+
+    One row per signal, written once. The inputs it rests on are all
+    point-in-time (verdicts, readings and articles as of `asof`), so the same
+    row can be recomputed from the database; storing it keeps the version of
+    the parameters that produced it.
+    """
+
+    __tablename__ = "signal_overlay"
+
+    id: Mapped[BigIntPk]
+    signal_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("signal.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    asof: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, doc="The moment the news was read as of."
+    )
+    overlay_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    reading_model: Mapped[str] = mapped_column(String(64), nullable=False)
+    reading_prompt_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    points: Mapped[float] = mapped_column(
+        Float, nullable=False, doc="Bounded to plus or minus the version's maximum."
+    )
+    raw: Mapped[float] = mapped_column(Float, nullable=False)
+    events: Mapped[int] = mapped_column(Integer, nullable=False, doc="Clusters that counted.")
+    readings_used: Mapped[int] = mapped_column(Integer, nullable=False)
+    unread_articles: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Confirmed articles in the lookback with no reading yet. The overlay "
+        "is only as complete as the reading behind it.",
+    )
+    news_freshness: Mapped[Freshness] = mapped_column(
+        Enum(Freshness, name="freshness_status", native_enum=False, length=16), nullable=False
+    )
+    detail: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, nullable=False, default=list, doc="The clusters, largest contribution first."
+    )
+    created_at: Mapped[IngestedAt]

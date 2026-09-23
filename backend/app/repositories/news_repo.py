@@ -515,6 +515,35 @@ def decisions_asof(
     return [DecisionAsOf(*row) for row in session.execute(stmt).all()]
 
 
+def confirmed_pairs_asof(
+    session: Session,
+    *,
+    asof: datetime,
+    since: datetime,
+    instrument_ids: Collection[int],
+) -> set[tuple[int, int]]:
+    """(instrument, article) pairs whose verdict at `asof` was CONFIRMED.
+
+    Articles available in `(since, asof]` and stored by `asof`.
+    """
+    asof = ensure_utc(asof, field="asof")
+    latest = _latest(asof=asof)
+    stmt = (
+        select(NewsQueryHit.instrument_id, NewsQueryHit.news_item_id)
+        .select_from(latest)
+        .join(NewsQueryHit, NewsQueryHit.id == latest.c.query_hit_id)
+        .join(NewsItem, NewsItem.id == NewsQueryHit.news_item_id)
+        .where(
+            latest.c.decision == HitDecision.CONFIRMED,
+            NewsQueryHit.instrument_id.in_(list(instrument_ids)),
+            NewsItem.available_at > ensure_utc(since, field="since"),
+            NewsItem.available_at <= asof,
+            NewsItem.ingested_at <= asof,
+        )
+    )
+    return {(i, n) for i, n in session.execute(stmt).all()}
+
+
 def projection_drift(session: Session) -> tuple[int, int]:
     """(latest CONFIRMED verdicts with no mention, mentions with no such verdict).
 

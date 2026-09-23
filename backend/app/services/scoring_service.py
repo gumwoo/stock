@@ -48,7 +48,7 @@ from app.scoring.policy import (
     WEIGHTS,
     apply_freshness,
 )
-from app.services import fundamental_service
+from app.services import fundamental_service, overlay_service
 
 logger = logging.getLogger(__name__)
 
@@ -388,7 +388,10 @@ def score_all(session: Session, *, now: datetime | None = None) -> list[Signal]:
         signal = score_instrument(session, instrument, now=now, peers=peers)
         if signal is None:
             continue
-        persisted.append(persist_signal(session, signal))
+        row = persist_signal(session, signal)
+        persisted.append(row)
+        # Beside the signal, never inside it: see app/services/overlay_service.py.
+        overlay_service.attach(session, row)
         logger.info(
             "scored %s: %s %.1f",
             instrument.name,

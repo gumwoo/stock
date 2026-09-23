@@ -13,12 +13,14 @@ from app.api.schemas import (
     FactorOut,
     InstrumentOut,
     MetricOut,
+    OverlayEventOut,
+    OverlayOut,
     ReasonOut,
     SignalOut,
 )
 from app.core.clock import utc_now
 from app.db import get_db
-from app.models import Instrument, Interval, Signal
+from app.models import Instrument, Interval, Signal, SignalOverlay
 from app.repositories import candle_repo, instrument_repo
 from app.services import scoring_service
 
@@ -31,6 +33,24 @@ _CURRENCY = {"KR": "KRW", "US": "USD"}
 
 def _symbol_of(session: Session, instrument: Instrument) -> str:
     return instrument_repo.current_symbol(session, instrument.instrument_id) or "?"
+
+
+def _overlay_out(session: Session, row: Signal) -> OverlayOut | None:
+    overlay = session.execute(
+        select(SignalOverlay).where(SignalOverlay.signal_id == row.id)
+    ).scalar_one_or_none()
+    if overlay is None:
+        return None
+    return OverlayOut(
+        points=overlay.points,
+        events=overlay.events,
+        readings_used=overlay.readings_used,
+        unread_articles=overlay.unread_articles,
+        news_freshness=overlay.news_freshness.value,
+        asof=overlay.asof,
+        overlay_version=overlay.overlay_version,
+        top_events=[OverlayEventOut.model_validate(e) for e in overlay.detail],
+    )
 
 
 def _to_signal_out(session: Session, row: Signal, instrument: Instrument) -> SignalOut:
@@ -81,6 +101,7 @@ def _to_signal_out(session: Session, row: Signal, instrument: Instrument) -> Sig
             )
             for r in row.reasons
         ],
+        overlay=_overlay_out(session, row),
     )
 
 

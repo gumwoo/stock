@@ -42,7 +42,7 @@ from app.models.portfolio import (
 )
 from app.models.promotion import InstrumentPromotion
 from app.models.quota import ApiCallBucket
-from app.models.signal import Signal, SignalFactor, StrategyConfig
+from app.models.signal import Signal, SignalFactor, SignalOverlay, StrategyConfig
 
 __all__ = [
     "ApiCallBucket",
@@ -80,6 +80,7 @@ __all__ = [
     "SentimentEvent",
     "Signal",
     "SignalFactor",
+    "SignalOverlay",
     "StrategyConfig",
     "SymbolHistory",
     "Transaction",

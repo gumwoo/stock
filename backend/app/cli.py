@@ -36,11 +36,12 @@ from app.config import get_settings
 from app.core import logging as logging_setup
 from app.core.calendar import Market
 from app.core.clock import utc_now
+from app.core.types import Freshness
 from app.db import session_scope
 from app.models import Interval
 from app.repositories import candle_repo, instrument_repo, news_repo
 from app.seed import seed_watchlist
-from app.services import discovery_service, llm_service, promotion_service
+from app.services import discovery_service, llm_service, overlay_service, promotion_service
 from app.services.discovery_service import Candidate, Discovery
 
 logger = logging.getLogger("app.cli")
@@ -351,6 +352,46 @@ def cmd_read_news(limit: int, everyone: bool) -> int:
     return 0
 
 
+def cmd_overlay(asof: str | None, symbol: str | None) -> int:
+    """The news-event overlay for tracked names at a moment. Reads only."""
+    moment = datetime.fromisoformat(asof) if asof else utc_now()
+    with session_scope() as session:
+        tracked = instrument_repo.list_active(session, asof=moment.date(), tracked=True)
+        if symbol:
+            tracked = [
+                i
+                for i in tracked
+                if instrument_repo.current_symbol(session, i.instrument_id) == symbol
+            ]
+        results = overlay_service.overlays_at(
+            session, asof=moment, instrument_ids=[i.instrument_id for i in tracked]
+        )
+        names = {i.instrument_id: i.name for i in tracked}
+    if not results:
+        print("no tracked instrument matched")
+        return 1
+    any_result = next(iter(results.values()))
+    print(
+        f"as of {any_result.asof.isoformat(timespec='minutes')}; "
+        f"readings by {any_result.model} prompt v{any_result.prompt_version}; "
+        f"overlay v{any_result.params.version}, at most +/-{any_result.params.max_points:g} points"
+    )
+    for instrument_id, r in sorted(results.items(), key=lambda kv: -abs(kv[1].overlay.points)):
+        o = r.overlay
+        print(
+            f"{names[instrument_id]:<16} {o.points:+6.2f} pts  {len(o.clusters)} events from "
+            f"{o.readings_used} readings, {r.unread_articles} confirmed articles unread"
+            + ("" if r.news_freshness is Freshness.FRESH else f"  [news {r.news_freshness.value}]")
+        )
+        for c in o.clusters[:3]:
+            print(
+                f"    {c.event_type:<18} {c.first_at:%m-%d %H:%M} x{c.articles:<3} "
+                f"s={c.sentiment:+.2f} i={c.intensity:.2f} decay={c.decay:.2f} -> {c.contribution:+.3f}  "
+                f"{c.title[:40]}"
+            )
+    return 0
+
+
 def cmd_runs() -> int:
     """Latest run per collector, as JSON."""
     from sqlalchemy import select
@@ -452,6 +493,12 @@ def main(argv: list[str] | None = None) -> int:
         "--all", dest="everyone", action="store_true", help="every instrument, not only tracked"
     )
 
+    overlay = sub.add_parser(
+        "overlay", help="news-event overlay for tracked names; reads only, no API calls"
+    )
+    overlay.add_argument("--asof", help="ISO time to ask about; default now")
+    overlay.add_argument("--symbol")
+
     candles = sub.add_parser("candles", help="print stored daily bars")
     candles.add_argument("--symbol", required=True)
     candles.add_argument("--market", default="KR", choices=[m.value for m in Market])
@@ -482,6 +529,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_judge_news(args.limit, args.tracked_only)
         case "read-news":
             return cmd_read_news(args.limit, args.everyone)
+        case "overlay":
+            return cmd_overlay(args.asof, args.symbol)
         case "candles":
             return cmd_candles(args.symbol, Market(args.market), args.limit)
         case _:  # pragma: no cover

@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     # windows are shared with every other use of Claude on the account.
     llm_max_five_hour_utilization: float = Field(default=0.5, gt=0, le=1)
     llm_max_seven_day_utilization: float = Field(default=0.8, gt=0, le=1)
+    # A scheduled pass over tracked names before the close, so the day's
+    # signal can carry the morning's news. Off unless asked for: it spends the
+    # owner's Claude usage without anyone at the keyboard.
+    llm_schedule_enabled: bool = False
+    llm_scheduled_limit: int = Field(default=100, gt=0, le=1000)
 
     # --- notifications ----------------------------------------------------
     smtp_host: str = ""
