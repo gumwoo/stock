@@ -139,3 +139,51 @@ class TestHolidays:
         """A filing before a long weekend waits for the market to reopen."""
         available = us.next_session_open(date(2026, 7, 2))
         assert available.date() == date(2026, 7, 6)  # Monday after the observed holiday
+
+
+class TestWhatTheCalendarCovers:
+    """A yes-or-no question instead of an exception to catch.
+
+    Past either end, asking for the next session raises — our own
+    `ValueError` below the start, the library's `DateOutOfBounds` above the
+    end. Code that listed those one at a time would miss the next, which is
+    how the same defect kept reappearing in the collectors.
+    """
+
+    def test_an_ordinary_date_is_covered(self) -> None:
+        from datetime import date
+
+        from app.core.calendar import Market, MarketCalendar
+
+        assert MarketCalendar(Market.KR).covers(date(2024, 3, 15))
+
+    def test_before_the_start_is_not(self) -> None:
+        from datetime import date
+
+        from app.core.calendar import Market, MarketCalendar
+
+        kr = MarketCalendar(Market.KR)
+        assert not kr.covers(date(1985, 1, 2))
+        assert not kr.covers(
+            kr.first_session.replace(day=1) if kr.first_session.day > 1 else date(1989, 12, 31)
+        )
+
+    def test_past_the_horizon_is_not(self) -> None:
+        from datetime import date
+
+        from app.core.calendar import Market, MarketCalendar
+
+        kr = MarketCalendar(Market.KR)
+        assert not kr.covers(date(2100, 1, 4))
+        assert not kr.covers(kr.last_session)
+
+    def test_everything_covered_can_actually_be_answered(self) -> None:
+        """The promise the method makes, checked at both edges."""
+        from datetime import timedelta
+
+        from app.core.calendar import Market, MarketCalendar
+
+        kr = MarketCalendar(Market.KR)
+        for day in (kr.first_session, kr.last_session - timedelta(days=1)):
+            assert kr.covers(day)
+            kr.next_session_open(day)

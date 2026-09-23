@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -139,6 +140,15 @@ TRACKING_PARAMS = frozenset(
 )
 
 
+def _encodable(text: str) -> bool:
+    """Whether this string can be written as UTF-8 at all."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _is_hangul(char: str) -> bool:
     """Precomposed syllables and the Jamo blocks around them."""
     return "가" <= char <= "힣" or "ᄀ" <= char <= "ᇿ" or "㄰" <= char <= "㆏"
@@ -172,10 +182,40 @@ class Yield:
     def reject_rate(self) -> float:
         return self.rejected / self.evaluated if self.evaluated else 0.0
 
+    @property
+    def reject_floor(self) -> float:
+        """The reject rate this sample supports with confidence, not merely shows.
+
+        The lower bound of the Wilson interval at 95%. Ranking by the raw rate
+        lets every company with one article and one reject tie at 100% and
+        fill the list, and across four thousand companies there are dozens of
+        those — enough to push a company rejecting ninety of a hundred off the
+        bottom. One of one supports a floor near 21%; ninety of a hundred
+        supports about 83%. The report still prints the raw counts; only the
+        order uses this.
+        """
+        n = self.evaluated
+        if not n:
+            return 0.0
+        z = 1.96
+        p = self.rejected / n
+        centre = p + z * z / (2 * n)
+        margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+        return (centre - margin) / (1 + z * z / n)
+
 
 # How many companies each list in the report names. The plan asked for the
 # twenty worst; the rollout reads this after every stage.
 REPORT_TOP = 20
+
+# Column widths in `news_item`. A value wider than its column is refused by
+# the database at the flush, which happens once, at the end of the sweep — so
+# one over-long URL used to discard every article gathered for every company
+# before it, and the run was filed as a defect in this file. The title was
+# already cut to fit; the fields beside it were not.
+MAX_URL = 1_000
+MAX_HOST = 200
+MAX_TITLE = 500
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +234,9 @@ class Sweep:
     skipped: int
     hit_page_cap: bool
     exhausted: QuotaExhausted | None = None
+    # Requests actually sent. A company refused before its first one was
+    # never asked, and the run header must not count it as if it were.
+    requests: int = 0
 
 
 class NaverNewsCollector(BaseCollector):
@@ -247,7 +290,12 @@ class NaverNewsCollector(BaseCollector):
         Tags go first and entities second, so an escaped `&lt;b&gt;` in the
         article's own text survives as text instead of becoming a tag to strip.
         """
-        return _SPACE.sub(" ", html.unescape(_TAG.sub("", raw))).strip()
+        text = _SPACE.sub(" ", html.unescape(_TAG.sub("", raw))).strip()
+        # A lone surrogate — half of a UTF-16 pair, legal inside a JSON string
+        # escape and illegal in UTF-8 — cannot be written to the database, and
+        # the refusal comes at the flush that saves the whole sweep. In prose
+        # it is a lost character, so it becomes a replacement character.
+        return text.encode("utf-8", "replace").decode("utf-8")
 
     @staticmethod
     def parse_pub_date(raw: str) -> datetime | None:
@@ -256,16 +304,21 @@ class NaverNewsCollector(BaseCollector):
         Returns None rather than raising: one unparseable row should cost that
         row, not the sweep. The caller counts what it skipped.
         """
+        # Parsing and the conversion to UTC are guarded together. The first
+        # fix wrapped only the parse, and the overflow a year like 9999 causes
+        # comes from the conversion on the next line — the guard one line
+        # above the value that breaks, which is the shape this file kept
+        # repeating. A test that fed it the value is what showed it.
         try:
             parsed = parsedate_to_datetime(raw)
-        except (TypeError, ValueError):
+            if parsed is None or parsed.tzinfo is None:
+                # A naive timestamp would have to be given a zone by guessing,
+                # and a guessed zone on an availability column is a silent
+                # nine-hour error. Better to drop the row and count it.
+                return None
+            return ensure_utc(parsed, field="pubDate")
+        except (TypeError, ValueError, OverflowError):
             return None
-        if parsed is None or parsed.tzinfo is None:
-            # A naive timestamp would have to be given a zone by guessing, and
-            # a guessed zone on an availability column is a silent nine-hour
-            # error. Better to drop the row and count it.
-            return None
-        return ensure_utc(parsed, field="pubDate")
 
     @staticmethod
     def canonical_url(*, originallink: str, link: str) -> str | None:
@@ -277,16 +330,25 @@ class NaverNewsCollector(BaseCollector):
         chosen = (originallink or "").strip() or (link or "").strip()
         if not chosen:
             return None
-
-        parts = urlsplit(chosen)
-        if not parts.netloc:
+        if not _encodable(chosen):
+            # A URL is an identity, not prose: one that cannot be encoded
+            # cannot be hashed or stored, and there is no honest repair.
             return None
 
-        query = sorted(
-            (k, v)
-            for k, v in parse_qsl(parts.query, keep_blank_values=True)
-            if k.lower() not in TRACKING_PARAMS
-        )
+        try:
+            parts = urlsplit(chosen)
+            if not parts.netloc:
+                return None
+            query = sorted(
+                (k, v)
+                for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                if k.lower() not in TRACKING_PARAMS
+            )
+        except ValueError:
+            # `urlsplit` raises for a malformed bracketed host and for a
+            # netloc that changes under NFKC normalisation. Either way the
+            # article has no usable address, which is what None means here.
+            return None
 
         # A default port is the same address written twice, and so is a
         # trailing slash. Which spelling arrives depends on the publisher, so
@@ -494,7 +556,7 @@ class NaverNewsCollector(BaseCollector):
 
         worst = sorted(
             (y for y in yields if y.rejected),
-            key=lambda y: (-y.reject_rate, -y.rejected, y.name),
+            key=lambda y: (-y.reject_floor, -y.rejected, y.name),
         )[:top]
         if worst:
             parts.append(
@@ -542,7 +604,7 @@ class NaverNewsCollector(BaseCollector):
                 link=str(item.get("link", "")),
             )
             title = cls.strip_html(str(item.get("title", "")))
-            if published is None or canonical is None or not title:
+            if published is None or canonical is None or not title or len(canonical) > MAX_URL:
                 skipped += 1
                 continue
 
@@ -557,6 +619,13 @@ class NaverNewsCollector(BaseCollector):
             # dies before its commit, and everything gathered for every earlier
             # company in the run goes with it.
             naver_url = as_text(item, "link") or None
+            if naver_url is not None and (len(naver_url) > MAX_URL or not _encodable(naver_url)):
+                # The mirror is a location, not the article's identity, so an
+                # unusable one costs the link and keeps the article.
+                naver_url = None
+            host = cls.publisher_host(canonical)
+            if host is not None and len(host) > MAX_HOST:
+                host = None
             rows.append(
                 (
                     NewsItemRow(
@@ -564,8 +633,8 @@ class NaverNewsCollector(BaseCollector):
                         url_hash=cls.url_hash(canonical),
                         url=canonical,
                         naver_url=naver_url if naver_url != canonical else None,
-                        publisher_host=cls.publisher_host(canonical),
-                        title=title[:500],
+                        publisher_host=host,
+                        title=title[:MAX_TITLE],
                         summary=cls.strip_html(str(item.get("description", ""))) or None,
                         published_at=published,
                         # News names a moment, so availability is publication.
@@ -667,14 +736,13 @@ class NaverNewsCollector(BaseCollector):
         )
 
         instruments = universe
-        unasked = 0
         if self.max_instruments is not None and self.max_instruments < len(universe):
             instruments = universe[: self.max_instruments]
-            unasked = len(universe) - len(instruments)
 
         since = self.watermark(session, now=now)
         read = saved = mentions = rejected = unusable = 0
         yields: list[Yield] = []
+        asked = 0
         capped: list[str] = []
         warnings: list[str] = []
         stopped_early: str | None = None
@@ -687,6 +755,8 @@ class NaverNewsCollector(BaseCollector):
                 conflicts = self.conflicts_for((instrument.name, *aliases), registry)
 
                 pages = self._sweep(client, query=query, since=since)
+                if pages.requests:
+                    asked += 1
                 if pages.exhausted is not None:
                     # Our own budget, mid-run. Whatever this sweep already
                     # fetched is stored below before the loop ends; the run
@@ -747,6 +817,11 @@ class NaverNewsCollector(BaseCollector):
 
         session.commit()
 
+        # Everything not asked, for whatever reason: a `--limit` or a budget
+        # that ran out partway. The header used to count the companies the run
+        # meant to ask, so a sweep stopped after twenty-five said sixty.
+        unasked = len(universe) - asked
+
         if stopped_early:
             warnings.append(stopped_early)
         if unusable:
@@ -757,7 +832,7 @@ class NaverNewsCollector(BaseCollector):
             # exact silent loss `last_full_success` exists to prevent. Observed
             # once for real: a `--limit 1` rehearsal cut the next full run's
             # window from three days to fourteen hours.
-            warnings.append(f"{unasked} instruments were never asked about (--limit)")
+            warnings.append(f"{unasked} instruments were never asked about")
         if capped:
             # The plan called this deliberate truncation and kept it out of
             # PARTIAL, on the grounds that a daily PARTIAL for Samsung would
@@ -772,7 +847,7 @@ class NaverNewsCollector(BaseCollector):
             warnings.append(f"{len(capped)} instruments hit the {self.max_pages}-page cap")
 
         detail = (
-            f"{len(instruments)} of {len(universe)} instruments since "
+            f"{asked} of {len(universe)} instruments since "
             f"{since:%Y-%m-%d %H:%M}Z, {mentions} mentions, "
             f"{rejected} rejected (name absent from title and summary)"
         )
@@ -791,7 +866,7 @@ class NaverNewsCollector(BaseCollector):
     def _sweep(self, client: httpx.Client, *, query: str, since: datetime) -> Sweep:
         """Page one query until the results run past the watermark."""
         rows: list[tuple[NewsItemRow, str]] = []
-        read = skipped = 0
+        read = skipped = sent = 0
         start = 1
 
         for _page in range(self.max_pages):
@@ -799,8 +874,14 @@ class NaverNewsCollector(BaseCollector):
                 payload = self._get(client, query=query, start=start)
             except QuotaExhausted as refused:
                 return Sweep(
-                    rows=rows, read=read, skipped=skipped, hit_page_cap=False, exhausted=refused
+                    rows=rows,
+                    read=read,
+                    skipped=skipped,
+                    hit_page_cap=False,
+                    exhausted=refused,
+                    requests=sent,
                 )
+            sent += 1
             items = as_rows(payload.get("items"), source="Naver news search")
             read += len(items)
 
@@ -809,10 +890,20 @@ class NaverNewsCollector(BaseCollector):
             skipped += page_skipped
 
             if exhausted or len(items) < PAGE_SIZE:
-                return Sweep(rows=rows, read=read, skipped=skipped, hit_page_cap=False)
+                return Sweep(
+                    rows=rows, read=read, skipped=skipped, hit_page_cap=False, requests=sent
+                )
 
             start += PAGE_SIZE
             if start > MAX_START:
-                return Sweep(rows=rows, read=read, skipped=skipped, hit_page_cap=True)
+                return Sweep(
+                    rows=rows, read=read, skipped=skipped, hit_page_cap=True, requests=sent
+                )
 
-        return Sweep(rows=rows, read=read, skipped=skipped, hit_page_cap=self.max_pages > 0)
+        return Sweep(
+            rows=rows,
+            read=read,
+            skipped=skipped,
+            hit_page_cap=self.max_pages > 0,
+            requests=sent,
+        )

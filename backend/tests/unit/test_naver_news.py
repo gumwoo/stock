@@ -27,7 +27,14 @@ import httpx
 import pytest
 
 from app.collectors.base import UpstreamUnavailableError
-from app.collectors.naver_news import PAGE_SIZE, REPORT_TOP, NaverNewsCollector, Yield
+from app.collectors.naver_news import (
+    MAX_HOST,
+    MAX_URL,
+    PAGE_SIZE,
+    REPORT_TOP,
+    NaverNewsCollector,
+    Yield,
+)
 from app.collectors.quota import QuotaExhausted
 from app.core.quota import LimitSource, Quota
 from app.models.news import MatchMethod, NewsSource
@@ -751,3 +758,134 @@ class TestTheRejectReport:
         )
 
         assert report.startswith("reject rate 0/10 (0%)")
+
+
+def raw_item(**over: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "title": "삼성전자 실적",
+        "description": "본문",
+        "originallink": "https://news.example.com/a",
+        "link": "https://n.news.naver.com/a",
+        "pubDate": "Mon, 21 Sep 2026 14:03:00 +0900",
+    }
+    base.update(over)
+    return base
+
+
+class TestNothingTheDatabaseWouldRefuse:
+    """A value the database refuses is refused at the flush, once, at the end.
+
+    That flush saves the whole sweep, so a single bad article used to discard
+    every article gathered for every company before it — and the run was filed
+    as a defect in this file. The title was already cut to its column; the
+    fields beside it were not, and text that cannot be encoded at all was not
+    considered. Each case here is one of those, and each must cost at most the
+    one article.
+    """
+
+    def test_a_url_wider_than_its_column_drops_the_article(self) -> None:
+        long = "https://news.example.com/" + "a" * (MAX_URL + 50)
+        rows, skipped, _ = NaverNewsCollector.to_rows([raw_item(originallink=long)], since=None)
+
+        assert rows == []
+        assert skipped == 1
+
+    def test_a_url_exactly_at_the_limit_is_kept(self) -> None:
+        stem = "https://news.example.com/"
+        exact = stem + "a" * (MAX_URL - len(stem))
+        rows, _, _ = NaverNewsCollector.to_rows([raw_item(originallink=exact)], since=None)
+
+        assert len(rows) == 1
+        assert len(rows[0][0].url) == MAX_URL
+
+    def test_an_overlong_mirror_link_costs_the_link_not_the_article(self) -> None:
+        """The mirror is a location, not the article's identity."""
+        long = "https://n.news.naver.com/" + "b" * (MAX_URL + 50)
+        rows, skipped, _ = NaverNewsCollector.to_rows([raw_item(link=long)], since=None)
+
+        assert len(rows) == 1
+        assert skipped == 0
+        assert rows[0][0].naver_url is None
+
+    def test_an_overlong_host_is_dropped_not_stored(self) -> None:
+        host = "a" * (MAX_HOST + 20) + ".com"
+        rows, _, _ = NaverNewsCollector.to_rows(
+            [raw_item(originallink=f"https://{host}/x")], since=None
+        )
+
+        assert len(rows) == 1
+        assert rows[0][0].publisher_host is None
+
+    def test_a_malformed_bracketed_host_is_no_address(self) -> None:
+        """`urlsplit` raises `ValueError` here rather than returning parts."""
+        assert NaverNewsCollector.canonical_url(originallink="http://[bad/x", link="") is None
+
+    def test_a_host_that_changes_under_normalisation_is_no_address(self) -> None:
+        assert (
+            NaverNewsCollector.canonical_url(originallink="https://ex\uff0fample.com/x", link="")
+            is None
+        )
+
+    def test_a_year_past_the_calendar_is_no_date(self) -> None:
+        """`OverflowError`, not `ValueError`: a bad date whichever way it fails."""
+        assert NaverNewsCollector.parse_pub_date("Fri, 31 Dec 9999 23:00:00 -0900") is None
+
+    def test_a_lone_surrogate_in_the_title_is_replaced(self) -> None:
+        """Legal inside a JSON escape, illegal in UTF-8, fatal at the flush."""
+        rows, skipped, _ = NaverNewsCollector.to_rows(
+            [raw_item(title="삼성전자 \ud83d 실적")], since=None
+        )
+
+        assert len(rows) == 1
+        assert skipped == 0
+        rows[0][0].title.encode("utf-8")
+
+    def test_a_lone_surrogate_in_the_url_drops_the_article(self) -> None:
+        """A URL is an identity. There is no honest repair for one."""
+        rows, skipped, _ = NaverNewsCollector.to_rows(
+            [raw_item(originallink="https://news.example.com/\ud83d")], since=None
+        )
+
+        assert rows == []
+        assert skipped == 1
+
+    def test_a_lone_surrogate_in_the_mirror_costs_only_the_mirror(self) -> None:
+        rows, _, _ = NaverNewsCollector.to_rows(
+            [raw_item(link="https://n.news.naver.com/\ud83d")], since=None
+        )
+
+        assert len(rows) == 1
+        assert rows[0][0].naver_url is None
+
+
+class TestTinySamplesDoNotBuryBrokenQueries:
+    """Ranked by the rate the sample supports, not the rate it shows.
+
+    Across four thousand companies there are dozens with one article and one
+    reject, and by raw rate every one of them ties at 100% — enough to push a
+    company rejecting ninety of a hundred off a list of twenty. That company
+    is the one with a genuinely broken query.
+    """
+
+    def test_ninety_of_a_hundred_outranks_one_of_one(self) -> None:
+        yields = [Yield(f"한건{i:02d}", f"8{i:05d}", matched=0, rejected=1) for i in range(40)]
+        yields.append(Yield("망가진질의", "000001", matched=10, rejected=90))
+
+        report = NaverNewsCollector.reject_report(yields)
+        worst = report.split("highest reject rate: ")[1].split(";")[0]
+
+        assert worst.startswith("망가진질의")
+
+    def test_the_raw_counts_are_still_what_is_printed(self) -> None:
+        report = NaverNewsCollector.reject_report(
+            [Yield("망가진질의", "000001", matched=10, rejected=90)]
+        )
+
+        assert "망가진질의(000001) 90/100 90%" in report
+
+    def test_the_floor_is_below_the_rate_and_rises_with_the_sample(self) -> None:
+        small = Yield("a", None, matched=0, rejected=1)
+        large = Yield("b", None, matched=0, rejected=100)
+
+        assert 0 < small.reject_floor < small.reject_rate
+        assert small.reject_floor < large.reject_floor < large.reject_rate

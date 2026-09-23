@@ -550,3 +550,97 @@ class TestTheRejectReportReachesTheRun:
         assert second.detail is not None
         assert "0 mentions" in second.detail
         assert "reject rate 0/1 (0%)" in second.detail
+
+
+LONE_SURROGATE = chr(0xD83D)
+
+
+class TestOneBadArticleCostsOneArticle:
+    """The flush that saves a sweep happens once, at the end.
+
+    So a value the database refuses used to take every earlier company's
+    articles with it, and the run was filed as a defect in this file. Measured
+    before the fix: a 1,200-character link on the last of ten companies left
+    the other nine with nothing stored.
+    """
+
+    def test_an_overlong_link_does_not_lose_the_rest_of_the_sweep(
+        self, market: tuple[Session, list[Instrument]]
+    ) -> None:
+        session, (semi, chem, _) = market
+        overlong = {
+            "title": "테스트화학 신제품",
+            "description": "",
+            "originallink": f"https://{HOST}/" + "x" * 1_200,
+            "link": "https://n.news.naver.com/long",
+            "pubDate": "Mon, 21 Sep 2026 14:03:00 +0900",
+        }
+        pages = {
+            "테스트반도체": [[article(slug="kept", title="테스트반도체 수주")]],
+            "테스트화학": [[overlong]],
+        }
+
+        run = run_collector(collector_over(pages), session)
+
+        assert run.status in (CollectorStatus.SUCCESS, CollectorStatus.PARTIAL)
+        assert len(mentions(session, semi.instrument_id)) == 1
+        assert mentions(session, chem.instrument_id) == []
+
+    def test_a_lone_surrogate_does_not_lose_the_rest_of_the_sweep(
+        self, market: tuple[Session, list[Instrument]]
+    ) -> None:
+        session, (semi, _, _) = market
+        title = "테스트반도체 " + LONE_SURROGATE + " 수주"
+        pages = {"테스트반도체": [[article(slug="kept2", title=title)]]}
+
+        run = run_collector(collector_over(pages), session)
+
+        assert run.status in (CollectorStatus.SUCCESS, CollectorStatus.PARTIAL)
+        assert len(mentions(session, semi.instrument_id)) == 1
+
+
+class TestTheHeaderCountsWhoWasAsked:
+    """A sweep stopped by its budget after two companies must not say sixty.
+
+    The header used to count the companies the run meant to ask. A company
+    refused before its first request was never asked either, and counting it
+    would make the number one better than the truth every time.
+    """
+
+    def test_a_budget_stop_reports_only_the_companies_it_reached(
+        self, market: tuple[Session, list[Instrument]]
+    ) -> None:
+        from app.collectors.quota import QuotaExhausted
+        from app.core.quota import LimitSource, Quota
+
+        session, _ = market
+        c = collector_over({})
+        quota = Quota(
+            key="probe",
+            group="naver_search",
+            official_limit=4,
+            window=timedelta(hours=24),
+            limit_source=LimitSource.OFFICIAL,
+            note="test",
+        )
+        allowed = 2
+        used = 0
+        inner = c._get
+
+        def metered(client: Any, *, query: str, start: int) -> dict[str, Any]:
+            nonlocal used
+            if used >= allowed:
+                raise QuotaExhausted(quota=quota, spent=used, allowed=allowed, retry_after=None)
+            used += 1
+            return inner(client, query=query, start=start)
+
+        c._get = metered  # type: ignore[assignment,method-assign]
+
+        result = c.collect(session)
+
+        assert result.detail is not None
+        asked, total = result.detail.split(" instruments since")[0].split(" of ")
+        assert int(asked) == allowed
+        assert result.partial is True
+        unasked = int(total) - allowed
+        assert any(f"{unasked} instruments were never asked" in w for w in result.warnings)

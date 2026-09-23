@@ -385,7 +385,7 @@ class KrxMasterCollector(BaseCollector):
                 # a reason to raise `ValueError` out of a collector.
                 try:
                     total = int(payload.get("total_page") or 0)
-                except (TypeError, ValueError) as exc:
+                except (TypeError, ValueError, OverflowError) as exc:
                     raise UpstreamUnavailableError(
                         f"DART list.json gave total_page={payload.get('total_page')!r}"
                     ) from exc

@@ -588,3 +588,22 @@ class TestWhatCountsAsALoss:
 
         assert found == []
         assert dropped == 0
+
+
+class TestAPageCountThatOverflows:
+    """`1e400` is a valid JSON number, and `int()` of it raises `OverflowError`.
+
+    The guard caught `TypeError` and `ValueError` — the value's actual failure
+    was a third kind, which is the shape this codebase kept repeating.
+    """
+
+    def test_an_infinite_page_count_is_an_outage(self) -> None:
+        c, client = answering(
+            lambda _r: httpx.Response(
+                200,
+                content=b'{"status": "000", "total_page": 1e400, "list": []}',
+                headers={"content-type": "application/json"},
+            )
+        )
+        with client, pytest.raises(UpstreamUnavailableError, match="total_page"):
+            c.boards_from_filings(client, end=date(2026, 9, 22))

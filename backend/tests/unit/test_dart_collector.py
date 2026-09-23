@@ -593,3 +593,251 @@ class TestDartResponseShapes:
         )
 
         assert rows == []
+
+
+class TestDartValuesHaveToMeanSomething:
+    """Parsed is not the same as plausible.
+
+    Each of these converts without complaint and then either raises one step
+    later — outside any handler that knows what it means — or, worse, becomes
+    a number that poisons everything computed from it.
+    """
+
+    def test_a_report_naming_year_zero_has_no_period(self) -> None:
+        assert report_period_end("사업보고서 (0000.12)") is None
+
+    def test_a_report_naming_a_real_year_still_does(self) -> None:
+        assert report_period_end("사업보고서 (2024.12)") == date(2024, 12, 31)
+
+    def test_not_a_number_is_not_an_amount(self) -> None:
+        """`Decimal("NaN")` parses. Stored, it poisons every ratio it touches."""
+        for raw in ("NaN", "nan", "Infinity", "-Infinity", "sNaN"):
+            assert _parse_amount(raw) is None, raw
+
+    def test_a_real_amount_is_still_an_amount(self) -> None:
+        assert _parse_amount("1,234,567") == Decimal("1234567")
+
+    @pytest.mark.parametrize("raw", ["²", "123", "0", "13", "", "12월"])
+    def test_a_fiscal_month_must_be_a_month(self, raw: str) -> None:
+        """`"²".isdigit()` is True; `"123"` converts and then refuses every
+        period one at a time, silently, leaving the company with nothing."""
+        from app.collectors.base import UpstreamUnavailableError
+
+        c, client = TestDartResponseShapes.answering({"status": "000", "acc_mt": raw})
+        with client, pytest.raises(UpstreamUnavailableError, match="acc_mt"):
+            c._fiscal_end_month(client, "00126380")  # type: ignore[arg-type]
+
+    def test_a_receipt_the_calendar_cannot_place_is_skipped(self) -> None:
+        """1900 and 2300 are valid dates and have no next session."""
+        c, client = TestDartResponseShapes.answering(
+            {
+                "status": "000",
+                "total_page": 1,
+                "list": [
+                    {"rcept_no": "19000315000001", "report_nm": "사업보고서 (1899.12)"},
+                    {"rcept_no": "23000315000001", "report_nm": "사업보고서 (2299.12)"},
+                    {"rcept_no": "20250315000001", "report_nm": "사업보고서 (2024.12)"},
+                ],
+            }
+        )
+        with client:
+            rows = c._collect_filings(  # type: ignore[attr-defined]
+                client,
+                corp_code="00126380",
+                instrument_id=1,
+                calendar=MarketCalendar(Market.KR),
+            )
+
+        assert [r.accession for r in rows] == ["20250315000001"]
+
+    def test_an_account_filed_on_a_date_the_calendar_cannot_place_is_skipped(self) -> None:
+        account = next(iter(ACCOUNT_MAP))
+        c, _client = TestDartResponseShapes.answering({})
+        rows, _ = c._to_rows(
+            [{"account_id": account, "rcept_no": "23000315000001", "thstrm_amount": "100"}],
+            instrument_id=1,
+            business_year=2025,
+            fiscal_end_month=12,
+            calendar=MarketCalendar(Market.KR),
+        )
+
+        assert rows == []
+
+    def test_an_infinite_page_count_stops_the_register(self) -> None:
+        c, client = TestDartResponseShapes.answering({})
+        import httpx
+
+        client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _r: httpx.Response(
+                    200,
+                    content=b'{"status": "000", "total_page": 1e400, "list": [{"rcept_no": "20250315000001", "report_nm": "x"}]}',
+                    headers={"content-type": "application/json"},
+                )
+            )
+        )
+        with client:
+            rows = c._collect_filings(  # type: ignore[attr-defined]
+                client,
+                corp_code="00126380",
+                instrument_id=1,
+                calendar=MarketCalendar(Market.KR),
+            )
+
+        assert len(rows) == 1
+
+    def test_a_page_count_nobody_can_trust_is_capped(self) -> None:
+        """Metered now: an unbounded register would spend the day on one company."""
+        import httpx
+
+        from app.collectors.dart_fundamental import MAX_FILING_PAGES
+
+        served = 0
+
+        def handler(_r: httpx.Request) -> httpx.Response:
+            nonlocal served
+            served += 1
+            if served > MAX_FILING_PAGES + 5:
+                raise AssertionError(f"paged past the cap: {served}")
+            return httpx.Response(
+                200,
+                json={
+                    "status": "000",
+                    "total_page": 10**9,
+                    "list": [{"rcept_no": "20250315000001", "report_nm": "x"}],
+                },
+            )
+
+        c, _ = TestDartResponseShapes.answering({})
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            c._collect_filings(  # type: ignore[attr-defined]
+                client,
+                corp_code="00126380",
+                instrument_id=1,
+                calendar=MarketCalendar(Market.KR),
+            )
+
+        assert served == MAX_FILING_PAGES
+
+
+class TestABudgetThatRunsOutMidSweep:
+    """The record has to say what the run actually did.
+
+    Uncaught, the refusal made the run SKIPPED with nothing read — while the
+    rows it had already written were committed alongside the run row anyway.
+    Observed: SKIPPED, read 0, saved 0, over twelve filings and eighteen facts.
+    """
+
+    @staticmethod
+    def sweep(monkeypatch: pytest.MonkeyPatch, *, allow: int) -> object:
+        import httpx
+
+        import app.collectors.dart_fundamental as module
+        from app.collectors.quota import QuotaExhausted
+        from app.core.quota import LimitSource, Quota
+        from app.models import Instrument
+
+        companies = []
+        for i in range(3):
+            inst = Instrument(market=Market.KR, name=f"회사{i}", kr_corp_code=f"0000000{i}")
+            inst.instrument_id = i + 1
+            companies.append(inst)
+
+        monkeypatch.setattr(module.instrument_repo, "list_active", lambda *a, **k: companies)
+        monkeypatch.setattr(module.filing_repo, "save_filings", lambda _s, rows: len(rows))
+        monkeypatch.setattr(module.fundamental_repo, "save_facts", lambda _s, rows: len(rows))
+
+        account = next(iter(ACCOUNT_MAP))
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path.endswith("company.json"):
+                return httpx.Response(200, json={"status": "000", "acc_mt": "12"})
+            if path.endswith("list.json"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "status": "000",
+                        "total_page": 1,
+                        "list": [
+                            {"rcept_no": "20250315000001", "report_nm": "사업보고서 (2024.12)"}
+                        ],
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "status": "000",
+                    "list": [
+                        {
+                            "account_id": account,
+                            "rcept_no": "20250315000001",
+                            "thstrm_amount": "100",
+                        }
+                    ],
+                },
+            )
+
+        real_client = httpx.Client
+        monkeypatch.setattr(
+            module.httpx,
+            "Client",
+            lambda *a, **k: real_client(transport=httpx.MockTransport(handler)),
+        )
+
+        quota = Quota(
+            key="probe",
+            group="dart",
+            official_limit=10,
+            window=__import__("datetime").timedelta(hours=24),
+            limit_source=LimitSource.OFFICIAL,
+            note="test",
+        )
+
+        class Guard:
+            def __init__(self) -> None:
+                self.used = 0
+
+            def reserve(
+                self, group: str, endpoint: str, *, calls: int = 1, now: object = None
+            ) -> None:
+                if self.used >= allow:
+                    raise QuotaExhausted(quota=quota, spent=allow, allowed=allow, retry_after=None)
+                self.used += 1
+
+        c = module.DartFundamentalCollector(guard=Guard())  # type: ignore[arg-type]
+        c._key = "test-key"
+        c._bucket = type("NoWait", (), {"acquire": lambda self: None})()  # type: ignore[assignment]
+
+        class Session:
+            def commit(self) -> None:
+                return None
+
+        return c.collect(Session())  # type: ignore[arg-type]
+
+    def test_a_refusal_after_work_is_partial_and_counts_the_work(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Seven calls per company: profile, one register page, five years.
+        result = self.sweep(monkeypatch, allow=10)
+
+        assert result.partial is True  # type: ignore[attr-defined]
+        assert result.items_saved > 0  # type: ignore[attr-defined]
+        assert result.detail.startswith("1 of 3 instruments")  # type: ignore[attr-defined]
+
+    def test_a_refusal_partway_through_a_company_still_counts_what_it_wrote(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The second company's register lands before its accounts are refused."""
+        full = self.sweep(monkeypatch, allow=7)
+        partway = self.sweep(monkeypatch, allow=9)
+
+        assert partway.items_saved > full.items_saved  # type: ignore[attr-defined]
+
+    def test_a_refusal_before_anything_is_gathered_is_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.collectors.quota import QuotaExhausted
+
+        with pytest.raises(QuotaExhausted):
+            self.sweep(monkeypatch, allow=0)

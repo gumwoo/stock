@@ -120,6 +120,24 @@ class MarketCalendar:
         result: date = self._cal.first_session.date()
         return result
 
+    @property
+    def last_session(self) -> date:
+        """Latest session this calendar knows about, roughly a year ahead."""
+        result: date = self._cal.last_session.date()
+        return result
+
+    def covers(self, day: date) -> bool:
+        """Whether a session can be found after `day` at all.
+
+        Asked before trusting a date from outside the process. Past the ends
+        the answer is an exception — our own `ValueError` below the start, the
+        library's `DateOutOfBounds` above the end — and a collector that
+        listed those one by one would miss the next, which is how the same
+        defect kept reappearing in this codebase. A question with a yes-or-no
+        answer cannot be half-guarded.
+        """
+        return self.first_session <= day < self.last_session
+
     def next_session(self, day: date) -> date:
         """The first trading session strictly after `day`.
 

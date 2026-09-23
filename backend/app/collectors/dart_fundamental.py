@@ -32,6 +32,7 @@ from __future__ import annotations
 import calendar
 import logging
 import re
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -49,7 +50,7 @@ from app.collectors.base import (
     as_rows,
     as_text,
 )
-from app.collectors.quota import QuotaGuard
+from app.collectors.quota import QuotaExhausted, QuotaGuard
 from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
@@ -186,6 +187,18 @@ def fiscal_period_bounds(business_year: int, fiscal_end_month: int) -> tuple[dat
 _REPORT_PERIOD = re.compile(r"\((\d{4})\.(\d{2})\)")
 
 
+# The range of years a DART periodic report can plausibly name. Electronic
+# disclosure began in 1999; the ceiling only has to exclude nonsense.
+REPORT_YEAR_FLOOR = 1990
+REPORT_YEAR_CEILING = 2100
+
+# One company's periodic filings since 1999 fill about two pages of a hundred.
+# The cap is far above that and exists so a `total_page` we cannot trust stops
+# costing calls: this collector is metered now, and an unbounded loop would
+# spend the whole DART allowance on one company.
+MAX_FILING_PAGES = 30
+
+
 def report_period_end(report_nm: str) -> date | None:
     """The fiscal period a periodic report covers, from its published name.
 
@@ -204,7 +217,9 @@ def report_period_end(report_nm: str) -> date | None:
     if match is None:
         return None
     year, month = int(match.group(1)), int(match.group(2))
-    if not 1 <= month <= 12:
+    # Plausible years only. `(0000.12)` parses and then `date(0, ...)` raises,
+    # which is a name DART never meant to publish rather than a period.
+    if not 1 <= month <= 12 or not REPORT_YEAR_FLOOR <= year <= REPORT_YEAR_CEILING:
         return None
     return date(year, month, calendar.monthrange(year, month)[1])
 
@@ -223,6 +238,14 @@ def filed_date_from_receipt(rcept_no: str) -> date | None:
 # by business year and returns nothing for years before XBRL filing was in
 # place, so a larger number costs empty requests rather than finding more.
 MAX_YEARS_BACK = 15
+
+
+@dataclass(slots=True)
+class _Tally:
+    """Running totals for one collection run."""
+
+    read: int = 0
+    saved: int = 0
 
 
 class DartFundamentalCollector(BaseCollector):
@@ -296,13 +319,18 @@ class DartFundamentalCollector(BaseCollector):
     def _fiscal_end_month(self, client: httpx.Client, corp_code: str) -> int:
         """The company's fiscal year-end month, without which dates are guesses."""
         payload = self._get(client, "company.json", corp_code=corp_code)
-        raw = str(payload.get("acc_mt") or "").strip()
-        if not raw.isdigit():
+        raw = as_text(payload, "acc_mt")
+        # ASCII digits, and a real month. `"²".isdigit()` is True and `int("²")`
+        # raises; `"123"` converts cleanly and then every fiscal period built
+        # from it is refused one at a time, silently, leaving the company with
+        # no financials and no error.
+        month = int(raw) if raw.isascii() and raw.isdigit() else 0
+        if not 1 <= month <= 12:
             raise UpstreamUnavailableError(
-                f"DART gave no usable acc_mt for {corp_code}; fiscal period dates "
-                "cannot be derived and guessing December would shift every period"
+                f"DART gave no usable acc_mt for {corp_code} ({raw!r}); fiscal period "
+                "dates cannot be derived and guessing December would shift every period"
             )
-        return int(raw)
+        return month
 
     # --- collection -------------------------------------------------------
 
@@ -321,55 +349,96 @@ class DartFundamentalCollector(BaseCollector):
             return CollectionResult(detail="no Korean instruments with a DART corp code")
 
         krx = MarketCalendar(Market.KR)
-        read = saved = 0
         warnings: list[str] = []
 
+        asked = 0
+        # Shared with `_collect_one` and updated as it goes, so a company
+        # interrupted halfway by the budget still counts what it wrote. Those
+        # rows are committed with the run either way; a tally returned only on
+        # success would leave them out of the record.
+        tally = _Tally()
         with httpx.Client() as client:
             for instrument in instruments:
-                corp_code = str(instrument.kr_corp_code)
-                fiscal_end_month = self._fiscal_end_month(client, corp_code)
-
-                saved += filing_repo.save_filings(
-                    session, self._collect_filings(client, corp_code, instrument.instrument_id, krx)
-                )
-
-                for year in range(today.year, today.year - self.years_back, -1):
-                    items = self._accounts(client, corp_code=corp_code, year=year)
-                    if not items:
-                        continue
-
-                    rows, seen = self._to_rows(
-                        items,
-                        instrument_id=instrument.instrument_id,
-                        business_year=year,
-                        fiscal_end_month=fiscal_end_month,
-                        calendar=krx,
+                try:
+                    self._collect_one(
+                        client,
+                        session,
+                        instrument,
+                        today=today,
+                        krx=krx,
+                        warnings=warnings,
+                        tally=tally,
                     )
-                    read += seen
-                    saved += fundamental_repo.save_facts(session, rows)
-
-                    # A year that recognises almost nothing is the signature of
-                    # a taxonomy rename, not of a company reporting less. It
-                    # looks like a successful collection from every angle
-                    # except this count, which is why the count exists: the
-                    # `ifrs` to `ifrs-full` change cost four years of Korean
-                    # fundamentals and announced itself nowhere.
-                    found = {r.concept for r in rows}
-                    if len(found) < CONCEPTS_PER_REPORT:
-                        missing = sorted(set(ACCOUNT_MAP.values()) - found)
-                        warnings.append(
-                            f"{instrument.name} {year}: recognised {len(found)} of "
-                            f"{CONCEPTS_PER_REPORT} concepts, missing {', '.join(missing)}"
-                        )
+                except QuotaExhausted as refused:
+                    # Refused before anything was gathered: SKIPPED is the
+                    # honest status, and the exception already says why.
+                    if tally.read == 0 and tally.saved == 0:
+                        raise
+                    # Otherwise the run did work, and letting this escape
+                    # records it as SKIPPED with nothing read — while the
+                    # rows it wrote are committed alongside the run row
+                    # regardless. Observed: SKIPPED, read 0, saved 0, over
+                    # twelve filings and eighteen facts that were really there.
+                    warnings.append(str(refused))
+                    break
+                asked += 1
 
         session.commit()
         return CollectionResult(
-            items_read=read,
-            items_saved=saved,
+            items_read=tally.read,
+            items_saved=tally.saved,
             partial=bool(warnings),
             warnings=warnings,
-            detail=f"{len(instruments)} instruments, {self.years_back} years each",
+            detail=f"{asked} of {len(instruments)} instruments, {self.years_back} years each",
         )
+
+    def _collect_one(
+        self,
+        client: httpx.Client,
+        session: Session,
+        instrument: Any,
+        *,
+        today: date,
+        krx: MarketCalendar,
+        warnings: list[str],
+        tally: _Tally,
+    ) -> None:
+        """One company's filings and financials, added to `tally` as they land."""
+        corp_code = str(instrument.kr_corp_code)
+        fiscal_end_month = self._fiscal_end_month(client, corp_code)
+
+        tally.saved += filing_repo.save_filings(
+            session, self._collect_filings(client, corp_code, instrument.instrument_id, krx)
+        )
+
+        for year in range(today.year, today.year - self.years_back, -1):
+            items = self._accounts(client, corp_code=corp_code, year=year)
+            if not items:
+                continue
+
+            rows, seen = self._to_rows(
+                items,
+                instrument_id=instrument.instrument_id,
+                business_year=year,
+                fiscal_end_month=fiscal_end_month,
+                calendar=krx,
+            )
+            tally.read += seen
+            tally.saved += fundamental_repo.save_facts(session, rows)
+
+            # A year that recognises almost nothing is the signature of
+            # a taxonomy rename, not of a company reporting less. It
+            # looks like a successful collection from every angle
+            # except this count, which is why the count exists: the
+            # `ifrs` to `ifrs-full` change cost four years of Korean
+            # fundamentals and announced itself nowhere.
+            found = {r.concept for r in rows}
+            if len(found) < CONCEPTS_PER_REPORT:
+                missing = sorted(set(ACCOUNT_MAP.values()) - found)
+                warnings.append(
+                    f"{instrument.name} {year}: recognised {len(found)} of "
+                    f"{CONCEPTS_PER_REPORT} concepts, missing {', '.join(missing)}"
+                )
 
     def _accounts(self, client: httpx.Client, *, corp_code: str, year: int) -> list[Any]:
         """One year of account rows for one company.
@@ -425,9 +494,12 @@ class DartFundamentalCollector(BaseCollector):
             for item in items:
                 rcept_no = as_text(item, "rcept_no")
                 filed_at = filed_date_from_receipt(rcept_no)
-                if filed_at is None:
+                # A receipt date the calendar cannot place — before it begins
+                # or past its horizon — has no next session to be available
+                # from, and asking raises rather than answering.
+                if filed_at is None or not calendar.covers(filed_at):
                     continue
-                report_nm = str(item.get("report_nm") or "").strip()
+                report_nm = as_text(item, "report_nm")
                 rows.append(
                     FilingRow(
                         instrument_id=instrument_id,
@@ -442,9 +514,9 @@ class DartFundamentalCollector(BaseCollector):
 
             try:
                 total_pages = int(payload.get("total_page") or 1)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 break
-            if page_no >= total_pages:
+            if page_no >= min(total_pages, MAX_FILING_PAGES):
                 break
             page_no += 1
 
@@ -470,10 +542,12 @@ class DartFundamentalCollector(BaseCollector):
 
             rcept_no = as_text(item, "rcept_no")
             filed_at = filed_date_from_receipt(rcept_no)
-            if filed_at is None:
+            # Same rule as the filing register: a date the calendar cannot
+            # place has no next session, and asking raises.
+            if filed_at is None or not calendar.covers(filed_at):
                 continue
 
-            currency = str(item.get("currency") or "KRW").strip() or "KRW"
+            currency = as_text(item, "currency") or "KRW"
             unit = f"{currency}/shares" if concept in PER_SHARE else currency
 
             for column, years_back in PERIOD_COLUMNS:
@@ -521,6 +595,11 @@ def _parse_amount(raw: object) -> Decimal | None:
     if not text or text == "-":
         return None
     try:
-        return Decimal(text)
+        value = Decimal(text)
     except InvalidOperation:
         return None
+    # `Decimal("NaN")` and `Decimal("Infinity")` parse without complaint, and
+    # either one stored as a reported amount poisons every ratio built on it
+    # without raising anywhere. An amount that is not a number was not
+    # reported.
+    return value if value.is_finite() else None
