@@ -82,8 +82,11 @@ def session(engine: object) -> Iterator[Session]:
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
         _clear_test_runs(s)
-        yield s
-        _clear_test_runs(s)
+        try:
+            yield s
+        finally:
+            s.rollback()
+            _clear_test_runs(s)
 
 
 # --- test doubles ---------------------------------------------------------
@@ -297,6 +300,9 @@ class TestARefusedArchiveIsAnOutage:
         from app.collectors.krx_master import KrxMasterCollector
 
         c = KrxMasterCollector(guard=None, fill_gaps=False)  # type: ignore[arg-type]
+        # A test name, or each run files a FAILED `KRX_MASTER` beside the real
+        # history — 273 of them had built up before this line existed.
+        c.name = "MASTER_UNDER_TEST"
         c._key = "test-key"
         body = (
             f"<result><status>{status}</status><message>테스트 거절</message></result>"
