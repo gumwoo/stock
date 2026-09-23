@@ -223,7 +223,7 @@ class Yield:
 # The relevance rule's version. Bump it whenever `judge` would reach a
 # different verdict on the same text, and `rejudge` will find and re-decide
 # exactly the hits an older rule decided.
-RULE_VERSION = 2
+RULE_VERSION = 3
 
 # Words that put a company, rather than the ordinary word, in the sentence.
 # Weak on their own — "투자" or "계약" turn up in anything — so two are needed.
@@ -724,35 +724,42 @@ class NaverNewsCollector(BaseCollector):
         # `(주)원림`, `원림㈜` — with the name ending, or starting, where the mark
         # says it does. Comparing whitespace-free text confirmed 남성 on
         # `㈜남성산업`, a different firm whose name merely begins the same way.
+        # No space either side: across one the mark belongs to a neighbour, as
+        # in `지원 대상 (주)한빛` or `삼성전자㈜ 남성 임원`.
         for mark in _CORPORATE_MARKS:
             escaped = re.escape(mark)
-            for hit in re.finditer(
-                escaped + r"\s*(?:" + pattern.pattern + ")", text, re.IGNORECASE
-            ):
+            for hit in re.finditer(escaped + "(?:" + pattern.pattern + ")", text, re.IGNORECASE):
                 if _word_ends_at(text, hit.end(), _ATTACHED_PARTICLES):
                     return "corporate_mark"
-            for hit in re.finditer(
-                "(?:" + pattern.pattern + r")\s*" + escaped, text, re.IGNORECASE
-            ):
+            for hit in re.finditer("(?:" + pattern.pattern + ")" + escaped, text, re.IGNORECASE):
                 if not _is_hangul(text[hit.start() - 1 : hit.start()] or " "):
                     return "corporate_mark"
         return None
 
     @classmethod
-    def stands_as_a_word(cls, text: str, name: str, conflicts: Sequence[str]) -> bool:
+    def stands_as_a_word(
+        cls, text: str, name: str, conflicts: Sequence[str], *, whole: bool = False
+    ) -> bool:
         """Whether the name occurs at the start of a word, not inside another.
 
-        Only the left edge is checked. Particles attach on the right — `원림은`,
-        `원림이` — so a following syllable proves nothing, but nothing attaches
-        in front of a company name. A Hangul syllable there means the match is
-        the middle of some other word: `상보` inside `예상보다`, `레이` inside
-        `리레이팅`. Two context words nearby were enough to confirm those.
+        The left edge always. Nothing attaches in front of a company name, so a
+        Hangul syllable there means the match is the middle of some other word:
+        `상보` inside `예상보다`, `레이` inside `리레이팅`. Two context words
+        nearby were enough to confirm those.
+
+        The right edge only when `whole`. Particles attach there — `원림은`,
+        `원림이` — so a following syllable proves nothing by itself; it does
+        when it is not a particle. `태양광`, `동서발전`, `삼일회계법인` and
+        `배럴당` start with a listed name and are other words, and in a
+        financial article they come with context words of their own.
         """
         covers = [span for other in conflicts for span in cls.spans(text, other)]
         for start, end in cls.spans(text, name):
             if cls.swallowed_by((start, end), covers):
                 continue
-            if not _is_hangul(text[start - 1 : start] or " "):
+            if _is_hangul(text[start - 1 : start] or " "):
+                continue
+            if not whole or _word_ends_at(text, end, _ATTACHED_PARTICLES):
                 return True
         return False
 
@@ -808,7 +815,12 @@ class NaverNewsCollector(BaseCollector):
             return Judgement(HitDecision.CONFIRMED, method, f"strong:{strong}")
         weak = cls.weak_signals(text)
         if len(weak) >= WEAK_SIGNALS_NEEDED:
-            return Judgement(HitDecision.CONFIRMED, method, "weak:" + "+".join(weak[:3]))
+            # Context words say the article is financial, not which company it
+            # is about, so the name itself must be a word here and not the front
+            # of a compound.
+            if cls.stands_as_a_word(text, name, conflicts, whole=True):
+                return Judgement(HitDecision.CONFIRMED, method, "weak:" + "+".join(weak[:3]))
+            return Judgement(HitDecision.PENDING, method, "context:compound")
         return Judgement(HitDecision.PENDING, method, "context:" + (weak[0] if weak else "none"))
 
     @classmethod

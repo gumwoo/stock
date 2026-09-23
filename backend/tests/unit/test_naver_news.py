@@ -1084,6 +1084,22 @@ class TestWhereTheWordEnds:
             "CONFIRMED"
         )
 
+    def test_context_words_do_not_confirm_the_front_of_a_compound(self) -> None:
+        """A financial article about 태양광 is not about a company called 태양."""
+        for title, summary, name in (
+            ("태양광 발전소 투자 계약 체결", "", "태양"),
+            ("동서발전, 해상풍력 투자 계약", "", "동서"),
+            ("삼일회계법인 감사의견", "공시 상장폐지", "삼일"),
+            ("[마감시황] 코스피 상승 국제유가 배럴당 80달러", "투자자 주가", "배럴"),
+        ):
+            assert judge(title, summary, name=name, symbol=None) == (
+                "PENDING",
+                "context:compound",
+            ), title
+
+    def test_context_words_still_confirm_the_name_as_a_word(self) -> None:
+        assert judge("정원 이야기", "원림의 3분기 실적과 수주 현황")[0] == "CONFIRMED"
+
     def test_a_corporate_mark_covers_only_the_name_it_marks(self) -> None:
         """`㈜남성산업` is another firm whose name begins the same way."""
         assert judge("가을 신상품", "㈜남성산업 관계자는", name="남성", symbol=None)[0] == "PENDING"
@@ -1095,6 +1111,11 @@ class TestWhereTheWordEnds:
         assert judge("가을 신상품", "남성㈜ 관계자", name="남성", symbol=None) == (
             "CONFIRMED",
             "strong:corporate_mark",
+        )
+        # Across a space the mark belongs to the neighbour.
+        assert judge("지원 대상 (주)한빛 등 5개사 선정", name="대상", symbol=None)[0] == ("PENDING")
+        assert judge("임원 현황", "삼성전자㈜ 남성 임원 비율", name="남성", symbol=None)[0] == (
+            "PENDING"
         )
         # The name stands alone elsewhere, so only the mark can decide, and
         # `대남성㈜` marks a different firm.
