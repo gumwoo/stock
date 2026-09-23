@@ -192,6 +192,14 @@ _REPORT_PERIOD = re.compile(r"\((\d{4})\.(\d{2})\)")
 REPORT_YEAR_FLOOR = 1990
 REPORT_YEAR_CEILING = 2100
 
+# Column limits in `filing` and `fundamental`. A value past any of them is
+# refused at the flush, which rolls back the run's DART rows entirely.
+FORM_WIDTH = 24
+UNIT_WIDTH = 32
+# `Numeric(30, 6)` leaves 24 digits before the point. An amount at or past
+# 10**24 won is not a reported figure, and the column cannot hold it.
+AMOUNT_CEILING = Decimal(10) ** 24
+
 # One company's periodic filings since 1999 fill about two pages of a hundred.
 # The cap is far above that and exists so a `total_page` we cannot trust stops
 # costing calls: this collector is metered now, and an unbounded loop would
@@ -225,8 +233,13 @@ def report_period_end(report_nm: str) -> date | None:
 
 
 def filed_date_from_receipt(rcept_no: str) -> date | None:
-    """DART receipt numbers begin with the filing date as YYYYMMDD."""
-    if len(rcept_no) < 8 or not rcept_no[:8].isdigit():
+    """DART receipt numbers begin with the filing date as YYYYMMDD.
+
+    The whole number is fourteen ASCII digits, and it is stored as the
+    accession, so anything else is refused here rather than at a column that
+    holds thirty-two. A number that only starts like a receipt is not one.
+    """
+    if len(rcept_no) != 14 or not (rcept_no.isascii() and rcept_no.isdigit()):
         return None
     try:
         return date(int(rcept_no[:4]), int(rcept_no[4:6]), int(rcept_no[6:8]))
@@ -503,7 +516,7 @@ class DartFundamentalCollector(BaseCollector):
                 rows.append(
                     FilingRow(
                         instrument_id=instrument_id,
-                        form=report_nm,
+                        form=report_nm[:FORM_WIDTH],
                         filed_at=filed_at,
                         period_of_report=report_period_end(report_nm),
                         available_at=calendar.next_session_open(filed_at),
@@ -549,6 +562,10 @@ class DartFundamentalCollector(BaseCollector):
 
             currency = as_text(item, "currency") or "KRW"
             unit = f"{currency}/shares" if concept in PER_SHARE else currency
+            if len(unit) > UNIT_WIDTH:
+                # A currency code is three letters. One that makes the unit
+                # overflow its column is not a currency.
+                continue
 
             for column, years_back in PERIOD_COLUMNS:
                 seen += 1
@@ -602,4 +619,6 @@ def _parse_amount(raw: object) -> Decimal | None:
     # either one stored as a reported amount poisons every ratio built on it
     # without raising anywhere. An amount that is not a number was not
     # reported.
-    return value if value.is_finite() else None
+    if not value.is_finite() or abs(value) >= AMOUNT_CEILING:
+        return None
+    return value

@@ -607,3 +607,29 @@ class TestAPageCountThatOverflows:
         )
         with client, pytest.raises(UpstreamUnavailableError, match="total_page"):
             c.boards_from_filings(client, end=date(2026, 9, 22))
+
+
+class TestStorableIsOneQuestionAskedOnce:
+    """`as_text` refuses what the database would refuse, for every collector."""
+
+    def test_nul_is_not_text(self) -> None:
+        from app.collectors.base import storable
+
+        assert not storable("0012" + chr(0) + "6380")
+        assert as_text({"corp_code": "0012" + chr(0) + "6380"}, "corp_code") == ""
+
+    def test_a_lone_surrogate_is_not_text(self) -> None:
+        from app.collectors.base import storable
+
+        assert not storable("삼성" + chr(0xD83D))
+        assert as_text({"corp_name": "삼성" + chr(0xD83D)}, "corp_name") == ""
+
+    def test_ordinary_text_still_is(self) -> None:
+        from app.collectors.base import storable
+
+        assert storable("삼성전자 (2024.12)")
+        assert as_text({"corp_code": " 00126380 "}, "corp_code") == "00126380"
+
+    def test_an_identifier_is_never_repaired(self) -> None:
+        """Removing the NUL would turn one code into a different, real one."""
+        assert as_text({"corp_code": "00126" + chr(0) + "380"}, "corp_code") != "00126380"

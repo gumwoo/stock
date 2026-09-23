@@ -889,3 +889,66 @@ class TestTinySamplesDoNotBuryBrokenQueries:
 
         assert 0 < small.reject_floor < small.reject_rate
         assert small.reject_floor < large.reject_floor < large.reject_rate
+
+
+NUL = chr(0)
+
+
+class TestNulTravelsTheSameRoadAsTheSurrogate:
+    """PostgreSQL refuses NUL in any text column, and JSON can carry it.
+
+    The surrogate was handled and NUL, arriving by exactly the same road, was
+    not — so one article with it in the title killed the sweep at the flush,
+    after thirty-nine companies' articles were already waiting to be saved.
+    """
+
+    def test_prose_loses_the_character_not_the_article(self) -> None:
+        rows, skipped, _ = NaverNewsCollector.to_rows(
+            [raw_item(title="삼성전자" + NUL + " 실적", description="본" + NUL + "문")], since=None
+        )
+
+        assert len(rows) == 1
+        assert skipped == 0
+        assert NUL not in rows[0][0].title
+        assert NUL not in (rows[0][0].summary or "")
+        assert rows[0][0].title == "삼성전자 실적"
+
+    def test_a_url_carrying_it_is_no_address(self) -> None:
+        rows, skipped, _ = NaverNewsCollector.to_rows(
+            [raw_item(originallink="https://news.example.com/a" + NUL + "b")], since=None
+        )
+
+        assert rows == []
+        assert skipped == 1
+
+    def test_a_mirror_carrying_it_costs_only_the_mirror(self) -> None:
+        rows, _, _ = NaverNewsCollector.to_rows(
+            [raw_item(link="https://n.news.naver.com/a" + NUL)], since=None
+        )
+
+        assert len(rows) == 1
+        assert rows[0][0].naver_url is None
+
+    def test_nothing_that_leaves_to_rows_carries_it(self) -> None:
+        """Every string field, not the ones somebody remembered."""
+        rows, _, _ = NaverNewsCollector.to_rows(
+            [
+                raw_item(
+                    title="가" + NUL,
+                    description="나" + NUL,
+                    link="https://n.news.naver.com/" + NUL,
+                )
+            ],
+            since=None,
+        )
+
+        for row, canonical in rows:
+            for value in (
+                row.title,
+                row.summary,
+                row.url,
+                row.naver_url,
+                row.publisher_host,
+                canonical,
+            ):
+                assert value is None or NUL not in value

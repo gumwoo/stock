@@ -644,3 +644,23 @@ class TestTheHeaderCountsWhoWasAsked:
         assert result.partial is True
         unasked = int(total) - allowed
         assert any(f"{unasked} instruments were never asked" in w for w in result.warnings)
+
+
+class TestNulDoesNotLoseTheSweep:
+    """Measured before the fix: NUL in the fortieth company's title left the
+    run FAILED, the last twenty companies unasked, and the error re-raised."""
+
+    def test_nul_in_a_title_costs_nothing_else(
+        self, market: tuple[Session, list[Instrument]]
+    ) -> None:
+        session, (semi, chem, _) = market
+        pages = {
+            "테스트반도체": [[article(slug="nul-ok", title="테스트반도체 수주")]],
+            "테스트화학": [[article(slug="nul-bad", title="테스트화학" + chr(0) + " 신제품")]],
+        }
+
+        run = run_collector(collector_over(pages), session)
+
+        assert run.status in (CollectorStatus.SUCCESS, CollectorStatus.PARTIAL)
+        assert len(mentions(session, semi.instrument_id)) == 1
+        assert len(mentions(session, chem.instrument_id)) == 1

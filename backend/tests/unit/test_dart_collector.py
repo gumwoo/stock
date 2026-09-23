@@ -841,3 +841,91 @@ class TestABudgetThatRunsOutMidSweep:
 
         with pytest.raises(QuotaExhausted):
             self.sweep(monkeypatch, allow=0)
+
+
+class TestEveryDartValueFitsItsColumn:
+    """A value past a column limit is refused at the flush, and that rolls the
+    run's DART rows back entirely — every company, not the one bad row."""
+
+    def test_a_receipt_number_is_fourteen_ascii_digits(self) -> None:
+        assert filed_date_from_receipt("20250315000001") == date(2025, 3, 15)
+        for bad in (
+            "2025031500000",
+            "202503150000011",
+            "20250315" + "0" * 30,
+            # Full-width digits: `isdigit()` says yes, and they are not a receipt.
+            "".join(chr(0xFF10 + int(d)) for d in "20250315000001"),
+            "2025031500000x",
+        ):
+            assert filed_date_from_receipt(bad) is None, bad
+
+    def test_an_overlong_report_name_is_cut_not_lost(self) -> None:
+        """Losing the filing would make the register say it was never filed."""
+        from app.collectors.dart_fundamental import FORM_WIDTH
+
+        name = "[기재정정][첨부추가]사업보고서 (2024.12) 장문의 부제가 붙은 경우"
+        c, client = TestDartResponseShapes.answering(
+            {
+                "status": "000",
+                "total_page": 1,
+                "list": [{"rcept_no": "20250315000001", "report_nm": name}],
+            }
+        )
+        with client:
+            rows = c._collect_filings(  # type: ignore[attr-defined]
+                client,
+                corp_code="00126380",
+                instrument_id=1,
+                calendar=MarketCalendar(Market.KR),
+            )
+
+        assert len(rows) == 1
+        assert len(rows[0].form) <= FORM_WIDTH
+        assert rows[0].period_of_report == date(2024, 12, 31)
+
+    def test_an_amount_past_the_column_is_not_an_amount(self) -> None:
+        """`Numeric(30, 6)` holds 24 digits before the point."""
+        assert _parse_amount("1" + "0" * 23) == Decimal("1" + "0" * 23)
+        assert _parse_amount("1" + "0" * 24) is None
+        assert _parse_amount("-" + "1" + "0" * 24) is None
+
+    def test_a_currency_that_overflows_the_unit_drops_the_fact(self) -> None:
+        account = next(iter(ACCOUNT_MAP))
+        c, _client = TestDartResponseShapes.answering({})
+        rows, _ = c._to_rows(
+            [
+                {
+                    "account_id": account,
+                    "rcept_no": "20250315000001",
+                    "thstrm_amount": "100",
+                    "currency": "X" * 40,
+                }
+            ],
+            instrument_id=1,
+            business_year=2025,
+            fiscal_end_month=12,
+            calendar=MarketCalendar(Market.KR),
+        )
+
+        assert rows == []
+
+    def test_a_report_name_carrying_nul_is_an_absent_name(self) -> None:
+        c, client = TestDartResponseShapes.answering(
+            {
+                "status": "000",
+                "total_page": 1,
+                "list": [
+                    {"rcept_no": "20250315000001", "report_nm": "사업보고서" + chr(0)},
+                ],
+            }
+        )
+        with client:
+            rows = c._collect_filings(  # type: ignore[attr-defined]
+                client,
+                corp_code="00126380",
+                instrument_id=1,
+                calendar=MarketCalendar(Market.KR),
+            )
+
+        assert len(rows) == 1
+        assert chr(0) not in rows[0].form

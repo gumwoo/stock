@@ -62,6 +62,7 @@ from app.collectors.base import (
     as_object,
     as_rows,
     as_text,
+    storable,
 )
 from app.collectors.quota import QuotaExhausted, QuotaGuard
 from app.config import get_settings
@@ -138,15 +139,6 @@ TRACKING_PARAMS = frozenset(
         "igshid",
     }
 )
-
-
-def _encodable(text: str) -> bool:
-    """Whether this string can be written as UTF-8 at all."""
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return True
 
 
 def _is_hangul(char: str) -> bool:
@@ -291,10 +283,12 @@ class NaverNewsCollector(BaseCollector):
         article's own text survives as text instead of becoming a tag to strip.
         """
         text = _SPACE.sub(" ", html.unescape(_TAG.sub("", raw))).strip()
-        # A lone surrogate — half of a UTF-16 pair, legal inside a JSON string
-        # escape and illegal in UTF-8 — cannot be written to the database, and
+        # Neither a lone surrogate nor NUL can be written to the database, and
         # the refusal comes at the flush that saves the whole sweep. In prose
-        # it is a lost character, so it becomes a replacement character.
+        # each is a lost character: the surrogate becomes a replacement
+        # character and NUL is dropped. A URL gets no such repair — see
+        # `canonical_url`.
+        text = text.replace(chr(0), "")
         return text.encode("utf-8", "replace").decode("utf-8")
 
     @staticmethod
@@ -330,7 +324,7 @@ class NaverNewsCollector(BaseCollector):
         chosen = (originallink or "").strip() or (link or "").strip()
         if not chosen:
             return None
-        if not _encodable(chosen):
+        if not storable(chosen):
             # A URL is an identity, not prose: one that cannot be encoded
             # cannot be hashed or stored, and there is no honest repair.
             return None
@@ -619,9 +613,11 @@ class NaverNewsCollector(BaseCollector):
             # dies before its commit, and everything gathered for every earlier
             # company in the run goes with it.
             naver_url = as_text(item, "link") or None
-            if naver_url is not None and (len(naver_url) > MAX_URL or not _encodable(naver_url)):
+            if naver_url is not None and len(naver_url) > MAX_URL:
                 # The mirror is a location, not the article's identity, so an
-                # unusable one costs the link and keeps the article.
+                # unusable one costs the link and keeps the article. Text the
+                # database cannot hold never gets this far: `as_text` already
+                # returned nothing for it.
                 naver_url = None
             host = cls.publisher_host(canonical)
             if host is not None and len(host) > MAX_HOST:

@@ -131,6 +131,31 @@ def as_rows(value: object, *, source: str) -> list[Any]:
     )
 
 
+# PostgreSQL refuses the NUL character in any text column. It is legal in a
+# JSON string (as an escape), so a provider can send it, and it arrives by the
+# same road a lone surrogate does.
+_NUL = chr(0)
+
+
+def storable(text: str) -> bool:
+    """Whether PostgreSQL can hold this string exactly as it is.
+
+    Two things it cannot: a lone surrogate, which is legal inside a JSON escape
+    and illegal in UTF-8, and NUL, which no text column accepts. Either one is
+    refused at the flush — and the flush saves a whole sweep, so a single value
+    used to discard everything gathered before it. The surrogate was handled
+    one collector at a time and NUL, arriving by the same road, was not; this
+    is the question asked once, where every collector's text passes.
+    """
+    if _NUL in text:
+        return False
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def as_text(row: object, key: str) -> str:
     """A field as text, or empty when it did not arrive as text.
 
@@ -142,7 +167,12 @@ def as_text(row: object, key: str) -> str:
     if not isinstance(row, Mapping):
         return ""
     value = row.get(key)
-    return value.strip() if isinstance(value, str) else ""
+    if not isinstance(value, str) or not storable(value):
+        # A value the database would refuse is treated as absent, the same as
+        # a number where text belonged. Most of these are identifiers, and an
+        # identifier with a character removed is a different identifier.
+        return ""
+    return value.strip()
 
 
 class TokenBucket:
