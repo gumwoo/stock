@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.collectors.naver_news import RULE_VERSION, NaverNewsCollector, rejudge_hits
 from app.config import get_settings
 from app.core.calendar import Market
+from app.core.clock import utc_now
 from app.models import Base, Instrument, SymbolHistory
 from app.models.news import (
     Decider,
@@ -28,6 +29,7 @@ from app.models.news import (
     NewsItem,
     NewsMention,
     NewsQueryHit,
+    NewsRelevanceDecision,
     NewsSource,
 )
 from app.repositories import news_repo
@@ -111,7 +113,6 @@ def hit(
     decision: HitDecision,
     *,
     by: Decider = Decider.RULE,
-    at: datetime = T0,
     version: int = RULE_VERSION,
     snippet: str | None = "",
 ) -> QueryHitRow:
@@ -125,7 +126,6 @@ def hit(
         snippet=snippet,
         rule_version=version,
         decided_by=by,
-        decided_at=at,
     )
 
 
@@ -137,13 +137,29 @@ def mention_pairs(session: Session, inst: int) -> set[int]:
     )
 
 
-def stored(session: Session, item: int, inst: int) -> NewsQueryHit:
+def history(session: Session, item: int, inst: int) -> list[NewsRelevanceDecision]:
+    """Every verdict on the pair, oldest first."""
     session.expire_all()
-    return session.execute(
-        select(NewsQueryHit).where(
-            NewsQueryHit.news_item_id == item, NewsQueryHit.instrument_id == inst
-        )
-    ).scalar_one()
+    return list(
+        session.execute(
+            select(NewsRelevanceDecision)
+            .join(NewsQueryHit, NewsQueryHit.id == NewsRelevanceDecision.query_hit_id)
+            .where(NewsQueryHit.news_item_id == item, NewsQueryHit.instrument_id == inst)
+            .order_by(NewsRelevanceDecision.decided_at, NewsRelevanceDecision.id)
+        ).scalars()
+    )
+
+
+def stored(session: Session, item: int, inst: int) -> NewsRelevanceDecision:
+    """The pair's latest verdict."""
+    return history(session, item, inst)[-1]
+
+
+def asof(session: Session, moment: datetime, item: int, inst: int) -> HitDecision | None:
+    for d in news_repo.decisions_asof(session, moment, instrument_ids=[inst]):
+        if d.news_item_id == item:
+            return d.decision
+    return None
 
 
 class TestTheMentionTableIsAProjection:
@@ -197,51 +213,89 @@ class TestTheMentionTableIsAProjection:
 
 
 class TestWhatAVerdictRead:
-    def test_a_later_sweep_replaces_the_snippet_with_its_own(
+    def test_new_text_is_a_new_verdict_with_its_own_time(
         self, world: tuple[Session, Instrument, list[int]]
     ) -> None:
-        """The stored snippet must be the one the stored verdict read."""
+        """A verdict's time and the text it read must belong to one moment.
+
+        Overwriting the snippet under an unchanged verdict made a row claim a
+        decision reached at one time from text read at another.
+        """
         session, inst, (lead, _, _) = world
-        news_repo.record_hits(
-            session, [hit(lead, inst.instrument_id, HitDecision.PENDING, snippet="first")]
-        )
-        session.commit()
-        news_repo.record_hits(
-            session, [hit(lead, inst.instrument_id, HitDecision.CONFIRMED, snippet="second")]
-        )
-        session.commit()
+        for text_read in ("first", "second"):
+            news_repo.record_hits(
+                session,
+                [hit(lead, inst.instrument_id, HitDecision.CONFIRMED, snippet=text_read)],
+            )
+            session.commit()
 
-        assert stored(session, lead, inst.instrument_id).snippet == "second"
+        first, second = history(session, lead, inst.instrument_id)
+        assert (first.snippet, second.snippet) == ("first", "second")
+        assert first.decided_at < second.decided_at
 
 
-class TestWhenAVerdictWasReached:
-    def test_the_same_verdict_again_keeps_its_time(
-        self, world: tuple[Session, Instrument, list[int]]
-    ) -> None:
-        """A re-judgment that agrees is not a new decision."""
+class TestVerdictsAreAppended:
+    """What was believed at a past moment must stay readable after a re-judgment."""
+
+    def test_agreement_writes_nothing(self, world: tuple[Session, Instrument, list[int]]) -> None:
+        """The same verdict from the same text is not a new decision, and keeps its time."""
         session, inst, (lead, _, _) = world
         news_repo.record_hits(session, [hit(lead, inst.instrument_id, HitDecision.CONFIRMED)])
         session.commit()
-        news_repo.record_hits(
-            session,
-            [hit(lead, inst.instrument_id, HitDecision.CONFIRMED, at=T0 + timedelta(days=3))],
+        again = news_repo.record_hits(
+            session, [hit(lead, inst.instrument_id, HitDecision.CONFIRMED)]
         )
         session.commit()
 
-        assert stored(session, lead, inst.instrument_id).decided_at == T0
+        assert again.decisions_added == 0
+        assert len(history(session, lead, inst.instrument_id)) == 1
 
-    def test_a_changed_verdict_moves_it(self, world: tuple[Session, Instrument, list[int]]) -> None:
-        """A confirmation reached later did not exist earlier."""
-        session, inst, (_, garden, _) = world
-        later = T0 + timedelta(days=3)
-        news_repo.record_hits(session, [hit(garden, inst.instrument_id, HitDecision.PENDING)])
-        session.commit()
+    def test_a_withdrawn_mention_is_still_a_mention_at_its_time(
+        self, world: tuple[Session, Instrument, list[int]]
+    ) -> None:
+        """Confirmed on one day, pending under a newer rule the next.
+
+        The mention table forgets; the history must not. A forward test asking
+        about the first day has to see the confirmation.
+        """
+        session, inst, (lead, _, _) = world
         news_repo.record_hits(
-            session, [hit(garden, inst.instrument_id, HitDecision.CONFIRMED, at=later)]
+            session, [hit(lead, inst.instrument_id, HitDecision.CONFIRMED, version=0)]
         )
         session.commit()
+        confirmed_at = stored(session, lead, inst.instrument_id).decided_at
+        news_repo.record_hits(session, [hit(lead, inst.instrument_id, HitDecision.PENDING)])
+        session.commit()
 
-        assert stored(session, garden, inst.instrument_id).decided_at == later
+        assert [d.decision for d in history(session, lead, inst.instrument_id)] == [
+            HitDecision.CONFIRMED,
+            HitDecision.PENDING,
+        ]
+        assert mention_pairs(session, inst.instrument_id) == set()
+        assert asof(session, confirmed_at, lead, inst.instrument_id) is HitDecision.CONFIRMED
+        assert asof(session, utc_now(), lead, inst.instrument_id) is HitDecision.PENDING
+
+    def test_before_any_verdict_there_is_none(
+        self, world: tuple[Session, Instrument, list[int]]
+    ) -> None:
+        session, inst, (lead, _, _) = world
+        news_repo.record_hits(session, [hit(lead, inst.instrument_id, HitDecision.CONFIRMED)])
+        session.commit()
+        first = stored(session, lead, inst.instrument_id).decided_at
+
+        assert asof(session, first - timedelta(microseconds=1), lead, inst.instrument_id) is None
+
+    def test_the_database_stamps_the_time(
+        self, world: tuple[Session, Instrument, list[int]]
+    ) -> None:
+        """No caller passes a time, so none can date a verdict before it was written."""
+        assert "decided_at" not in QueryHitRow._fields
+        session, inst, (lead, _, _) = world
+        before = utc_now()
+        news_repo.record_hits(session, [hit(lead, inst.instrument_id, HitDecision.CONFIRMED)])
+        session.commit()
+
+        assert stored(session, lead, inst.instrument_id).decided_at >= before - timedelta(seconds=5)
 
 
 class TestARuleNeverOverrulesAModel:
@@ -434,10 +488,10 @@ class TestTheSweepWritesVerdicts:
             session.commit()
 
         verdicts = {
-            row.news_item_id: row.decision
-            for row in session.execute(
-                select(NewsQueryHit).where(NewsQueryHit.instrument_id == inst.instrument_id)
-            ).scalars()
+            d.news_item_id: d.decision
+            for d in news_repo.decisions_asof(
+                session, utc_now(), instrument_ids=[inst.instrument_id]
+            )
         }
         lead_id, garden_id = (
             session.execute(
@@ -489,5 +543,5 @@ class TestAFullSweepFitsInOneCall:
         )
         session.commit()
 
-        assert written == news_repo.HitWrite(0, 0)
+        assert written == news_repo.HitWrite(count, 0, 0)
         assert news_repo.projection_drift(session) == (0, 0)

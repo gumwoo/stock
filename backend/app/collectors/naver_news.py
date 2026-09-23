@@ -1059,7 +1059,6 @@ class NaverNewsCollector(BaseCollector):
                             snippet=row.summary,
                             rule_version=RULE_VERSION,
                             decided_by=Decider.RULE,
-                            decided_at=now,
                         )
                     )
                 mentions += news_repo.record_hits(session, hits).mentions_added
@@ -1192,7 +1191,7 @@ def rejudge_hits(
     """Re-decide every RULE verdict an older rule reached, from what it read.
 
     No request is made: the title is on `news_item`, and the snippet the
-    verdict read is on the hit. Not `news_item.summary` — that is the snippet
+    verdict read is on the verdict itself. Not `news_item.summary` — that is the snippet
     of whichever search stored the article first, and judging another
     company's hit by it turned a confirmed 삼성전자 hit into "absent" the
     moment the rule version moved. Hits with no snippet are counted as
@@ -1202,7 +1201,8 @@ def rejudge_hits(
     handful being re-judged.
 
     Hits whose company is no longer in the Korean universe are counted as
-    skipped and left as they are.
+    skipped and left as they are. A verdict that changes is appended, never
+    written over, so what the older rule decided stays readable at its time.
     """
     stale = news_repo.rule_hits_before(
         session, rule_version=RULE_VERSION, instrument_ids=instrument_ids
@@ -1260,7 +1260,6 @@ def rejudge_hits(
                 snippet=hit.snippet,
                 rule_version=RULE_VERSION,
                 decided_by=Decider.RULE,
-                decided_at=now,
             )
         )
 

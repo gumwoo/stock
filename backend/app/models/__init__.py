@@ -29,6 +29,7 @@ from app.models.news import (
     NewsItem,
     NewsMention,
     NewsQueryHit,
+    NewsRelevanceDecision,
     NewsSource,
 )
 from app.models.portfolio import (
@@ -65,6 +66,7 @@ __all__ = [
     "NewsItem",
     "NewsMention",
     "NewsQueryHit",
+    "NewsRelevanceDecision",
     "NewsSource",
     "PortfolioSnapshot",
     "SampleType",
