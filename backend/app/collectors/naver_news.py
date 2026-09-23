@@ -165,6 +165,11 @@ def _word_ends_at(text: str, pos: int, particles: Collection[str]) -> bool:
     following = text[pos : pos + 1]
     if not following or not _is_hangul(following):
         return True
+    for particle in _LONG_PARTICLES:
+        if text.startswith(particle, pos):
+            rest = text[pos + len(particle) : pos + len(particle) + 1]
+            if not (rest and _is_hangul(rest)):
+                return True
     after_particle = text[pos + 1 : pos + 2]
     return following in particles and not (after_particle and _is_hangul(after_particle))
 
@@ -223,7 +228,7 @@ class Yield:
 # The relevance rule's version. Bump it whenever `judge` would reach a
 # different verdict on the same text, and `rejudge` will find and re-decide
 # exactly the hits an older rule decided.
-RULE_VERSION = 3
+RULE_VERSION = 4
 
 # Words that put a company, rather than the ordinary word, in the sentence.
 # Weak on their own — "투자" or "계약" turn up in anything — so two are needed.
@@ -256,6 +261,33 @@ TITLE_LEAD_PARTICLES = frozenset("은는이가")
 # word: `㈜남성의` is 남성, `㈜남성산업` is not. Two-syllable ones (`에서`,
 # `으로`) are left out on purpose; missing them only sends a hit to PENDING.
 _ATTACHED_PARTICLES = frozenset("은는이가의을를와과도에로")
+# Two-syllable particles and endings common right after a company name in
+# news copy. Without them `카카오에서` and `넷마블으로` would read as compounds.
+_LONG_PARTICLES = (
+    "에서",
+    "으로",
+    "에게",
+    "까지",
+    "부터",
+    "보다",
+    "처럼",
+    "과의",
+    "와의",
+    "에는",
+    "에도",
+    "이다",
+    "이며",
+    "이고",
+    "이나",
+    "만의",
+)
+# Names this short, in Hangul, collide with ordinary words and with the fronts
+# of longer ones often enough that they must stand as words of their own.
+_BOUNDED_SYLLABLES = 3
+# Latin names this short are acronyms, and an acronym is written in capitals:
+# `New York` is not NEW. Longer ones keep matching regardless of case, so
+# `Naver` in English copy still counts as NAVER.
+_CASED_LATIN = 3
 _TITLE_TAG = re.compile(r"^\s*(?:\[[^\]]*\]|<[^>]*>|【[^】]*】|\([^)]*\))\s*")
 _CORPORATE_MARKS = ("(주)", "㈜")
 # Space and the quotation marks a headline may open with, straight and curly.
@@ -536,10 +568,13 @@ class NaverNewsCollector(BaseCollector):
         companies with two-letter Latin names are among the most written about
         in the market.
 
-        The test is deliberately ASCII-only: `SK는` must still match, and the
-        particle is not ASCII. Names carrying any Hangul or punctuation —
-        `SK하이닉스`, `KT&G` — are long or distinctive enough that this rule
-        would only cost matches, so it does not apply to them.
+        The right edge is tested against ASCII only: `SK는` must still match,
+        and the particle is not ASCII. The left edge also refuses Hangul, since
+        nothing attaches in front of a name and `대전TP` is a technopark. Names
+        of three letters or fewer must match in their registered case. Names
+        carrying any Hangul or punctuation — `SK하이닉스`, `KT&G` — are long or
+        distinctive enough that this rule would only cost matches, so it does
+        not apply to them.
         """
         flat = _SPACE.sub("", term)
         if not flat or not flat.isascii() or not flat.isalnum():
@@ -547,6 +582,12 @@ class NaverNewsCollector(BaseCollector):
         start, end = span
         before = text[start - 1 : start] if start else ""
         after = text[end : end + 1]
+        # Hangul in front makes it the tail of another name: `대전TP` is a
+        # technopark, `엣지CS` a product. Behind is fine — `SK는`.
+        if before and _is_hangul(before):
+            return False
+        if len(flat) <= _CASED_LATIN and _SPACE.sub("", text[start:end]) != flat:
+            return False
         return not (before.isascii() and before.isalnum()) and not (
             after.isascii() and after.isalnum()
         )
@@ -677,6 +718,18 @@ class NaverNewsCollector(BaseCollector):
         return "; ".join(parts)
 
     @staticmethod
+    def word_bounded(name: str) -> bool:
+        """Whether this name must stand as a word of its own to count.
+
+        Pure Hangul of three syllables or fewer. Measured on the first full
+        sweep, a sample of 35 confirmed hits for three-syllable names held 14
+        that were not the company, nine of them the front or tail of a longer
+        word: `코리아프로텍`, `마켓스케이프`, `링크드인`, `유니온페이`.
+        """
+        flat = _SPACE.sub("", name)
+        return 0 < len(flat) <= _BOUNDED_SYLLABLES and all(_is_hangul(ch) for ch in flat)
+
+    @staticmethod
     def requires_context(name: str) -> bool:
         """Whether seeing this name is not enough to know the company is meant.
 
@@ -792,13 +845,14 @@ class NaverNewsCollector(BaseCollector):
             text, name=name, aliases=aliases, symbol=symbol, conflicts=conflicts
         )
         absent = "absent"
+        bounded = cls.word_bounded(name)
         if (
             method is MatchMethod.NAME
-            and cls.requires_context(name)
+            and bounded
             and not cls.stands_as_a_word(text, name, conflicts)
         ):
-            # The two syllables appear only inside other words, so the name
-            # was never there. An alias or the stock code may still be.
+            # The syllables appear only inside other words, so the name was
+            # never there. An alias or the stock code may still be.
             method = cls.match_method(
                 text, name="", aliases=aliases, symbol=symbol, conflicts=conflicts
             )
@@ -807,7 +861,13 @@ class NaverNewsCollector(BaseCollector):
             return Judgement(HitDecision.REJECTED, None, absent)
         if method is MatchMethod.SYMBOL:
             return Judgement(HitDecision.CONFIRMED, method, "strong:symbol")
-        if method is MatchMethod.ALIAS or not cls.requires_context(name):
+        if method is MatchMethod.ALIAS:
+            return Judgement(HitDecision.CONFIRMED, method, "alias")
+        if bounded and not cls.stands_as_a_word(text, name, conflicts, whole=True):
+            # Only the front of a longer word: `링크드인`, `유니온페이`,
+            # `태양광`. Held, not rejected — `원림건설` might be the company.
+            return Judgement(HitDecision.PENDING, method, "context:compound")
+        if not cls.requires_context(name):
             return Judgement(HitDecision.CONFIRMED, method, method.value.lower())
 
         strong = cls.strong_signal(title, text, name=name, symbol=symbol)
@@ -815,12 +875,7 @@ class NaverNewsCollector(BaseCollector):
             return Judgement(HitDecision.CONFIRMED, method, f"strong:{strong}")
         weak = cls.weak_signals(text)
         if len(weak) >= WEAK_SIGNALS_NEEDED:
-            # Context words say the article is financial, not which company it
-            # is about, so the name itself must be a word here and not the front
-            # of a compound.
-            if cls.stands_as_a_word(text, name, conflicts, whole=True):
-                return Judgement(HitDecision.CONFIRMED, method, "weak:" + "+".join(weak[:3]))
-            return Judgement(HitDecision.PENDING, method, "context:compound")
+            return Judgement(HitDecision.CONFIRMED, method, "weak:" + "+".join(weak[:3]))
         return Judgement(HitDecision.PENDING, method, "context:" + (weak[0] if weak else "none"))
 
     @classmethod

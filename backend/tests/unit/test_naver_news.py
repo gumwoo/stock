@@ -1124,6 +1124,48 @@ class TestWhereTheWordEnds:
         )
 
 
+class TestShortNamesFromTheFullSweep:
+    """Cases read out of the first full sweep's confirmed hits, rule version 3."""
+
+    def test_a_three_syllable_name_inside_a_longer_one_is_not_there(self) -> None:
+        for title, name in (
+            ("㈜코리아프로텍 'K-에코 레고 블록' 적용 확대", "프로텍"),
+            ("IDC 마켓스케이프 평가 발표", "케이프"),
+            ("동구정다운어르신복지관 인근 가지치기", "정다운"),
+        ):
+            assert judge(title, name=name, symbol=None) == ("REJECTED", "absent:inside_word"), title
+
+    def test_a_three_syllable_name_at_the_front_of_a_word_is_held(self) -> None:
+        for title, name in (
+            ("연준 부총재는 최근 링크드인에 글을 올렸다", "링크드"),
+            ("비자·마스터카드·유니온페이·JCB 결제 지원", "유니온"),
+            ("브랜드만의 유니크한 감성", "유니크"),
+        ):
+            assert judge(title, name=name, symbol=None) == ("PENDING", "context:compound"), title
+
+    def test_the_company_with_a_particle_is_still_confirmed(self) -> None:
+        for title, name in (
+            ("카카오에서 신규 서비스 출시", "카카오"),
+            ("넷마블 '솔: 인챈트' 100일 이벤트", "넷마블"),
+            ("빙그레, 3분기 실적 발표", "빙그레"),
+            ("컴투스가 신작을 공개했다", "컴투스"),
+        ):
+            assert judge(title, name=name, symbol=None) == ("CONFIRMED", "name"), title
+
+    def test_a_short_acronym_is_matched_in_capitals_only(self) -> None:
+        assert judge("UN General Assembly in New York", name="NEW", symbol=None)[0] == "REJECTED"
+        assert judge("NEW, 신작 영화 배급", name="NEW", symbol=None) == ("CONFIRMED", "name")
+
+    def test_a_latin_name_glued_to_hangul_in_front_is_another_name(self) -> None:
+        assert judge("대전TP 원장 후보자 적격 의결", name="TP", symbol=None)[0] == "REJECTED"
+        assert judge("암호자산 식별 솔루션 엣지CS 공개", name="CS", symbol=None)[0] == "REJECTED"
+        assert judge("SK는 3분기 실적을 발표했다", name="SK", symbol=None) == ("CONFIRMED", "name")
+
+    def test_a_longer_latin_name_still_ignores_case(self) -> None:
+        verdict = NaverNewsCollector.judge("Naver shares rose", "", name="NAVER", symbol=None)
+        assert verdict.decision.value == "CONFIRMED"
+
+
 class TestTheReportCountsTheUndecided:
     def test_pending_is_in_the_headline(self) -> None:
         report = NaverNewsCollector.reject_report(
