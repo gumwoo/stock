@@ -151,6 +151,34 @@ _DIGIT = re.compile(r"\d")
 
 
 @dataclass(frozen=True, slots=True)
+class Yield:
+    """What one company's search produced, judged article by article.
+
+    `matched` counts articles that name the company, whether or not the mention
+    was new this run — a re-run inserts nothing and must not look like a
+    company whose every result was rejected.
+    """
+
+    name: str
+    symbol: str | None
+    matched: int
+    rejected: int
+
+    @property
+    def evaluated(self) -> int:
+        return self.matched + self.rejected
+
+    @property
+    def reject_rate(self) -> float:
+        return self.rejected / self.evaluated if self.evaluated else 0.0
+
+
+# How many companies each list in the report names. The plan asked for the
+# twenty worst; the rollout reads this after every stage.
+REPORT_TOP = 20
+
+
+@dataclass(frozen=True, slots=True)
 class Sweep:
     """What paging one query produced, and why it stopped.
 
@@ -440,6 +468,53 @@ class NaverNewsCollector(BaseCollector):
                     return MatchMethod.SYMBOL
         return None
 
+    @staticmethod
+    def reject_report(yields: Sequence[Yield], *, top: int = REPORT_TOP) -> str:
+        """The rollout metric: how often a search result failed to name its company.
+
+        The plan puts the full sweep behind two smaller ones — one company, then
+        ten — and gates each step on this number. A total alone cannot do that
+        job. The companies worth looking at are the outliers in both
+        directions: a high reject rate means the query is poor or an alias is
+        missing, and many mentions with no rejects at all can mean a false
+        match is passing straight through. Both lists are here for that reason.
+
+        Rejected articles leave no mention behind, and which query fetched an
+        article is recorded only on a mention, so this cannot be reconstructed
+        from the database afterwards. It has to be written down now.
+        """
+        evaluated = sum(y.evaluated for y in yields)
+        if not evaluated:
+            return "no articles evaluated"
+        rejected = sum(y.rejected for y in yields)
+        parts = [f"reject rate {rejected}/{evaluated} ({rejected / evaluated:.0%})"]
+
+        def label(y: Yield) -> str:
+            return f"{y.name}({y.symbol})" if y.symbol else y.name
+
+        worst = sorted(
+            (y for y in yields if y.rejected),
+            key=lambda y: (-y.reject_rate, -y.rejected, y.name),
+        )[:top]
+        if worst:
+            parts.append(
+                "highest reject rate: "
+                + ", ".join(
+                    f"{label(y)} {y.rejected}/{y.evaluated} {y.reject_rate:.0%}" for y in worst
+                )
+            )
+
+        loud = sorted(
+            (y for y in yields if y.matched and not y.rejected),
+            key=lambda y: (-y.matched, y.name),
+        )[:top]
+        if loud:
+            parts.append(
+                "most mentions with no reject: "
+                + ", ".join(f"{label(y)} {y.matched}" for y in loud)
+            )
+        return "; ".join(parts)
+
     @classmethod
     def to_rows(
         cls, items: Iterable[Mapping[str, Any]], *, since: datetime | None
@@ -599,6 +674,7 @@ class NaverNewsCollector(BaseCollector):
 
         since = self.watermark(session, now=now)
         read = saved = mentions = rejected = unusable = 0
+        yields: list[Yield] = []
         capped: list[str] = []
         warnings: list[str] = []
         stopped_early: str | None = None
@@ -631,6 +707,7 @@ class NaverNewsCollector(BaseCollector):
                 saved += written
 
                 links: list[NewsMentionRow] = []
+                matched_here = rejected_here = 0
                 for row, _ in pages.rows:
                     method = self.match_method(
                         f"{row.title} {row.summary or ''}",
@@ -641,7 +718,9 @@ class NaverNewsCollector(BaseCollector):
                     )
                     if method is None:
                         rejected += 1
+                        rejected_here += 1
                         continue
+                    matched_here += 1
                     item_id = ids.get(row.url_hash)
                     if item_id is None:
                         continue
@@ -654,6 +733,14 @@ class NaverNewsCollector(BaseCollector):
                         )
                     )
                 mentions += news_repo.save_mentions(session, links)
+                yields.append(
+                    Yield(
+                        name=instrument.name,
+                        symbol=symbol,
+                        matched=matched_here,
+                        rejected=rejected_here,
+                    )
+                )
 
                 if stopped_early:
                     break
@@ -691,6 +778,7 @@ class NaverNewsCollector(BaseCollector):
         )
         if capped:
             detail += f"; {len(capped)} hit the {self.max_pages}-page cap"
+        detail += "; " + self.reject_report(yields)
 
         return CollectionResult(
             items_read=read,

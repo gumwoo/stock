@@ -486,3 +486,67 @@ class TestAZeroPageBudgetIsRefused:
         """It reads nothing and `_sweep` would call that a clean finish."""
         with pytest.raises(ValueError, match="at least 1"):
             NaverNewsCollector(guard=FakeGuard(), max_pages=0)  # type: ignore[arg-type]
+
+
+class TestTheRejectReportReachesTheRun:
+    """The report is only useful if it is on the run record afterwards."""
+
+    def test_each_companys_counts_are_written_down(
+        self, market: tuple[Session, list[Instrument]]
+    ) -> None:
+        session, _ = market
+        pages = {
+            "테스트반도체": [
+                [
+                    article(slug="r1", title="테스트반도체 실적 발표"),
+                    article(slug="r2", title="반도체 업황 전반"),
+                    article(slug="r3", title="업종 동향"),
+                ]
+            ],
+        }
+        run = run_collector(collector_over(pages), session)
+
+        assert run.detail is not None
+        assert "테스트반도체(900001) 2/3 67%" in run.detail
+
+    def test_the_record_is_longer_than_the_old_limit(
+        self, market: tuple[Session, list[Instrument]]
+    ) -> None:
+        """Five hundred characters held the headline and cut the list.
+
+        The companies at the end of a truncated list are exactly the ones the
+        rollout is looking for, so the column had to widen rather than the
+        report shrink.
+        """
+        session, _ = market
+        c = collector_over({})
+        long_report = "x" * 2_000
+        c.reject_report = lambda _yields, **_k: long_report  # type: ignore[method-assign,assignment]
+
+        run = run_collector(c, session)
+        session.expire_all()
+
+        stored = session.get(CollectorRun, run.id)
+        assert stored is not None
+        assert stored.detail is not None
+        assert long_report in stored.detail
+
+    def test_a_rerun_does_not_look_like_every_article_failed(
+        self, market: tuple[Session, list[Instrument]]
+    ) -> None:
+        """The same article read twice: no new mention, and still a match.
+
+        `collect` is called directly rather than through `run_collector`, so
+        no run is recorded and the watermark stays put. That is the situation
+        this guards — the overlap window, or a sweep after a PARTIAL — where
+        articles already linked are read again and insert nothing.
+        """
+        session, _ = market
+        pages = {"테스트반도체": [[article(slug="again", title="테스트반도체 수주")]]}
+
+        collector_over(pages).collect(session)
+        second = collector_over(pages).collect(session)
+
+        assert second.detail is not None
+        assert "0 mentions" in second.detail
+        assert "reject rate 0/1 (0%)" in second.detail

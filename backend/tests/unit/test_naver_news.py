@@ -27,7 +27,7 @@ import httpx
 import pytest
 
 from app.collectors.base import UpstreamUnavailableError
-from app.collectors.naver_news import PAGE_SIZE, NaverNewsCollector
+from app.collectors.naver_news import PAGE_SIZE, REPORT_TOP, NaverNewsCollector, Yield
 from app.collectors.quota import QuotaExhausted
 from app.core.quota import LimitSource, Quota
 from app.models.news import MatchMethod, NewsSource
@@ -649,3 +649,105 @@ class TestWhatCameBackHasToBeTheShapeItClaims:
 
         assert sweep.rows == []
         assert sweep.skipped == 3
+
+
+class TestTheRejectReport:
+    """The number the staged rollout is gated on, per company.
+
+    One company, then ten, then all of them — and at each step the question is
+    which companies' searches came back full of articles that never named them.
+    A total cannot answer that. Rejected articles leave no mention behind, so
+    the per-company figure cannot be rebuilt from the database later either;
+    it exists only if the run writes it down.
+    """
+
+    def test_the_overall_rate_leads(self) -> None:
+        report = NaverNewsCollector.reject_report(
+            [Yield("삼성전자", "005930", matched=6, rejected=4)]
+        )
+
+        assert report.startswith("reject rate 4/10 (40%)")
+
+    def test_the_worst_company_comes_first(self) -> None:
+        report = NaverNewsCollector.reject_report(
+            [
+                Yield("삼성전자", "005930", matched=9, rejected=1),
+                Yield("NAVER", "035420", matched=1, rejected=9),
+                Yield("한화", "000880", matched=5, rejected=5),
+            ]
+        )
+
+        worst = report.split("highest reject rate: ")[1].split(";")[0]
+        assert worst.index("NAVER") < worst.index("한화") < worst.index("삼성전자")
+        assert "NAVER(035420) 9/10 90%" in worst
+
+    def test_the_rate_ranks_the_list_not_the_count(self) -> None:
+        """A small company that fails every search outranks a big one that
+        fails a few. Ordering by count would bury exactly the queries that are
+        broken outright under the ones that are merely busy."""
+        report = NaverNewsCollector.reject_report(
+            [
+                Yield("대형주", "000001", matched=12, rejected=8),
+                Yield("소형주", "000002", matched=0, rejected=3),
+            ]
+        )
+
+        worst = report.split("highest reject rate: ")[1].split(";")[0]
+        assert worst.index("소형주") < worst.index("대형주")
+
+    def test_a_company_with_no_rejects_is_not_on_the_worst_list(self) -> None:
+        report = NaverNewsCollector.reject_report(
+            [
+                Yield("삼성전자", "005930", matched=10, rejected=0),
+                Yield("NAVER", "035420", matched=1, rejected=1),
+            ]
+        )
+
+        worst = report.split("highest reject rate: ")[1].split(";")[0]
+        assert "삼성전자" not in worst
+
+    def test_many_mentions_with_no_reject_is_its_own_list(self) -> None:
+        """The other outlier: a false match passing straight through looks
+        exactly like a popular company with a perfect record."""
+        report = NaverNewsCollector.reject_report(
+            [
+                Yield("삼성전자", "005930", matched=40, rejected=0),
+                Yield("LG", "003550", matched=90, rejected=0),
+                Yield("NAVER", "035420", matched=1, rejected=1),
+            ]
+        )
+
+        loud = report.split("most mentions with no reject: ")[1]
+        assert loud.index("LG") < loud.index("삼성전자")
+        assert "NAVER" not in loud
+
+    def test_each_list_stops_at_the_limit(self) -> None:
+        yields = [
+            Yield(f"회사{i:02d}", f"9{i:05d}", matched=1, rejected=1 + i)
+            for i in range(REPORT_TOP + 15)
+        ]
+        report = NaverNewsCollector.reject_report(yields)
+
+        worst = report.split("highest reject rate: ")[1].split(";")[0]
+        assert worst.count("/") == REPORT_TOP
+
+    def test_nothing_evaluated_says_so(self) -> None:
+        """A sweep whose every company returned nothing is not a 0% reject rate."""
+        assert NaverNewsCollector.reject_report([]) == "no articles evaluated"
+        assert (
+            NaverNewsCollector.reject_report([Yield("삼성전자", "005930", 0, 0)])
+            == "no articles evaluated"
+        )
+
+    def test_a_rerun_is_not_a_company_whose_every_result_failed(self) -> None:
+        """Matched counts articles that name the company, new or not.
+
+        A second run over the same window inserts no mentions. Counting only
+        the inserted ones would show every company as matched zero and make
+        the reject rate meaningless on exactly the runs that repeat.
+        """
+        report = NaverNewsCollector.reject_report(
+            [Yield("삼성전자", "005930", matched=10, rejected=0)]
+        )
+
+        assert report.startswith("reject rate 0/10 (0%)")

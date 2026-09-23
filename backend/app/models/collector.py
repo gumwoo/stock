@@ -62,9 +62,12 @@ class CollectorRun(Base):
 
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     detail: Mapped[str | None] = mapped_column(
-        String(500),
+        Text,
         nullable=True,
-        doc="Human-readable note. For SKIPPED this says which env var to set.",
+        doc="Human-readable note. For SKIPPED this says which env var to set. "
+        "Unbounded because the news sweep reports its per-company reject rates "
+        "here, and a note that could hold only the first few of them would "
+        "hide exactly the companies the staged rollout exists to find.",
     )
 
     __table_args__ = (
