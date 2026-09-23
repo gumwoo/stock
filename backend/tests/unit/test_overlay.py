@@ -74,6 +74,17 @@ class TestOneEventCountsOnce:
         )
         assert overlay.clusters[0].sentiment == pytest.approx((0.9 - 0.3) / 1.2)
 
+    def test_the_event_is_shown_by_its_most_telling_article(self) -> None:
+        overlay = compute_overlay(
+            [
+                reading(1, at=T - 3 * H, intensity=0.2, confidence=0.5),
+                reading(2, at=T - 2 * H, intensity=0.7, confidence=0.9),
+            ],
+            asof=T,
+            params=P,
+        )
+        assert overlay.clusters[0].title == "article 2"
+
 
 class TestEventsFade:
     def test_weight_halves_every_half_life(self) -> None:

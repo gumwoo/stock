@@ -162,7 +162,9 @@ def compute_overlay(
                 confidence=confidence,
                 decay=decay,
                 contribution=sentiment * intensity * confidence * decay,
-                title=first.title,
+                # The article that says most about the event, not merely the
+                # first: a market wrap often breaks a story before its own report.
+                title=max(group, key=lambda r: (r.intensity * r.confidence, -r.news_item_id)).title,
                 news_item_ids=tuple(r.news_item_id for r in group),
             )
         )
