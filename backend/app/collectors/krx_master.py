@@ -47,6 +47,9 @@ from app.collectors.base import (
     RateLimitedError,
     TokenBucket,
     UpstreamUnavailableError,
+    as_object,
+    as_rows,
+    as_text,
 )
 from app.collectors.quota import QuotaExhausted, QuotaGuard
 from app.config import get_settings
@@ -101,24 +104,6 @@ DART_STATUS: Mapping[str, str] = {
     "900": "정의되지 않은 오류",
     "901": "오픈API 이용동의 필요",
 }
-
-
-def field(row: Mapping[str, Any], key: str) -> str:
-    """A DART field as text, or empty when it did not arrive as text.
-
-    Three rounds of review found the same shape three times: a guard placed one
-    layer above the value that actually breaks. `isinstance(row, dict)` stops a
-    scalar row, and then `row.get("corp_code").strip()` raises anyway because
-    the *field* was a JSON number. `AttributeError` is not a `CollectorError`,
-    so the run is filed as a defect in our code and the sweep dies.
-
-    A numeric `corp_code` is not salvageable by converting it: `00126380` comes
-    back as 126380, and the leading zeros are what make it a code. So a field
-    of the wrong type counts as absent, the candidate is dropped, and the run
-    says how many it dropped.
-    """
-    value = row.get(key)
-    return value.strip() if isinstance(value, str) else ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,7 +257,16 @@ class KrxMasterCollector(BaseCollector):
             stock_code = (node.findtext("stock_code") or "").strip()
             corp_code = (node.findtext("corp_code") or "").strip()
             corp_name = (node.findtext("corp_name") or "").strip()
-            if not (stock_code and corp_code and corp_name):
+            if not stock_code:
+                # An unlisted company. DART's file holds far more of these than
+                # listed ones, and none of them is a loss — counting them would
+                # drown the number that matters under four thousand zeros.
+                continue
+            if not (corp_code and corp_name):
+                # Listed, and arrived without an identifier or a name. That is
+                # the same silent loss as a field too long for its column, and
+                # the first version of this count reported zero for it.
+                malformed += 1
                 continue
             # A field wider than its column is refused by the database, and the
             # refusal lands as a `DataError` from a flush partway through a
@@ -324,11 +318,7 @@ class KrxMasterCollector(BaseCollector):
         except ValueError as exc:
             raise UpstreamUnavailableError(f"DART returned non-JSON for {path}") from exc
 
-        if not isinstance(payload, dict):
-            raise UpstreamUnavailableError(
-                f"DART {path} returned {type(payload).__name__}, not an object"
-            )
-
+        payload = as_object(payload, source=f"DART {path}")
         status = payload.get("status")
         if status == "020":
             raise RateLimitedError(
@@ -384,16 +374,10 @@ class KrxMasterCollector(BaseCollector):
                 except QuotaExhausted as refused:
                     return boards, str(refused)
 
-                rows = payload.get("list") or []
-                if not isinstance(rows, list):
-                    raise UpstreamUnavailableError(
-                        f"DART list.json gave a {type(rows).__name__} where rows were expected"
-                    )
+                rows = as_rows(payload.get("list"), source="DART list.json")
                 for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    corp_code = field(row, "corp_code")
-                    corp_cls = field(row, "corp_cls")
+                    corp_code = as_text(row, "corp_code")
+                    corp_cls = as_text(row, "corp_cls")
                     if corp_code and corp_cls:
                         boards.setdefault(corp_code, corp_cls)
 
@@ -443,7 +427,7 @@ class KrxMasterCollector(BaseCollector):
                     except QuotaExhausted as refused:
                         warnings.append(f"profile lookup stopped: {refused}")
                         break
-                    corp_cls = field(payload, "corp_cls")
+                    corp_cls = as_text(payload, "corp_cls")
                     if corp_cls:
                         boards[candidate.corp_code] = corp_cls
                     profiled += 1

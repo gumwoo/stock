@@ -35,9 +35,10 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy.orm import Session
 
@@ -99,6 +100,49 @@ EXTERNAL_FAILURES: tuple[type[BaseException], ...] = (
     TimeoutError,
     ConnectionError,
 )
+
+
+def as_object(payload: object, *, source: str) -> dict[str, Any]:
+    """A decoded response body, or a typed failure saying it was not an object.
+
+    This exists because the same defect has been found five times in this
+    package, each time one layer further in: the archive was guarded and its
+    member was not, the row was guarded and its field was not, one collector
+    was guarded and its twin was not. Every instance had the same production
+    consequence — `AttributeError` or `TypeError` is neither a `CollectorError`
+    nor an external failure, so `run_collector` re-raises it, the scheduled job
+    dies, and an outage is filed as a defect in our own code.
+
+    Three helpers, used at every boundary, are cheaper than remembering.
+    """
+    if isinstance(payload, dict):
+        return payload
+    raise UpstreamUnavailableError(f"{source} returned {type(payload).__name__}, not an object")
+
+
+def as_rows(value: object, *, source: str) -> list[Any]:
+    """A list of result rows, or a typed failure. `None` counts as empty."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    raise UpstreamUnavailableError(
+        f"{source} gave a {type(value).__name__} where rows were expected"
+    )
+
+
+def as_text(row: object, key: str) -> str:
+    """A field as text, or empty when it did not arrive as text.
+
+    Deliberately not a conversion. A code that is all digits can come back as a
+    JSON number, and `str(126380)` has lost the leading zeros that made
+    `00126380` a code — so a number is treated as an absent field and the row
+    is dropped, rather than quietly becoming a different company.
+    """
+    if not isinstance(row, Mapping):
+        return ""
+    value = row.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 
 class TokenBucket:
@@ -195,6 +239,10 @@ def _record(session: Session, run: CollectorRun) -> None:
     """
     from sqlalchemy.exc import SQLAlchemyError
 
+    # Captured before anything is added, so it describes what the collector
+    # left behind and not what this function is about to write.
+    unsaved = bool(session.new or session.dirty or session.deleted)
+
     try:
         session.add(run)
         session.commit()
@@ -205,10 +253,13 @@ def _record(session: Session, run: CollectorRun) -> None:
     # The rollback discards whatever the collector left uncommitted, so a run
     # still claiming SUCCESS would be claiming rows that no longer exist —
     # reproduced: a collector that returned SUCCESS with seven unsaved rows was
-    # recorded as having saved seven, and the table held none. Collectors all
-    # commit before returning today, which makes this unreachable; nothing
-    # enforces that, which is why it is handled rather than asserted.
-    if run.status in (CollectorStatus.SUCCESS, CollectorStatus.PARTIAL):
+    # recorded as having saved seven, and the table held none.
+    #
+    # Only when there was something to lose. A commit that failed because the
+    # connection dropped, on a session the collector had already emptied, took
+    # nothing with it — and marking that run FAILED with zero saved would be
+    # the opposite lie, about rows that are on disk and permanent.
+    if unsaved and run.status in (CollectorStatus.SUCCESS, CollectorStatus.PARTIAL):
         run.status = CollectorStatus.FAILED
         run.error = "the run could not be committed; anything it had not saved is gone"
         run.items_saved = 0

@@ -92,6 +92,20 @@ class TestTheNewsPageDefaultIsAnArithmetic:
     CANDIDATES = 3_991
     SWEEPS_PER_DAY = 2
 
+    @staticmethod
+    def budget_for(settings: Settings) -> int:
+        """The budget as the code computes it, not as this test would.
+
+        Spelled `int(limit * fraction)` this was float multiplication — the
+        arithmetic another test in this suite exists to forbid, put back inside
+        the suite that forbids it. Harmless at 25,000 by 0.5, and wrong the
+        first time either number moves.
+        """
+        from app.core.quota import DEFAULT_PLAN, budget
+
+        daily = next(q for q in DEFAULT_PLAN.quotas if q.key == "naver_search_daily")
+        return budget(daily, fraction=settings.quota_budget_fraction)
+
     def test_the_default_is_one_page(self) -> None:
         # `bare()`, so this asserts the default and not a local `.env`.
         assert bare().naver_news_max_pages == 1
@@ -99,13 +113,13 @@ class TestTheNewsPageDefaultIsAnArithmetic:
     def test_a_day_of_sweeping_fits_the_budget(self) -> None:
         settings = bare()
         worst = self.CANDIDATES * settings.naver_news_max_pages * self.SWEEPS_PER_DAY
-        allowed = int(settings.naver_search_daily_limit * settings.quota_budget_fraction)
+        allowed = self.budget_for(settings)
 
         assert worst <= allowed, f"{worst} calls against a budget of {allowed}"
 
     def test_two_pages_would_not_fit(self) -> None:
         """The control: without it the assertion above passes trivially."""
         settings = bare()
-        allowed = int(settings.naver_search_daily_limit * settings.quota_budget_fraction)
+        allowed = self.budget_for(settings)
 
         assert allowed < self.CANDIDATES * 2 * self.SWEEPS_PER_DAY

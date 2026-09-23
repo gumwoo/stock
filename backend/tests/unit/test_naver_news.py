@@ -604,7 +604,7 @@ class TestWhatCameBackHasToBeTheShapeItClaims:
 
     def test_results_that_are_not_a_list_are_an_outage(self) -> None:
         c, client = self.serving({"items": "삼성전자 기사 하나"})
-        with client, pytest.raises(UpstreamUnavailableError, match="where the results"):
+        with client, pytest.raises(UpstreamUnavailableError, match="where rows were expected"):
             c._sweep(client, query="삼성전자", since=SINCE)
 
     def test_a_result_that_is_not_an_object_is_counted_unusable(self) -> None:
@@ -616,6 +616,31 @@ class TestWhatCameBackHasToBeTheShapeItClaims:
 
         assert len(rows) == 1
         assert skipped == 2
+
+    def test_a_field_inside_a_good_item_may_still_be_wrong(self) -> None:
+        """The guard on the item is not a guard on its fields.
+
+        This is the shape that has reopened five times, and the last instance
+        was in this very function: `link` was read raw while every field beside
+        it was normalised. A number there ends the sweep before its commit, so
+        every company collected earlier in the run is discarded with it.
+        """
+        rows, skipped, _ = NaverNewsCollector.to_rows(
+            [
+                {
+                    "title": "삼성전자 실적",
+                    "description": "본문",
+                    "originallink": "https://news.example.com/a",
+                    "link": 12345,
+                    "pubDate": "Mon, 21 Sep 2026 14:03:00 +0900",
+                }
+            ],
+            since=None,
+        )
+
+        assert len(rows) == 1
+        assert skipped == 0
+        assert rows[0][0].naver_url is None
 
     def test_a_page_of_nothing_but_rubbish_does_not_raise(self) -> None:
         c, client = self.serving({"items": ["rubbish", 1, None]})

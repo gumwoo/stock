@@ -45,7 +45,11 @@ from app.collectors.base import (
     RateLimitedError,
     TokenBucket,
     UpstreamUnavailableError,
+    as_object,
+    as_rows,
+    as_text,
 )
+from app.collectors.quota import QuotaGuard
 from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
@@ -57,6 +61,10 @@ from app.repositories.fundamental_repo import FundamentalRow
 logger = logging.getLogger(__name__)
 
 BASE = "https://opendart.fss.or.kr/api"
+
+# The same ledger group the listing master uses. One published DART cap,
+# shared by every endpoint we call against it.
+QUOTA_GROUP = "dart"
 
 # DART account ids mapped onto the concept names the engine already speaks, so
 # a Korean filing and a US one produce the same series. The ids are IFRS
@@ -230,12 +238,14 @@ class DartFundamentalCollector(BaseCollector):
 
     name = "DART_FUNDAMENTAL"
 
-    def __init__(self, *, years_back: int = 5) -> None:
+    def __init__(self, *, years_back: int = 5, guard: QuotaGuard | None = None) -> None:
         settings = get_settings()
         self._key = settings.dart_api_key
-        # DART publishes no per-second limit, only a daily quota. A modest
-        # bucket keeps us from hammering a public service.
+        # DART publishes no per-second limit, only a daily quota. The bucket
+        # shapes the rate; the guard is what holds the daily total under the
+        # published cap.
         self._bucket = TokenBucket(2.0)
+        self._guard = guard if guard is not None else QuotaGuard()
         self.years_back = years_back
 
     def is_configured(self) -> bool:
@@ -247,6 +257,12 @@ class DartFundamentalCollector(BaseCollector):
     # --- transport --------------------------------------------------------
 
     def _get(self, client: httpx.Client, path: str, **params: str) -> dict[str, Any]:
+        # Reserved before it is sent, like every other metered call. Without
+        # this the ledger is not the floor `app/core/quota.py` says it is: this
+        # collector can spend the whole DART allowance while `quota` reports
+        # nothing used, and the next master load then dies on a refusal whose
+        # message blames the ledger for being wrong. It is, and this was why.
+        self._guard.reserve(QUOTA_GROUP, path.split(".")[0])
         self._bucket.acquire()
         try:
             response = client.get(
@@ -259,10 +275,11 @@ class DartFundamentalCollector(BaseCollector):
             raise UpstreamUnavailableError(f"DART returned {response.status_code} for {path}")
 
         try:
-            payload: dict[str, Any] = response.json()
+            decoded = response.json()
         except ValueError as exc:
             raise UpstreamUnavailableError(f"DART returned non-JSON for {path}") from exc
 
+        payload = as_object(decoded, source=f"DART {path}")
         status = payload.get("status")
         if status == "020":
             raise RateLimitedError("DART daily quota exhausted")
@@ -317,15 +334,7 @@ class DartFundamentalCollector(BaseCollector):
                 )
 
                 for year in range(today.year, today.year - self.years_back, -1):
-                    payload = self._get(
-                        client,
-                        "fnlttSinglAcntAll.json",
-                        corp_code=corp_code,
-                        bsns_year=str(year),
-                        reprt_code=ANNUAL_REPORT,
-                        fs_div="CFS",
-                    )
-                    items = payload.get("list") or []
+                    items = self._accounts(client, corp_code=corp_code, year=year)
                     if not items:
                         continue
 
@@ -362,6 +371,24 @@ class DartFundamentalCollector(BaseCollector):
             detail=f"{len(instruments)} instruments, {self.years_back} years each",
         )
 
+    def _accounts(self, client: httpx.Client, *, corp_code: str, year: int) -> list[Any]:
+        """One year of account rows for one company.
+
+        Its own method for the same reason `_collect_filings` is: the shape
+        guard on the response is only worth having if a test can reach it, and
+        inline inside `collect` the only way in was a database, a tracked
+        instrument and a full sweep.
+        """
+        payload = self._get(
+            client,
+            "fnlttSinglAcntAll.json",
+            corp_code=corp_code,
+            bsns_year=str(year),
+            reprt_code=ANNUAL_REPORT,
+            fs_div="CFS",
+        )
+        return as_rows(payload.get("list"), source="DART fnlttSinglAcntAll.json")
+
     def _collect_filings(
         self,
         client: httpx.Client,
@@ -391,12 +418,12 @@ class DartFundamentalCollector(BaseCollector):
                 page_count="100",
                 page_no=str(page_no),
             )
-            items = payload.get("list") or []
+            items = as_rows(payload.get("list"), source="DART list.json")
             if not items:
                 break
 
             for item in items:
-                rcept_no = str(item.get("rcept_no") or "")
+                rcept_no = as_text(item, "rcept_no")
                 filed_at = filed_date_from_receipt(rcept_no)
                 if filed_at is None:
                     continue
@@ -437,11 +464,11 @@ class DartFundamentalCollector(BaseCollector):
         seen = 0
 
         for item in items:
-            concept = ACCOUNT_MAP.get(str(item.get("account_id") or ""))
+            concept = ACCOUNT_MAP.get(as_text(item, "account_id"))
             if concept is None:
                 continue
 
-            rcept_no = str(item.get("rcept_no") or "")
+            rcept_no = as_text(item, "rcept_no")
             filed_at = filed_date_from_receipt(rcept_no)
             if filed_at is None:
                 continue

@@ -61,8 +61,12 @@ _TEST_SOURCES = (
     "TRANSPORT",
     "PARTIAL",
     "SELF_SKIPPING",
-    "KRX_MASTER",
+    # Deliberately no real collector name here. "KRX_MASTER" was in this list,
+    # so every integration run wiped the actual listing master's history from
+    # whatever database `.env` points at — the developer's own.
+    "MASTER_UNDER_TEST",
     "POISONING",
+    "SUCCEEDING_CLEANLY",
     "SUCCEEDING_BADLY",
 )
 
@@ -510,9 +514,10 @@ class TestTheMasterReportsWhatItCouldNotStore:
         c._corp_code_archive = lambda _client: archive  # type: ignore[assignment,method-assign]
         return c
 
-    def test_the_dropped_count_reaches_the_run(
+    def test_an_archive_of_nothing_but_malformed_rows_is_an_outage(
         self, session: Session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Every row dropped is indistinguishable from an empty file."""
         from tests.unit.test_krx_master import archive as make_archive
 
         collector = self.loaded(
@@ -520,7 +525,7 @@ class TestTheMasterReportsWhatItCouldNotStore:
             archive=make_archive(("00126380", "가" * 900, "005930")),
             profile={"status": "000", "corp_cls": "Y"},
         )
-        collector.name = "KRX_MASTER"  # type: ignore[attr-defined]
+        collector.name = "MASTER_UNDER_TEST"  # type: ignore[attr-defined]
 
         with pytest.raises(Exception, match="held no listed companies"):
             collector.collect(session)  # type: ignore[attr-defined]
@@ -538,22 +543,28 @@ class TestTheMasterReportsWhatItCouldNotStore:
             ),
             profile={"status": "000", "corp_cls": "Y"},
         )
-        collector.name = "KRX_MASTER"  # type: ignore[attr-defined]
+        collector.name = "MASTER_UNDER_TEST"  # type: ignore[attr-defined]
 
-        result = collector.collect(session)  # type: ignore[attr-defined]
+        try:
+            result = collector.collect(session)  # type: ignore[attr-defined]
 
-        assert result.partial is True
-        assert any("cannot store" in w for w in result.warnings)
-        assert "1 dropped as malformed" in (result.detail or "")
-
-        session.execute(
-            text(
-                "DELETE FROM symbol_history WHERE instrument_id IN "
-                "(SELECT instrument_id FROM instrument WHERE kr_corp_code = '00999801')"
+            assert result.partial is True
+            assert any("cannot store" in w for w in result.warnings)
+            assert "1 dropped as malformed" in (result.detail or "")
+        finally:
+            # `finally`, because cleanup that runs only when the assertions
+            # pass is cleanup that leaks on the day they do not — into the
+            # developer's own database, where the unique corp code then makes
+            # every later run fail for an unrelated reason.
+            session.rollback()
+            session.execute(
+                text(
+                    "DELETE FROM symbol_history WHERE instrument_id IN "
+                    "(SELECT instrument_id FROM instrument WHERE kr_corp_code = '00999801')"
+                )
             )
-        )
-        session.execute(text("DELETE FROM instrument WHERE kr_corp_code = '00999801'"))
-        session.commit()
+            session.execute(text("DELETE FROM instrument WHERE kr_corp_code = '00999801'"))
+            session.commit()
 
     def test_a_numeric_board_leaves_the_company_unplaced(
         self, session: Session, monkeypatch: pytest.MonkeyPatch
@@ -566,9 +577,37 @@ class TestTheMasterReportsWhatItCouldNotStore:
             archive=make_archive(("00999802", "제트제트마스터을", "998802")),
             profile={"status": "000", "corp_cls": 1},
         )
-        collector.name = "KRX_MASTER"  # type: ignore[attr-defined]
+        collector.name = "MASTER_UNDER_TEST"  # type: ignore[attr-defined]
 
         result = collector.collect(session)  # type: ignore[attr-defined]
 
         assert result.items_saved == 0
         assert "1 skipped" in (result.detail or "")
+
+
+class SucceedingCleanlyCollector(BaseCollector):
+    """Commits its work, then reports success. The ordinary case."""
+
+    name = "SUCCEEDING_CLEANLY"
+
+    def collect(self, session: Session) -> CollectionResult:
+        session.commit()
+        return CollectionResult(items_read=3, items_saved=3)
+
+
+class TestTheDowngradeOnlyAppliesToWhatWasLost:
+    """A commit that took nothing with it must not be reported as a loss.
+
+    `_record` marks a run FAILED when the commit that writes it had to be
+    rolled back, because the rollback discards whatever the collector had not
+    saved. Applied unconditionally that is the opposite lie: a collector which
+    had already committed loses nothing when the run row fails to write, and
+    calling that run FAILED with zero saved describes rows that are on disk and
+    permanent. Freshness reads these rows, so the wrong answer travels.
+    """
+
+    def test_a_clean_run_keeps_its_status(self, session: Session) -> None:
+        run = run_collector(SucceedingCleanlyCollector(), session)
+
+        assert run.status is CollectorStatus.SUCCESS
+        assert run.items_saved == 3

@@ -58,6 +58,9 @@ from app.collectors.base import (
     SkipCollection,
     TokenBucket,
     UpstreamUnavailableError,
+    as_object,
+    as_rows,
+    as_text,
 )
 from app.collectors.quota import QuotaExhausted, QuotaGuard
 from app.config import get_settings
@@ -472,7 +475,13 @@ class NaverNewsCollector(BaseCollector):
                 exhausted = True
                 continue
 
-            naver_url = (item.get("link") or "").strip() or None
+            # `as_text`, like every other field above it. This line was the
+            # fifth instance of the same defect and the second inside this
+            # function: the guard on the item was added, and the value under
+            # it was not. A `link` that is not a string raises here, the sweep
+            # dies before its commit, and everything gathered for every earlier
+            # company in the run goes with it.
+            naver_url = as_text(item, "link") or None
             rows.append(
                 (
                     NewsItemRow(
@@ -544,12 +553,7 @@ class NaverNewsCollector(BaseCollector):
             payload = response.json()
         except ValueError as exc:
             raise UpstreamUnavailableError("Naver returned non-JSON for a news search") from exc
-        if not isinstance(payload, dict):
-            raise UpstreamUnavailableError(
-                f"Naver returned {type(payload).__name__}, not an object, for a news search"
-            )
-        parsed: dict[str, Any] = payload
-        return parsed
+        return as_object(payload, source="Naver news search")
 
     # --- collection -------------------------------------------------------
 
@@ -709,11 +713,7 @@ class NaverNewsCollector(BaseCollector):
                 return Sweep(
                     rows=rows, read=read, skipped=skipped, hit_page_cap=False, exhausted=refused
                 )
-            items = payload.get("items") or []
-            if not isinstance(items, list):
-                raise UpstreamUnavailableError(
-                    f"Naver gave a {type(items).__name__} where the results were expected"
-                )
+            items = as_rows(payload.get("items"), source="Naver news search")
             read += len(items)
 
             page_rows, page_skipped, exhausted = self.to_rows(items, since=since)

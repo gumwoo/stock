@@ -26,8 +26,8 @@ from itertools import pairwise
 import httpx
 import pytest
 
-from app.collectors.base import CollectorError, RateLimitedError, UpstreamUnavailableError
-from app.collectors.krx_master import MAX_PAGES_PER_QUARTER, KrxMasterCollector, field
+from app.collectors.base import CollectorError, RateLimitedError, UpstreamUnavailableError, as_text
+from app.collectors.krx_master import MAX_PAGES_PER_QUARTER, KrxMasterCollector
 
 
 def archive(*rows: tuple[str, str, str]) -> bytes:
@@ -513,8 +513,78 @@ class TestAFieldIsNotAStringBecauseTheRowIsADict:
         assert boards == {}
 
     def test_a_number_is_never_coerced_into_a_code(self) -> None:
-        """`00126380` as a JSON number is 126380, and the zeros are the code."""
-        assert field({"corp_code": 126380}, "corp_code") == ""
-        assert field({"corp_code": "00126380"}, "corp_code") == "00126380"
-        assert field({"corp_code": None}, "corp_code") == ""
-        assert field({}, "corp_code") == ""
+        """`00126380` as a JSON number is 126380, and the zeros are the code.
+
+        The helper lives in `base` now: the same guard was reinvented in four
+        collectors, one layer deeper each time.
+        """
+        assert as_text({"corp_code": 126380}, "corp_code") == ""
+        assert as_text({"corp_code": "00126380"}, "corp_code") == "00126380"
+        assert as_text({"corp_code": None}, "corp_code") == ""
+        assert as_text({}, "corp_code") == ""
+
+
+def raw_archive(rows: str) -> bytes:
+    """An archive whose XML is written out literally, fields and all."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("CORPCODE.xml", f"<result>{rows}</result>")
+    return buffer.getvalue()
+
+
+class TestWhatCountsAsALoss:
+    """An unlisted company is not a loss. A listed one that lost a field is.
+
+    DART's file holds far more unlisted companies than listed ones, so counting
+    those would drown the number that matters. But a row that was plainly
+    listed and arrived missing its name is the silent loss this count exists
+    for, and the first version of it looked only at over-long fields.
+    """
+
+    def test_an_unlisted_company_is_not_counted(self) -> None:
+        _, dropped = KrxMasterCollector.parse_corp_codes(
+            raw_archive(
+                "<list><corp_code>00999999</corp_code><corp_name>비상장</corp_name>"
+                "<stock_code> </stock_code></list>"
+                "<list><corp_code>00126380</corp_code><corp_name>삼성전자</corp_name>"
+                "<stock_code>005930</stock_code></list>"
+            )
+        )
+
+        assert dropped == 0
+
+    def test_a_listed_company_missing_its_name_is_counted(self) -> None:
+        found, dropped = KrxMasterCollector.parse_corp_codes(
+            raw_archive(
+                "<list><corp_code>00999998</corp_code><corp_name> </corp_name>"
+                "<stock_code>009999</stock_code></list>"
+                "<list><corp_code>00126380</corp_code><corp_name>삼성전자</corp_name>"
+                "<stock_code>005930</stock_code></list>"
+            )
+        )
+
+        assert [c.name for c in found] == ["삼성전자"]
+        assert dropped == 1
+
+    def test_a_listed_company_missing_its_corp_code_is_counted(self) -> None:
+        _, dropped = KrxMasterCollector.parse_corp_codes(
+            raw_archive(
+                "<list><corp_code></corp_code><corp_name>코드없음</corp_name>"
+                "<stock_code>009998</stock_code></list>"
+            )
+        )
+
+        assert dropped == 1
+
+    def test_a_file_of_unlisted_companies_reports_none_dropped(self) -> None:
+        """The real file is mostly these. A count that included them says
+        nothing, which is the same as not having it."""
+        rows = "".join(
+            f"<list><corp_code>0099{i:04d}</corp_code><corp_name>비상장{i}</corp_name>"
+            "<stock_code></stock_code></list>"
+            for i in range(50)
+        )
+        found, dropped = KrxMasterCollector.parse_corp_codes(raw_archive(rows))
+
+        assert found == []
+        assert dropped == 0

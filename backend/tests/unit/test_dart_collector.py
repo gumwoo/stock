@@ -448,3 +448,148 @@ class TestTheTotalsAreNotTheParentFigures:
         )
 
         assert list(rows) == []
+
+
+class TestEveryDartCallIsOnTheLedger:
+    """The ledger is only a floor if every metered call reaches it.
+
+    This collector called DART with a rate bucket and no reservation, so the
+    quota report said zero while the day's allowance drained. The failure that
+    followed was the listing master dying on a refusal whose message said "our
+    ledger had room" — accurate, and pointing at the wrong file.
+    """
+
+    def test_a_request_reserves_before_it_is_sent(self) -> None:
+        import httpx
+
+        from app.collectors.dart_fundamental import QUOTA_GROUP, DartFundamentalCollector
+
+        reserved: list[tuple[str, str]] = []
+
+        class Guard:
+            def reserve(
+                self, group: str, endpoint: str, *, calls: int = 1, now: object = None
+            ) -> None:
+                reserved.append((group, endpoint))
+
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            return httpx.Response(200, json={"status": "000", "list": []})
+
+        c = DartFundamentalCollector(guard=Guard())  # type: ignore[arg-type]
+        c._key = "test-key"
+        c._bucket = type("NoWait", (), {"acquire": lambda self: None})()  # type: ignore[assignment]
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            c._get(client, "list.json", corp_code="00126380")
+            c._get(client, "company.json", corp_code="00126380")
+
+        assert len(seen) == 2
+        assert reserved == [(QUOTA_GROUP, "list"), (QUOTA_GROUP, "company")]
+
+    def test_it_shares_the_group_the_master_uses(self) -> None:
+        """One published DART cap, so one ledger group."""
+        from app.collectors.dart_fundamental import QUOTA_GROUP as FUNDAMENTAL_GROUP
+        from app.collectors.krx_master import QUOTA_GROUP as MASTER_GROUP
+
+        assert FUNDAMENTAL_GROUP == MASTER_GROUP
+
+
+class TestDartResponseShapes:
+    """The guards `krx_master` has, on the collector that calls the same API.
+
+    Both read `list.json`; one was hardened over four review rounds and the
+    other was not touched. A response that parses but is the wrong shape raises
+    `AttributeError` or `TypeError`, neither of which is a `CollectorError`, so
+    `run_collector` re-raises and files an outage as a defect in our own code.
+    """
+
+    @staticmethod
+    def answering(body: object) -> tuple[DartFundamentalCollector, object]:
+        import httpx
+
+        class Guard:
+            def reserve(
+                self, group: str, endpoint: str, *, calls: int = 1, now: object = None
+            ) -> None:
+                return None
+
+        c = DartFundamentalCollector(guard=Guard())  # type: ignore[arg-type]
+        c._key = "test-key"
+        c._bucket = type("NoWait", (), {"acquire": lambda self: None})()  # type: ignore[assignment]
+        client = httpx.Client(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(200, json=body))
+        )
+        return c, client
+
+    def test_a_payload_that_is_not_an_object_is_an_outage(self) -> None:
+        from app.collectors.base import UpstreamUnavailableError
+
+        c, client = self.answering([1, 2, 3])
+        with client, pytest.raises(UpstreamUnavailableError, match="not an object"):
+            c._get(client, "list.json", corp_code="00126380")  # type: ignore[arg-type]
+
+    def test_filing_rows_that_are_not_a_list_are_an_outage(self) -> None:
+        from app.collectors.base import UpstreamUnavailableError
+
+        c, client = self.answering({"status": "000", "list": "한 건"})
+        with client, pytest.raises(UpstreamUnavailableError, match="rows were expected"):
+            c._collect_filings(  # type: ignore[attr-defined]
+                client,
+                corp_code="00126380",
+                instrument_id=1,
+                calendar=MarketCalendar(Market.KR),
+            )
+
+    def test_account_rows_that_are_not_a_list_are_an_outage(self) -> None:
+        """The second `list.json`-shaped response, on the financial endpoint."""
+        from app.collectors.base import UpstreamUnavailableError
+
+        c, client = self.answering({"status": "000", "list": {"account_id": "x"}})
+        with client, pytest.raises(UpstreamUnavailableError, match="rows were expected"):
+            c._accounts(client, corp_code="00126380", year=2025)  # type: ignore[arg-type]
+
+    def test_absent_account_rows_are_simply_empty(self) -> None:
+        c, client = self.answering({"status": "000"})
+        with client:
+            assert c._accounts(client, corp_code="00126380", year=2025) == []  # type: ignore[arg-type]
+
+    def test_a_filing_row_that_is_not_an_object_is_skipped(self) -> None:
+        c, client = self.answering({"status": "000", "list": ["rubbish", 7]})
+        with client:
+            rows = c._collect_filings(  # type: ignore[attr-defined]
+                client,
+                corp_code="00126380",
+                instrument_id=1,
+                calendar=MarketCalendar(Market.KR),
+            )
+
+        assert rows == []
+
+    def test_an_account_row_that_is_not_an_object_is_skipped(self) -> None:
+        c, _client = self.answering({})
+        rows, seen = c._to_rows(
+            ["rubbish", 7, None],  # type: ignore[arg-type]
+            instrument_id=1,
+            business_year=2025,
+            fiscal_end_month=12,
+            calendar=MarketCalendar(Market.KR),
+        )
+
+        assert rows == []
+        assert seen == 0
+
+    def test_a_numeric_account_id_is_not_read_as_a_concept(self) -> None:
+        """`str(1234)` would match nothing, but the read itself used to raise."""
+        c, _client = self.answering({})
+        rows, _ = c._to_rows(
+            [{"account_id": 1234, "rcept_no": 20260101000001}],  # type: ignore[arg-type]
+            instrument_id=1,
+            business_year=2025,
+            fiscal_end_month=12,
+            calendar=MarketCalendar(Market.KR),
+        )
+
+        assert rows == []
