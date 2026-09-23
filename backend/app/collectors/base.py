@@ -252,6 +252,19 @@ class BaseCollector(ABC):
         return run_collector(self, session)
 
 
+def _printable(text: str | None) -> str | None:
+    """A message made safe for a text column, by escaping what it cannot hold.
+
+    Error text quotes the provider — a status message, the start of an error
+    page — so it can carry exactly what `storable` rejects. Escaping keeps the
+    evidence readable instead of dropping it: the note that says what went
+    wrong is the last thing that should be lost to what went wrong.
+    """
+    if text is None or storable(text):
+        return text
+    return text.encode("utf-8", "backslashreplace").decode("utf-8").replace(_NUL, "<NUL>")
+
+
 def _record(session: Session, run: CollectorRun) -> None:
     """Write the run row even when the collector left the session unusable.
 
@@ -268,6 +281,13 @@ def _record(session: Session, run: CollectorRun) -> None:
     keeping anyway.
     """
     from sqlalchemy.exc import SQLAlchemyError
+
+    # A provider's words reach these two fields through exception messages,
+    # and a NUL in a DART status message or a gateway's error page used to
+    # fail both commits below — the run went unrecorded, which is the one
+    # outcome this function exists to prevent.
+    run.error = _printable(run.error)
+    run.detail = _printable(run.detail)
 
     # Captured before anything is added, so it describes what the collector
     # left behind and not what this function is about to write.
@@ -316,7 +336,7 @@ def run_collector(collector: Collector, session: Session) -> CollectorRun:
         run.finished_at = utc_now()
         run.detail = reason
         _record(session, run)
-        logger.info("%s: skipped (%s)", collector.name, reason)
+        logger.info("%s: skipped (%s)", collector.name, _printable(reason))
         return run
 
     try:
@@ -324,19 +344,24 @@ def run_collector(collector: Collector, session: Session) -> CollectorRun:
     except SkipCollection as skip:
         run.status = CollectorStatus.SKIPPED
         run.detail = skip.reason
-        logger.info("%s: skipped (%s)", collector.name, skip.reason)
+        logger.info("%s: skipped (%s)", collector.name, _printable(skip.reason))
     except CollectorError as exc:
         # A typed failure: the source misbehaved in a way we anticipated.
         run.status = CollectorStatus.FAILED
         run.error = f"{type(exc).__name__}: {exc}"
-        logger.warning("%s: failed — %s", collector.name, exc)
+        # The log line gets the same treatment as the run row: a provider's
+        # words can hold what a UTF-8 log stream cannot write, and a lost
+        # log line is a lost clue.
+        logger.warning("%s: failed — %s", collector.name, _printable(str(exc)))
     except EXTERNAL_FAILURES as exc:
         # Unmistakably the outside world: sockets, DNS, timeouts. Contained,
         # but noted as unwrapped so the collector can be tightened later.
         run.status = CollectorStatus.FAILED
         run.error = f"{type(exc).__name__}: {exc}"
         logger.warning(
-            "%s: external failure not wrapped by the collector — %s", collector.name, exc
+            "%s: external failure not wrapped by the collector — %s",
+            collector.name,
+            _printable(str(exc)),
         )
     except Exception:
         # Deliberately re-raised. A programming error recorded as FAILED would

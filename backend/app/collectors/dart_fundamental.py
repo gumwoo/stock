@@ -621,4 +621,10 @@ def _parse_amount(raw: object) -> Decimal | None:
     # reported.
     if not value.is_finite() or abs(value) >= AMOUNT_CEILING:
         return None
+    # The other end of the column. `Numeric(30, 6)` keeps six decimal places,
+    # so a non-zero magnitude below a millionth is not storable as itself —
+    # and one like `1E-100000` is refused outright by PostgreSQL, taking every
+    # DART row of the run with it. DART amounts are whole won; this is not one.
+    if value and value.adjusted() < -6:
+        return None
     return value

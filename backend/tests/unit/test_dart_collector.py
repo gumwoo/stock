@@ -929,3 +929,20 @@ class TestEveryDartValueFitsItsColumn:
 
         assert len(rows) == 1
         assert chr(0) not in rows[0].form
+
+
+class TestTheSmallEndOfTheColumn:
+    """`Numeric(30, 6)` keeps six places. `1E-100000` parses as a Decimal and is
+    refused by PostgreSQL outright, rolling back every DART row in the run."""
+
+    def test_a_vanishing_amount_is_not_an_amount(self) -> None:
+        assert _parse_amount("1E-100000") is None
+        assert _parse_amount("1E-7") is None
+
+    def test_the_smallest_storable_step_still_is(self) -> None:
+        assert _parse_amount("0.000001") == Decimal("0.000001")
+        assert _parse_amount("0.5") == Decimal("0.5")
+
+    def test_zero_is_zero(self) -> None:
+        """A reported zero is a figure; only a tiny non-zero one is not."""
+        assert _parse_amount("0") == Decimal("0")

@@ -67,6 +67,7 @@ _TEST_SOURCES = (
     "MASTER_UNDER_TEST",
     "POISONING",
     "SUCCEEDING_CLEANLY",
+    "QUOTING",
     "SUCCEEDING_BADLY",
 )
 
@@ -611,3 +612,43 @@ class TestTheDowngradeOnlyAppliesToWhatWasLost:
 
         assert run.status is CollectorStatus.SUCCESS
         assert run.items_saved == 3
+
+
+class QuotingCollector(BaseCollector):
+    """Fails with the provider's own words, which carry NUL and a surrogate."""
+
+    name = "QUOTING"
+
+    def collect(self, session: Session) -> CollectionResult:
+        raise UpstreamUnavailableError(
+            "DART returned status 800: 시스템 점검" + chr(0) + "중 " + chr(0xD83D)
+        )
+
+
+class TestTheProvidersWordsCannotEraseTheRecord:
+    """An error message quotes the provider, so it can carry what no text
+    column accepts. Observed: a NUL in a DART status message made both commits
+    in the recorder fail, and the run left no row at all."""
+
+    def test_the_failure_is_still_recorded(self, session: Session) -> None:
+        before = len(
+            list(
+                session.execute(
+                    select(CollectorRun).where(CollectorRun.source == "QUOTING")
+                ).scalars()
+            )
+        )
+
+        run_collector(QuotingCollector(), session)
+        session.rollback()
+
+        rows = list(
+            session.execute(select(CollectorRun).where(CollectorRun.source == "QUOTING")).scalars()
+        )
+        assert len(rows) == before + 1
+        latest = rows[-1]
+        assert latest.status is CollectorStatus.FAILED
+        assert latest.error is not None
+        assert chr(0) not in latest.error
+        assert "<NUL>" in latest.error
+        assert "시스템 점검" in latest.error
