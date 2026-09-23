@@ -285,6 +285,17 @@ def cmd_promote(args: argparse.Namespace) -> int:
             return 2
     else:
         chosen = found.candidates[: args.top]
+    # Asked about a past moment, the list can hold names promoted since. They
+    # are tracked now; fetching their data again only to be refused is waste.
+    with session_scope() as session:
+        tracked_now = {
+            c.instrument_id
+            for c in chosen
+            if (i := instrument_repo.get_by_id(session, c.instrument_id)) is not None and i.tracked
+        }
+    if tracked_now:
+        print(f"skipping {len(tracked_now)} already tracked now")
+        chosen = [c for c in chosen if c.instrument_id not in tracked_now]
     _print_discovery(found, chosen)
     with session_scope() as session:
         outcomes = promotion_service.promote(session, found, chosen)

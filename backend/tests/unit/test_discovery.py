@@ -89,3 +89,29 @@ class TestRank:
         many = [counts(10 + n, 0, i=n) for n in range(10)]
         top, _ = rank(many, min_recent=3, min_recent_days=0.25, min_baseline_days=1.0, top=3)
         assert [s.instrument_id for s in top] == [9, 8, 7]
+
+
+class TestPromotionRunsKeepTheirOwnName:
+    """A run for three candidates must not read as a check of every tracked name."""
+
+    def test_both_fetches_are_recorded_under_a_promotion_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from types import SimpleNamespace
+
+        from app.models.collector import CollectorStatus
+        from app.services import promotion_service
+
+        names: list[str] = []
+
+        def fake_run(collector: object, session: object) -> SimpleNamespace:
+            names.append(collector.name)  # type: ignore[attr-defined]
+            return SimpleNamespace(status=CollectorStatus.SUCCESS)
+
+        monkeypatch.setattr(promotion_service, "run_collector", fake_run)
+        promotion_service.fetch_prices(None, [1])  # type: ignore[arg-type]
+        promotion_service.fetch_fundamentals(None, [1])  # type: ignore[arg-type]
+
+        assert names == ["PROMOTE_YFINANCE_HISTORY", "PROMOTE_DART_FUNDAMENTAL"]
+        # The freshness lookup matches by prefix; neither may start like a real run.
+        assert not any(n.startswith(("DART", "YFINANCE")) for n in names)

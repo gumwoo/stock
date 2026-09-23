@@ -432,9 +432,10 @@ def latest_available_at(
     if source is not None:
         stmt = stmt.where(NewsItem.source == source)
     if ingested_before is not None:
-        stmt = stmt.where(
-            NewsItem.ingested_at <= ensure_utc(ingested_before, field="ingested_before")
-        )
+        bound = ensure_utc(ingested_before, field="ingested_before")
+        # Both bounds. `ingested_at` is the sweep's start, so an article
+        # published while it ran is stamped before it existed.
+        stmt = stmt.where(NewsItem.ingested_at <= bound, NewsItem.available_at <= bound)
     return session.execute(stmt).scalar()
 
 

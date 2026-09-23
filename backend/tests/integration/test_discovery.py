@@ -343,6 +343,30 @@ class TestWhetherTheNewsWasFlowing:
         found = discovery_service.discover(world.session, asof=world.asof + timedelta(days=10))
         assert found.freshness is Freshness.STALE
 
+    def test_an_article_published_after_the_moment_is_not_the_newest_then(
+        self, world: World
+    ) -> None:
+        """Stored in a sweep that began before `asof`, published after it."""
+        later = world.asof + timedelta(hours=3)
+        world.session.add(
+            NewsItem(
+                source=NewsSource.NAVER_NEWS,
+                url_hash=f"late-{HOST}".encode().hex()[:64].ljust(64, "0"),
+                url=f"https://{HOST}/late",
+                title="late",
+                summary="",
+                published_at=later,
+                available_at=later,
+                ingested_at=world.asof - timedelta(minutes=1),
+            )
+        )
+        world.session.commit()
+
+        newest = news_repo.latest_available_at(
+            world.session, source=NewsSource.NAVER_NEWS, ingested_before=world.asof
+        )
+        assert newest is not None and newest <= world.asof
+
     def test_a_list_made_while_it_flows_is_fresh(self, world: World) -> None:
         found = discovery_service.discover(world.session, asof=world.asof)
         assert found.freshness is Freshness.FRESH

@@ -36,23 +36,26 @@ from app.services.discovery_service import Candidate, Discovery
 
 PERIOD = "5y"
 YEARS_BACK = 5
+# Runs for a handful of candidates are recorded under their own name. Left as
+# DART_FUNDAMENTAL, a three-company run would answer `last_success("DART")`
+# and make every tracked Korean name look freshly checked, which is what the
+# fundamental freshness gate reads.
+RUN_PREFIX = "PROMOTE_"
 
 # Fetches data for the given instruments and returns the run's status.
 Fetch = Callable[[Session, Sequence[int]], CollectorStatus]
 
 
 def fetch_prices(session: Session, instrument_ids: Sequence[int]) -> CollectorStatus:
-    run = run_collector(
-        YFinanceHistoryCollector(period=PERIOD, instrument_ids=instrument_ids), session
-    )
-    return run.status
+    collector = YFinanceHistoryCollector(period=PERIOD, instrument_ids=instrument_ids)
+    collector.name = RUN_PREFIX + collector.name
+    return run_collector(collector, session).status
 
 
 def fetch_fundamentals(session: Session, instrument_ids: Sequence[int]) -> CollectorStatus:
-    run = run_collector(
-        DartFundamentalCollector(years_back=YEARS_BACK, instrument_ids=instrument_ids), session
-    )
-    return run.status
+    collector = DartFundamentalCollector(years_back=YEARS_BACK, instrument_ids=instrument_ids)
+    collector.name = RUN_PREFIX + collector.name
+    return run_collector(collector, session).status
 
 
 @dataclass(frozen=True, slots=True)
