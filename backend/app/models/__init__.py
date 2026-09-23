@@ -31,6 +31,7 @@ from app.models.news import (
     NewsQueryHit,
     NewsRelevanceDecision,
     NewsSource,
+    NewsSweepCoverage,
 )
 from app.models.portfolio import (
     Holding,
@@ -38,6 +39,7 @@ from app.models.portfolio import (
     Transaction,
     TransactionSide,
 )
+from app.models.promotion import InstrumentPromotion
 from app.models.quota import ApiCallBucket
 from app.models.signal import Signal, SignalFactor, StrategyConfig
 
@@ -60,6 +62,7 @@ __all__ = [
     "HitDecision",
     "Holding",
     "Instrument",
+    "InstrumentPromotion",
     "Interval",
     "Listing",
     "MatchMethod",
@@ -68,6 +71,7 @@ __all__ = [
     "NewsQueryHit",
     "NewsRelevanceDecision",
     "NewsSource",
+    "NewsSweepCoverage",
     "PortfolioSnapshot",
     "SampleType",
     "Signal",

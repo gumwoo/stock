@@ -23,6 +23,7 @@ runs — and reproducibility is the point of the whole design.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -70,16 +71,30 @@ class YFinanceHistoryCollector(BaseCollector):
 
     name = "YFINANCE_HISTORY"
 
-    def __init__(self, *, period: str = "2y") -> None:
+    def __init__(
+        self, *, period: str = "2y", instrument_ids: Collection[int] | None = None
+    ) -> None:
         self.period = period
+        # Named instruments only, tracked or not: how a candidate gets its
+        # prices before it is promoted, rather than after.
+        self.instrument_ids = frozenset(instrument_ids) if instrument_ids is not None else None
 
     def collect(self, session: Session) -> CollectionResult:
         import yfinance as yf
 
         today = utc_now().date()
-        # Tracked only: a name from the listing master has no reason to be
-        # asked about, and asking is a network round trip each.
-        instruments = instrument_repo.list_active(session, asof=today, tracked=True)
+        if self.instrument_ids is not None:
+            instruments = [
+                i
+                # Untracked on purpose: these are candidates, fetched so that
+                # they can be promoted.
+                for i in instrument_repo.list_active(session, asof=today, tracked=None)
+                if i.instrument_id in self.instrument_ids
+            ]
+        else:
+            # Tracked only: a name from the listing master has no reason to be
+            # asked about, and asking is a network round trip each.
+            instruments = instrument_repo.list_active(session, asof=today, tracked=True)
         if not instruments:
             return CollectionResult(detail="no active instruments to collect")
 

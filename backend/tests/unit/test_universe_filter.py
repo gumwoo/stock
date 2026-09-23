@@ -25,10 +25,12 @@ import pathlib
 
 APP = pathlib.Path(__file__).resolve().parents[2] / "app"
 
-# News matching is the exception, and the only one. Finding a company worth
-# looking at is the entire point of reading the news, so it has to see names
-# we do not follow yet — that is what makes them candidates.
-UNFILTERED_BY_DESIGN = {"collectors/naver_news.py"}
+# News matching and discovery are the exceptions. Finding a company worth
+# looking at is the entire point of reading the news, so both have to see
+# names we do not follow yet — that is what makes them candidates. Discovery
+# also decides "untracked" as of a past moment, which today's flag cannot do
+# in SQL: a name promoted since then was untracked then.
+UNFILTERED_BY_DESIGN = {"collectors/naver_news.py", "services/discovery_service.py"}
 
 
 def call_sites() -> list[tuple[str, int, bool]]:

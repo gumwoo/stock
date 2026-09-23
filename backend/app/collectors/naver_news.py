@@ -1079,9 +1079,13 @@ class NaverNewsCollector(BaseCollector):
                 aliases = self.aliases_for(instrument)
                 conflicts = self.conflicts_for((instrument.name, *aliases), registry)
 
+                asked_at = utc_now()
                 pages = self._sweep(client, query=query, since=since)
                 if pages.requests:
                     asked += 1
+                    self._record_coverage(
+                        session, instrument, pages, since=since, asked_at=asked_at
+                    )
                 if pages.exhausted is not None:
                     # Our own budget, mid-run. Whatever this sweep already
                     # fetched is stored below before the loop ends; the run
@@ -1197,6 +1201,40 @@ class NaverNewsCollector(BaseCollector):
             partial=bool(warnings),
             warnings=warnings,
             detail=detail,
+        )
+
+    def _record_coverage(
+        self,
+        session: Session,
+        instrument: Instrument,
+        pages: Sweep,
+        *,
+        since: datetime,
+        asked_at: datetime,
+    ) -> None:
+        """Write down which stretch of time this company's sweep actually read.
+
+        Up to the moment the first request went out, and back to the
+        watermark — unless the page cap or the budget cut the sweep short, in
+        which case only back to the oldest result it returned. A sweep cut
+        short before it returned anything read nothing and records nothing.
+        """
+        cut = pages.hit_page_cap or pages.exhausted is not None
+        oldest = min((row.available_at for row, _ in pages.rows), default=None)
+        if cut and oldest is None:
+            return
+        news_repo.record_coverage(
+            session,
+            [
+                news_repo.CoverageRow(
+                    instrument_id=instrument.instrument_id,
+                    source=NewsSource.NAVER_NEWS,
+                    collector=self.name,
+                    covered_from=oldest if cut and oldest is not None else since,
+                    covered_to=asked_at,
+                    capped=cut,
+                )
+            ],
         )
 
     def _sweep(self, client: httpx.Client, *, query: str, since: datetime) -> Sweep:

@@ -12,6 +12,7 @@ from app.repositories import (
     fundamental_repo,
     instrument_repo,
     news_repo,
+    promotion_repo,
     quota_repo,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "fundamental_repo",
     "instrument_repo",
     "news_repo",
+    "promotion_repo",
     "quota_repo",
 ]

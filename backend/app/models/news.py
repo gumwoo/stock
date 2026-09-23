@@ -67,6 +67,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -331,3 +332,58 @@ class NewsRelevanceDecision(Base):
             f"<NewsRelevanceDecision hit={self.query_hit_id} {self.decision} "
             f"({self.decision_reason}) at {self.decided_at}>"
         )
+
+
+class NewsSweepCoverage(Base):
+    """The stretch of time one sweep actually read for one company.
+
+    A search returns the newest results first, one page of a hundred. For a
+    quiet company that page reaches back past the watermark and the sweep has
+    read everything since it: `[since, read_at]`. For a busy one the page runs
+    out first and the sweep has read only `[oldest result, read_at]`; anything
+    older in that sweep's range was never seen. The first full sweep hit that
+    cap on 273 of 2,648 names, and a count of mentions over a window means
+    nothing without knowing how much of the window was read.
+
+    Append-only, one row per company per sweep that sent a request.
+    """
+
+    __tablename__ = "news_sweep_coverage"
+
+    id: Mapped[BigIntPk]
+    instrument_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("instrument.instrument_id", ondelete="CASCADE"), nullable=False
+    )
+    source: Mapped[NewsSource] = mapped_column(
+        Enum(NewsSource, name="news_source", native_enum=False, length=16), nullable=False
+    )
+    collector: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        doc="The collector that swept, as `collector_run.source` names it. Tests "
+        "sweep the real master under their own name, and a reader asks for the "
+        "real collector's sweeps only.",
+    )
+    covered_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        doc="The watermark, or the oldest result read when the page cap cut the sweep short.",
+    )
+    covered_to: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, doc="When the search was sent."
+    )
+    capped: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, doc="The page cap or the budget cut this sweep short."
+    )
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.clock_timestamp(),
+        nullable=False,
+        doc="When the database recorded it. A reader at a moment sees rows recorded by then.",
+    )
+
+    __table_args__ = (
+        Index("ix_news_sweep_coverage_instrument_to", "instrument_id", "covered_to"),
+        Index("ix_news_sweep_coverage_collector", "collector", "recorded_at"),
+        Index("ix_news_sweep_coverage_recorded", "recorded_at"),
+    )

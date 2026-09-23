@@ -32,6 +32,7 @@ from __future__ import annotations
 import calendar
 import logging
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -274,7 +275,16 @@ class DartFundamentalCollector(BaseCollector):
 
     name = "DART_FUNDAMENTAL"
 
-    def __init__(self, *, years_back: int = 5, guard: QuotaGuard | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        years_back: int = 5,
+        guard: QuotaGuard | None = None,
+        instrument_ids: Collection[int] | None = None,
+    ) -> None:
+        # Named instruments only, tracked or not: how a candidate gets its
+        # filings before it is promoted. About six calls each.
+        self.instrument_ids = frozenset(instrument_ids) if instrument_ids is not None else None
         settings = get_settings()
         self._key = settings.dart_api_key
         # DART publishes no per-second limit, only a daily quota. The bucket
@@ -355,8 +365,12 @@ class DartFundamentalCollector(BaseCollector):
             # with neither prices nor a reason to read their filings, and at
             # roughly six calls each that sweep is about 24,000 — over the
             # DART budget and over the published cap behind it.
-            for i in instrument_repo.list_active(session, asof=today, tracked=True)
-            if i.market is Market.KR and i.kr_corp_code
+            for i in instrument_repo.list_active(
+                session, asof=today, tracked=None if self.instrument_ids is not None else True
+            )
+            if i.market is Market.KR
+            and i.kr_corp_code
+            and (self.instrument_ids is None or i.instrument_id in self.instrument_ids)
         ]
         if not instruments:
             return CollectionResult(detail="no Korean instruments with a DART corp code")

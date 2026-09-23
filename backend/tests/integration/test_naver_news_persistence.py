@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
 
 import pytest
@@ -33,6 +34,7 @@ from app.collectors.base import CollectorStatusLookup, run_collector
 from app.collectors.naver_news import PAGE_SIZE, NaverNewsCollector
 from app.config import get_settings
 from app.core.calendar import Market
+from app.core.clock import utc_now
 from app.models import Base, CollectorRun, CollectorStatus, Instrument, SymbolHistory
 from app.models.news import MatchMethod, NewsItem, NewsMention
 
@@ -53,13 +55,19 @@ class FakeGuard:
         self.reserved += 1
 
 
+def recent_pub() -> str:
+    """An hour ago. Sweeps here run on the real clock, whose first-run
+    watermark is three days back; a fixed date falls out of it three days on."""
+    return format_datetime(utc_now() - timedelta(hours=1))
+
+
 def article(*, slug: str, title: str, summary: str = "") -> dict[str, str]:
     return {
         "title": title,
         "description": summary,
         "originallink": f"https://{HOST}/{slug}",
         "link": f"https://n.news.naver.com/{slug}",
-        "pubDate": "Mon, 21 Sep 2026 14:03:00 +0900",
+        "pubDate": recent_pub(),
     }
 
 
@@ -106,21 +114,33 @@ def market(engine: object) -> Iterator[tuple[Session, list[Instrument]]]:
             made.append(inst)
         s.commit()
 
-        yield s, made
-
-        ids = [i.instrument_id for i in made]
-        s.execute(
-            text(
-                "DELETE FROM news_mention WHERE instrument_id = ANY(:ids) "
-                "OR news_item_id IN (SELECT id FROM news_item WHERE url LIKE :host)"
-            ),
-            {"ids": ids, "host": f"%{HOST}%"},
-        )
-        s.execute(text("DELETE FROM news_item WHERE url LIKE :host"), {"host": f"%{HOST}%"})
-        s.execute(text("DELETE FROM symbol_history WHERE instrument_id = ANY(:ids)"), {"ids": ids})
-        s.execute(text("DELETE FROM instrument WHERE instrument_id = ANY(:ids)"), {"ids": ids})
-        s.execute(text("DELETE FROM collector_run WHERE source = :src"), {"src": SOURCE})
-        s.commit()
+        try:
+            yield s, made
+        finally:
+            # In `finally` and after a rollback: a test that ends inside a
+            # failed transaction must still leave no companies behind, or the
+            # next run sweeps them too and every count in its report is off.
+            s.rollback()
+            ids = [i.instrument_id for i in made]
+            s.execute(
+                text(
+                    "DELETE FROM news_mention WHERE instrument_id = ANY(:ids) "
+                    "OR news_item_id IN (SELECT id FROM news_item WHERE url LIKE :host)"
+                ),
+                {"ids": ids, "host": f"%{HOST}%"},
+            )
+            s.execute(text("DELETE FROM news_item WHERE url LIKE :host"), {"host": f"%{HOST}%"})
+            s.execute(
+                text("DELETE FROM symbol_history WHERE instrument_id = ANY(:ids)"), {"ids": ids}
+            )
+            s.execute(text("DELETE FROM instrument WHERE instrument_id = ANY(:ids)"), {"ids": ids})
+            s.execute(text("DELETE FROM collector_run WHERE source = :src"), {"src": SOURCE})
+            # These sweeps walk the whole master; what they claim to have read
+            # is not news and must not outlive the test.
+            s.execute(
+                text("DELETE FROM news_sweep_coverage WHERE collector = :src"), {"src": SOURCE}
+            )
+            s.commit()
 
 
 def collector_over(pages: dict[str, list[list[dict[str, str]]]]) -> NaverNewsCollector:
@@ -573,7 +593,7 @@ class TestOneBadArticleCostsOneArticle:
             "description": "",
             "originallink": f"https://{HOST}/" + "x" * 1_200,
             "link": "https://n.news.naver.com/long",
-            "pubDate": "Mon, 21 Sep 2026 14:03:00 +0900",
+            "pubDate": recent_pub(),
         }
         pages = {
             "테스트반도체": [[article(slug="kept", title="테스트반도체 수주")]],

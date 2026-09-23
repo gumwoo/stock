@@ -33,11 +33,12 @@ from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from sqlalchemy import Subquery, delete, func, select, tuple_
+from sqlalchemy import Subquery, delete, func, insert, literal, select, tuple_, union_all
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.clock import ensure_utc
+from app.models import Instrument
 from app.models.news import (
     Decider,
     HitDecision,
@@ -47,6 +48,7 @@ from app.models.news import (
     NewsQueryHit,
     NewsRelevanceDecision,
     NewsSource,
+    NewsSweepCoverage,
 )
 from app.repositories import bulk
 
@@ -413,7 +415,6 @@ def latest_available_at(
     session: Session,
     *,
     source: NewsSource | None = None,
-    instrument_id: int | None = None,
     ingested_before: datetime | None = None,
 ) -> datetime | None:
     """The newest article we can see, for judging whether the pipe is flowing.
@@ -422,6 +423,10 @@ def latest_available_at(
     should keep arriving, so silence is itself the signal. Distinct from the
     fundamental rule, which asks when the source was last checked rather than
     how old the newest item is.
+
+    There is no per-instrument form. The one that existed read `news_mention`,
+    which holds today's verdicts, so asked about a past moment it answered
+    with what we believe now.
     """
     stmt = select(func.max(NewsItem.available_at))
     if source is not None:
@@ -430,11 +435,130 @@ def latest_available_at(
         stmt = stmt.where(
             NewsItem.ingested_at <= ensure_utc(ingested_before, field="ingested_before")
         )
-    if instrument_id is not None:
-        stmt = stmt.join(NewsMention, NewsMention.news_item_id == NewsItem.id).where(
-            NewsMention.instrument_id == instrument_id
+    return session.execute(stmt).scalar()
+
+
+def earliest_available_at(
+    session: Session,
+    *,
+    source: NewsSource | None = None,
+    ingested_before: datetime | None = None,
+) -> datetime | None:
+    """How far back collection reaches, as far as the stored articles can say.
+
+    Nothing before this was ever read, so a baseline window reaching further
+    back is partly empty rather than quiet. It is the oldest article of any
+    sweep, and an early sweep over a handful of names reaches as far as a full
+    one, so for the other names it can overstate coverage by the difference.
+    """
+    stmt = select(func.min(NewsItem.available_at))
+    if source is not None:
+        stmt = stmt.where(NewsItem.source == source)
+    if ingested_before is not None:
+        stmt = stmt.where(
+            NewsItem.ingested_at <= ensure_utc(ingested_before, field="ingested_before")
         )
     return session.execute(stmt).scalar()
+
+
+class CoverageRow(NamedTuple):
+    instrument_id: int
+    source: NewsSource
+    collector: str
+    covered_from: datetime
+    covered_to: datetime
+    capped: bool
+
+
+def record_coverage(session: Session, rows: Sequence[CoverageRow]) -> None:
+    """Append what each sweep read, for instruments that still exist. Does not commit.
+
+    An instrument removed while the sweep ran has nothing to record against.
+    Joining at insert time rather than trusting the list the sweep started
+    with keeps that from failing the whole run on a foreign key.
+    """
+    c = NewsSweepCoverage
+    fields = list(CoverageRow._fields)
+    for batch in bulk.batched(rows, columns=len(fields)):
+        columns = c.__table__.c
+        incoming = (
+            select(*(literal(getattr(r, f), type_=columns[f].type).label(f) for f in fields))
+            for r in batch
+        )
+        values = union_all(*incoming).subquery("incoming")
+        chosen = select(*(values.c[f] for f in fields)).join(
+            Instrument, Instrument.instrument_id == values.c.instrument_id
+        )
+        session.execute(insert(c).from_select(fields, chosen))
+
+
+def coverage(
+    session: Session,
+    *,
+    asof: datetime,
+    start: datetime,
+    end: datetime,
+    collector: str,
+    source: NewsSource | None = None,
+) -> dict[int, list[tuple[datetime, datetime]]]:
+    """Per instrument, the stretches of `[start, end]` a sweep recorded by `asof` had read.
+
+    `collector` names whose sweeps count. Tests sweep the real master under
+    names of their own, and what they claim to have read is not news.
+    """
+    asof = ensure_utc(asof, field="asof")
+    start = ensure_utc(start, field="start")
+    end = ensure_utc(end, field="end")
+    c = NewsSweepCoverage
+    stmt = select(c.instrument_id, c.covered_from, c.covered_to).where(
+        c.collector == collector, c.recorded_at <= asof, c.covered_to > start, c.covered_from < end
+    )
+    if source is not None:
+        stmt = stmt.where(c.source == source)
+    out: dict[int, list[tuple[datetime, datetime]]] = {}
+    for instrument_id, lo, hi in session.execute(stmt).all():
+        out.setdefault(instrument_id, []).append((max(lo, start), min(hi, end)))
+    return out
+
+
+def confirmed_times(
+    session: Session,
+    *,
+    asof: datetime,
+    start: datetime,
+    end: datetime,
+    source: NewsSource | None = None,
+) -> dict[int, list[datetime]]:
+    """When each article confirmed as about an instrument became available.
+
+    Articles available in `(start, end]` that had been stored by `asof` and
+    whose verdict at `asof` was CONFIRMED. Each condition is a point-in-time
+    bound: a later sweep, a later article and a later re-judgment are all
+    invisible, so asking about the same moment gives the same answer after the
+    rules have moved on. Times, not counts, so the caller can keep only the
+    articles inside the stretches a sweep actually read.
+    """
+    asof = ensure_utc(asof, field="asof")
+    latest = _latest(asof=asof)
+    stmt = (
+        select(NewsQueryHit.instrument_id, NewsItem.id, NewsItem.available_at)
+        .select_from(latest)
+        .join(NewsQueryHit, NewsQueryHit.id == latest.c.query_hit_id)
+        .join(NewsItem, NewsItem.id == NewsQueryHit.news_item_id)
+        .where(
+            latest.c.decision == HitDecision.CONFIRMED,
+            NewsItem.available_at > ensure_utc(start, field="start"),
+            NewsItem.available_at <= ensure_utc(end, field="end"),
+            NewsItem.ingested_at <= asof,
+        )
+        .distinct()
+    )
+    if source is not None:
+        stmt = stmt.where(NewsItem.source == source)
+    out: dict[int, list[datetime]] = {}
+    for instrument_id, _, available_at in session.execute(stmt).all():
+        out.setdefault(instrument_id, []).append(available_at)
+    return out
 
 
 def count_items(session: Session, *, source: NewsSource | None = None) -> int:

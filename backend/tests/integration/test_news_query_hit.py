@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
 
 import pytest
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.collectors.naver_news import RULE_VERSION, NaverNewsCollector, rejudge_hits
+from app.collectors.naver_news import PAGE_SIZE, RULE_VERSION, NaverNewsCollector, rejudge_hits
 from app.config import get_settings
 from app.core.calendar import Market
 from app.core.clock import utc_now
@@ -31,6 +32,7 @@ from app.models.news import (
     NewsQueryHit,
     NewsRelevanceDecision,
     NewsSource,
+    NewsSweepCoverage,
 )
 from app.repositories import news_repo
 from app.repositories.news_repo import QueryHitRow
@@ -96,6 +98,12 @@ def world(engine: object) -> Iterator[tuple[Session, Instrument, list[int]]]:
             yield s, inst, items
         finally:
             s.rollback()
+            # Sweeps here walk the whole master; what they claim to have read
+            # is not news and must not outlive the test.
+            s.execute(
+                text("DELETE FROM news_sweep_coverage WHERE collector = :c"),
+                {"c": "NAVER_NEWS_HIT_TEST"},
+            )
             s.execute(text("DELETE FROM news_item WHERE url LIKE :h"), {"h": f"%{HOST}%"})
             s.execute(
                 text("DELETE FROM symbol_history WHERE instrument_id = :i"),
@@ -449,7 +457,9 @@ class TestTheSweepWritesVerdicts:
         self, world: tuple[Session, Instrument, list[int]]
     ) -> None:
         session, inst, _ = world
-        pub = "Mon, 21 Sep 2026 14:03:00 +0900"
+        # Relative, not a fixed date: the first-run watermark is three days
+        # back from now, and a fixed date falls out of it three days later.
+        pub = format_datetime(utc_now() - timedelta(hours=1))
         items = [
             {
                 "title": SHORT + ", 신규 공장 착공",
@@ -467,25 +477,7 @@ class TestTheSweepWritesVerdicts:
             },
         ]
 
-        class Guard:
-            def reserve(
-                self, group: str, endpoint: str, *, calls: int = 1, now: Any = None
-            ) -> None:
-                return None
-
-        c = NaverNewsCollector(guard=Guard(), only=[SHORT], max_pages=1)  # type: ignore[arg-type]
-        c.name = "NAVER_NEWS_HIT_TEST"
-        c._client_id = "id"
-        c._client_secret = "secret"
-        c._get = lambda client, *, query, start: {"items": items if query == SHORT else []}  # type: ignore[assignment,method-assign]
-
-        try:
-            result = c.collect(session)
-        finally:
-            session.execute(
-                text("DELETE FROM collector_run WHERE source = :s"), {"s": "NAVER_NEWS_HIT_TEST"}
-            )
-            session.commit()
+        result = sweep(session, items)
 
         verdicts = {
             d.news_item_id: d.decision
@@ -506,6 +498,69 @@ class TestTheSweepWritesVerdicts:
         assert mention_pairs(session, inst.instrument_id) == {lead_id}
         assert "1 pending" in (result.detail or "")
         assert news_repo.projection_drift(session) == (0, 0)
+
+        # Two results on a page of a hundred: the whole range since the
+        # watermark was read, and the record says so.
+        (row,) = coverage_rows(session, inst.instrument_id)
+        assert not row.capped
+        assert row.covered_from < utc_now() - timedelta(days=2)
+
+    def test_a_full_page_records_only_the_stretch_it_reached(
+        self, world: tuple[Session, Instrument, list[int]]
+    ) -> None:
+        """One page of a hundred, all recent: older news in range was never seen."""
+        session, inst, _ = world
+        now = utc_now()
+        items = [
+            {
+                "title": f"{SHORT} 소식 {n}",
+                "description": "",
+                "originallink": f"https://{HOST}/page-{n}",
+                "link": "",
+                "pubDate": format_datetime(now - timedelta(minutes=n + 1)),
+            }
+            for n in range(PAGE_SIZE)
+        ]
+
+        sweep(session, items)
+
+        (row,) = coverage_rows(session, inst.instrument_id)
+        oldest = now - timedelta(minutes=PAGE_SIZE)
+        assert row.capped
+        assert abs((row.covered_from - oldest).total_seconds()) < 1
+        assert row.covered_to >= now - timedelta(seconds=5)
+
+
+def sweep(session: Session, items: list[dict[str, str]]) -> Any:
+    class Guard:
+        def reserve(self, group: str, endpoint: str, *, calls: int = 1, now: Any = None) -> None:
+            return None
+
+    c = NaverNewsCollector(guard=Guard(), only=[SHORT], max_pages=1)  # type: ignore[arg-type]
+    c.name = "NAVER_NEWS_HIT_TEST"
+    c._client_id = "id"
+    c._client_secret = "secret"
+    c._get = lambda client, *, query, start: {"items": items if query == SHORT else []}  # type: ignore[assignment,method-assign]
+    try:
+        return c.collect(session)
+    finally:
+        session.rollback()
+        session.execute(
+            text("DELETE FROM collector_run WHERE source = :s"), {"s": "NAVER_NEWS_HIT_TEST"}
+        )
+        session.commit()
+
+
+def coverage_rows(session: Session, instrument_id: int) -> list[NewsSweepCoverage]:
+    session.expire_all()
+    return list(
+        session.execute(
+            select(NewsSweepCoverage).where(
+                NewsSweepCoverage.instrument_id == instrument_id,
+                NewsSweepCoverage.collector == "NAVER_NEWS_HIT_TEST",
+            )
+        ).scalars()
+    )
 
 
 class TestAFullSweepFitsInOneCall:

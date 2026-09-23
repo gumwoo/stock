@@ -9,6 +9,8 @@ difference between a minute and an afternoon.
     python -m app.cli seed            create the starting watchlist
     python -m app.cli collect --source yfinance
     python -m app.cli candles --symbol 005930
+    python -m app.cli discover        untracked names whose news surged
+    python -m app.cli promote --top 3 fetch their data, then track them
     python -m app.cli backtest run --symbol 005930
     python -m app.cli backtest show --run 1
     python -m app.cli backtest reproduce --run 1
@@ -20,6 +22,7 @@ import argparse
 import json
 import logging
 import sys
+from datetime import datetime, timedelta
 
 from app import cli_backtest
 from app.collectors.base import run_collector
@@ -37,6 +40,8 @@ from app.db import session_scope
 from app.models import Interval
 from app.repositories import candle_repo, instrument_repo, news_repo
 from app.seed import seed_watchlist
+from app.services import discovery_service, promotion_service
+from app.services.discovery_service import Candidate, Discovery
 
 logger = logging.getLogger("app.cli")
 
@@ -217,6 +222,78 @@ def cmd_candles(symbol: str, market: Market, limit: int) -> int:
     return 0
 
 
+def _discover_args(args: argparse.Namespace, *, top: int, min_recent: int) -> Discovery:
+    with session_scope() as session:
+        return discovery_service.discover(
+            session,
+            asof=datetime.fromisoformat(args.asof) if args.asof else None,
+            window=timedelta(hours=args.window_hours),
+            baseline=timedelta(days=args.baseline_days),
+            top=top,
+            min_recent=min_recent,
+        )
+
+
+def _print_discovery(found: Discovery, candidates: list[Candidate] | None = None) -> None:
+    print(
+        f"as of {found.asof.isoformat(timespec='minutes')}: news {found.freshness.value} "
+        f"(newest article {found.newest_article.isoformat(timespec='minutes') if found.newest_article else 'none'})"
+    )
+    reach = (
+        found.coverage_start.isoformat(timespec="minutes") if found.coverage_start else "nothing"
+    )
+    print(f"window {found.window}, baseline {found.baseline}; collection reaches back to {reach}")
+    if found.freshness.value != "FRESH":
+        print("  news is not flowing: a list made now describes an old picture")
+    print(
+        f"{found.considered} untracked names considered; {found.unmeasured} with recent "
+        f"mentions left unranked because too little of their news was read"
+    )
+    print(
+        f"{'#':>3} {'name':<16} {'symbol':<8} {'board':<7} {'recent':>6} {'days':>5} "
+        f"{'before':>6} {'days':>5} {'expected':>8} {'score':>6}"
+    )
+    for n, c in enumerate(found.candidates if candidates is None else candidates, 1):
+        print(
+            f"{n:>3} {c.name:<16} {c.symbol or '-':<8} "
+            f"{c.listing.value if c.listing else '-':<7} {c.recent:>6} {c.recent_days:>5.2f} "
+            f"{c.baseline:>6} {c.baseline_days:>5.2f} {c.expected:>8.1f} {c.score:>6.2f}"
+        )
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    """Untracked names whose news surged. Reads only; costs no API call."""
+    _print_discovery(_discover_args(args, top=args.top, min_recent=args.min_recent))
+    return 0
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    """Fetch prices and filings for candidates, then track those whose prices arrived.
+
+    Spends quota: yfinance once per name, DART about six calls per name.
+    """
+    wanted = {s.strip() for s in (args.symbols or "").split(",") if s.strip()}
+    if not wanted and not args.top:
+        print("say which: --symbols 123456,234567 or --top N")
+        return 2
+    found = _discover_args(args, top=10_000, min_recent=1 if wanted else args.min_recent)
+    if wanted:
+        chosen = [c for c in found.candidates if c.symbol in wanted]
+        missing = wanted - {c.symbol for c in chosen}
+        if missing:
+            print(f"not among untracked names with recent mentions: {', '.join(sorted(missing))}")
+            return 2
+    else:
+        chosen = found.candidates[: args.top]
+    _print_discovery(found, chosen)
+    with session_scope() as session:
+        outcomes = promotion_service.promote(session, found, chosen)
+    for o in outcomes:
+        mark = "+" if o.promoted else "-"
+        print(f"  {mark} {o.name}: {o.reason}; {o.candle_bars} bars, {o.fundamental_facts} facts")
+    return 0 if any(o.promoted for o in outcomes) else 1
+
+
 def cmd_runs() -> int:
     """Latest run per collector, as JSON."""
     from sqlalchemy import select
@@ -280,6 +357,27 @@ def main(argv: list[str] | None = None) -> int:
 
     cli_backtest.register(sub)
 
+    for name, helptext in (
+        ("discover", "untracked names whose news surged; reads only, no API calls"),
+        ("promote", "fetch prices and filings for candidates, then track them; spends quota"),
+    ):
+        cmd = sub.add_parser(name, help=helptext)
+        cmd.add_argument("--asof", help="ISO time to ask about; default now")
+        cmd.add_argument(
+            "--window-hours",
+            type=int,
+            default=int(discovery_service.DEFAULT_WINDOW.total_seconds() // 3600),
+        )
+        cmd.add_argument(
+            "--baseline-days", type=int, default=discovery_service.DEFAULT_BASELINE.days
+        )
+        cmd.add_argument("--min-recent", type=int, default=discovery_service.MIN_RECENT)
+        if name == "discover":
+            cmd.add_argument("--top", type=int, default=discovery_service.DEFAULT_TOP)
+        else:
+            cmd.add_argument("--top", type=int, help="promote the top N of the discovery")
+            cmd.add_argument("--symbols", help="promote these, comma-separated")
+
     candles = sub.add_parser("candles", help="print stored daily bars")
     candles.add_argument("--symbol", required=True)
     candles.add_argument("--market", default="KR", choices=[m.value for m in Market])
@@ -302,6 +400,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_rejudge_news()
         case "backtest":
             return cli_backtest.dispatch(args)
+        case "discover":
+            return cmd_discover(args)
+        case "promote":
+            return cmd_promote(args)
         case "candles":
             return cmd_candles(args.symbol, Market(args.market), args.limit)
         case _:  # pragma: no cover
