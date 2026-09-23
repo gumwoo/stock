@@ -336,6 +336,53 @@ class TestStopping:
         assert call.seven_day_utilization == pytest.approx(0.85)
 
 
+class TestAcrossRuns:
+    def test_a_run_after_a_full_window_does_not_spend_a_call_to_find_out(
+        self, world: World, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(get_settings(), "llm_batch_size", 1)
+        monkeypatch.setattr(get_settings(), "llm_max_five_hour_utilization", 0.5)
+        judge(world, Script(verdicts((1, "UNSURE")), usage=LlmUsage(five_hour_utilization=0.6)))
+
+        second = Script()
+        report = judge(world, second)
+
+        assert second.prompts == []
+        assert report.stopped is not None and "not starting" in report.stopped
+
+    def test_another_providers_readings_do_not_stop_this_one(self, world: World) -> None:
+        """Utilisation belongs to the account a provider bills; another's says nothing."""
+        world.session.add(
+            LlmCall(
+                purpose="relevance",
+                provider="some_other_provider",
+                model=MODEL,
+                prompt_version=1,
+                items=1,
+                status="OK",
+                five_hour_utilization=0.99,
+                seven_day_utilization=0.99,
+            )
+        )
+        world.session.commit()
+
+        provider = Script(verdicts((1, "UNSURE"), (2, "UNSURE"), (3, "UNSURE"), (4, "UNSURE")))
+        report = judge(world, provider)
+
+        assert len(provider.prompts) == 1
+        assert report.stopped is None
+
+    def test_an_unexpected_failure_is_recorded_before_it_unwinds(self, world: World) -> None:
+        with pytest.raises(RuntimeError):
+            judge(world, Script(RuntimeError("the CLI died")))
+        assert [c.status for c in calls(world)] == ["ERROR"]
+
+    def test_items_the_answer_left_out_are_counted_and_stay_open(self, world: World) -> None:
+        report = judge(world, Script(verdicts((1, "REJECTED"))))
+        assert (report.written, report.unanswered) == (1, 3)
+        assert latest(world, world.items[1]).decided_by is Decider.RULE
+
+
 def readings(*items: tuple[int, float]) -> dict[str, Any]:
     return {
         "readings": [

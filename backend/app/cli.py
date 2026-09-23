@@ -313,6 +313,7 @@ def _print_llm_report(report: llm_service.LlmRunReport) -> None:
             if report.malformed_batches
             else ""
         )
+        + (f", {report.unanswered} left unanswered" if report.unanswered else "")
     )
     if report.counts:
         print("  " + ", ".join(f"{k} {v}" for k, v in sorted(report.counts.items())))

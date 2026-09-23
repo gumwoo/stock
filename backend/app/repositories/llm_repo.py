@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import NamedTuple
 
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -26,6 +27,35 @@ class LlmCallRow(NamedTuple):
     five_hour_utilization: float | None = None
     seven_day_utilization: float | None = None
     error: str | None = None
+
+
+def recent_utilization(session: Session, *, provider: str) -> tuple[float | None, float | None]:
+    """The subscription's fullness as the last calls through `provider` reported it.
+
+    Five-hour usage from a call inside the last five hours; seven-day usage
+    from a call inside the last day. Older readings say nothing about now.
+    """
+    five = session.execute(
+        select(LlmCall.five_hour_utilization)
+        .where(
+            LlmCall.provider == provider,
+            LlmCall.five_hour_utilization.is_not(None),
+            LlmCall.called_at > func.clock_timestamp() - text("interval '5 hours'"),
+        )
+        .order_by(LlmCall.called_at.desc())
+        .limit(1)
+    ).scalar()
+    seven = session.execute(
+        select(LlmCall.seven_day_utilization)
+        .where(
+            LlmCall.provider == provider,
+            LlmCall.seven_day_utilization.is_not(None),
+            LlmCall.called_at > func.clock_timestamp() - text("interval '1 day'"),
+        )
+        .order_by(LlmCall.called_at.desc())
+        .limit(1)
+    ).scalar()
+    return five, seven
 
 
 def record_call(session: Session, row: LlmCallRow) -> None:

@@ -144,6 +144,8 @@ class LlmRunReport:
     calls: int = 0
     written: int = 0
     malformed_batches: int = 0
+    # Items the model's answer left out. Still open, so asked again next run.
+    unanswered: int = 0
     counts: dict[str, int] = field(default_factory=dict)
     stopped: str | None = None
     five_hour_utilization: float | None = None
@@ -204,6 +206,15 @@ def _run(
     settings = get_settings()
     report = LlmRunReport(purpose=purpose)
     size = settings.llm_batch_size
+    # The limits hold across runs, not only within one: a run started after an
+    # earlier one stopped for a full window must not spend a call to find out.
+    five, seven = llm_repo.recent_utilization(session, provider=provider.name)
+    if hits and five is not None and five >= settings.llm_max_five_hour_utilization:
+        report.stopped = f"five-hour usage at {five:.0%} by the last call; not starting"
+        return report
+    if hits and seven is not None and seven >= settings.llm_max_seven_day_utilization:
+        report.stopped = f"seven-day usage at {seven:.0%} by the last call; not starting"
+        return report
     for start in range(0, len(hits), size):
         batch = hits[start : start + size]
         try:
@@ -247,6 +258,20 @@ def _run(
             )
             report.stopped = f"unavailable: {exc}"
             break
+        except Exception as exc:
+            # Unanticipated, so not handled — but the call happened and was
+            # reserved, and the ledger must say so before it unwinds.
+            _ledger(
+                session,
+                provider,
+                purpose,
+                model,
+                prompt_version,
+                len(batch),
+                "ERROR",
+                error=repr(exc),
+            )
+            raise
 
         report.input_tokens += result.usage.input_tokens
         report.output_tokens += result.usage.output_tokens
@@ -383,6 +408,7 @@ def judge_pending(
                 )
             )
         news_repo.record_hits(session, rows)
+        report.unanswered += len(batch) - len(rows)
         # Only once the whole batch was valid: a malformed answer writes nothing.
         for key, n in tally.items():
             report.counts[key] = report.counts.get(key, 0) + n
@@ -457,6 +483,7 @@ def read_confirmed(
                 )
             )
         written = llm_repo.save_readings(session, rows)
+        report.unanswered += len(batch) - len(rows)
         for key, n in tally.items():
             report.counts[key] = report.counts.get(key, 0) + n
         return written

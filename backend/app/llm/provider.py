@@ -37,6 +37,16 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+# Every way Claude Code can be pointed at something billed per call instead of
+# at the subscription: an API key, a bearer token, or a cloud provider.
+_METERED = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+)
+
 
 class LlmUnavailableError(Exception):
     """The provider cannot be used as configured. Nothing was spent."""
@@ -84,11 +94,12 @@ class ClaudeAgentSdkProvider:
     def complete(
         self, *, system: str, prompt: str, schema: dict[str, Any], model: str
     ) -> LlmResult:
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            raise LlmUnavailableError(
-                "ANTHROPIC_API_KEY is set: the call would be billed to the API, not "
-                "the subscription. Unset it to use the subscription."
-            )
+        for variable in _METERED:
+            if os.environ.get(variable):
+                raise LlmUnavailableError(
+                    f"{variable} is set: the call would be billed outside the "
+                    "subscription. Unset it to use the subscription."
+                )
         try:
             import claude_agent_sdk  # noqa: F401
         except ImportError as exc:
@@ -130,6 +141,10 @@ class ClaudeAgentSdkProvider:
                     seven_day = (windows.get("seven_day") or {}).get("utilization", seven_day)
                     if getattr(info, "status", "allowed") not in ("allowed", "allowed_warning"):
                         raise LlmRateLimitedError(f"subscription limit: {raw}")
+                    # Past the plan's limit a subscription can run on paid
+                    # extra usage. That is exactly the bill this avoids.
+                    if raw.get("isUsingOverage"):
+                        raise LlmRateLimitedError("the subscription is into paid extra usage")
                 elif isinstance(message, ResultMessage):
                     result = message
 
