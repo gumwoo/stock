@@ -133,8 +133,12 @@ def _daily_loop() -> None:
         # A month of bars, not the default two years: the history is already
         # stored, and this only has to close the gap since the last run.
         run_collector(YFinanceHistoryCollector(period="1mo"), session)
-        # This year's reports, not five years': new filings are recent ones.
-        run_collector(DartFundamentalCollector(years_back=1), session)
+        # Two business years, not five: new filings are recent ones. Not one:
+        # the collector counts back from the calendar year, and this year's
+        # annual report is not filed until next March, so one year would ask
+        # only for a report that does not exist yet and still record SUCCESS
+        # — which is what the fundamental freshness check reads.
+        run_collector(DartFundamentalCollector(years_back=2), session)
         scored = scoring_service.score_all(session)
         logger.info("daily loop: scored %d", len(scored))
         logger.info(

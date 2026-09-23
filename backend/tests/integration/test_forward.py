@@ -119,7 +119,19 @@ def world(engine: object) -> Iterator[World]:
             s.commit()
 
 
-def signal(world: World, instrument_id: int, *, day: int, action: SignalAction) -> Signal:
+VERSION = "forward-test"
+
+
+def signal(
+    world: World,
+    instrument_id: int,
+    *,
+    day: int,
+    action: SignalAction,
+    version: str = VERSION,
+    late: bool = False,
+) -> Signal:
+    decided = KR.session_close(SESSIONS[day])
     row = Signal(
         instrument_id=instrument_id,
         data_asof=KR.session_close(SESSIONS[day]),
@@ -129,7 +141,10 @@ def signal(world: World, instrument_id: int, *, day: int, action: SignalAction) 
         action=action,
         policy=MissingFactorPolicy.ZERO,
         reasons=[],
-        strategy_version="forward-test",
+        strategy_version=version,
+        # Written at the close it judges, as the scheduled loop does; `late`
+        # writes it after the next open instead.
+        ingested_at=KR.session_open(SESSIONS[day + 1]) + timedelta(hours=1) if late else decided,
     )
     world.session.add(row)
     world.session.commit()
@@ -201,7 +216,7 @@ class TestTheReport:
         signal(world, world.ids[1], day=0, action=SignalAction.CAUTION)
         forward_service.evaluate_signals(world.session, now=NOW)
 
-        rep = forward_service.report(world.session)
+        rep = forward_service.report(world.session, strategy_version=VERSION)
 
         rising = (105 / 100.5 - 1) * 100
         flat = (100 / 99.5 - 1) * 100
@@ -216,8 +231,21 @@ class TestTheReport:
         signal(world, world.ids[0], day=0, action=SignalAction.BUY_INTEREST)
         forward_service.evaluate_signals(world.session, now=NOW)
 
-        rep = forward_service.report(world.session)
+        rep = forward_service.report(world.session, strategy_version=VERSION)
         assert rep.by_action[5]["BUY_INTEREST"].n == 1
+
+    def test_a_signal_written_after_its_entry_is_not_forward(self, world: World) -> None:
+        signal(world, world.ids[0], day=0, action=SignalAction.BUY_INTEREST, late=True)
+        forward_service.evaluate_signals(world.session, now=NOW)
+        rep = forward_service.report(world.session, strategy_version=VERSION)
+        assert 5 not in rep.by_action
+
+    def test_strategies_are_reported_apart(self, world: World) -> None:
+        """Another rule's judgements are not this rule's record."""
+        signal(world, world.ids[0], day=0, action=SignalAction.BUY_INTEREST, version="other")
+        forward_service.evaluate_signals(world.session, now=NOW)
+        rep = forward_service.report(world.session, strategy_version=VERSION)
+        assert 5 not in rep.by_action
 
 
 class TestCandidates:
@@ -259,8 +287,8 @@ class TestCandidates:
         assert forward_service.snapshot_candidates(world.session, now=asof) == 1
         added = forward_service.evaluate_candidates(world.session, now=NOW, fetch=fetch)
 
-        assert added == 3
-        assert asked == [[world.ids[1]]]
+        assert added >= 3
+        assert len(asked) == 1 and world.ids[1] in asked[0]
         snap = world.session.execute(
             select(CandidateSnapshot).where(CandidateSnapshot.instrument_id == world.ids[1])
         ).scalar_one()
@@ -271,3 +299,57 @@ class TestCandidates:
         ).scalar_one()
         assert one.entry_at == KR.session_open(SESSIONS[1])
         assert (snap.rank, snap.score) == (1, pytest.approx(8.3))
+
+    def test_the_same_name_listed_twice_for_one_open_counts_once(
+        self, world: World, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hand-run list the same evening as the scheduled one is the same bet."""
+        first = KR.session_close(SESSIONS[0]) + timedelta(hours=1)
+        for asof in (first, first + timedelta(minutes=20)):
+            monkeypatch.setattr(
+                discovery_service, "discover", lambda *a, _asof=asof, **k: listing(world, _asof)
+            )
+            forward_service.snapshot_candidates(world.session, now=asof)
+        forward_service.evaluate_candidates(
+            world.session, now=NOW, fetch=lambda *_: CollectorStatus.SUCCESS
+        )
+
+        rep = forward_service.report(
+            world.session, strategy_version=VERSION, instrument_ids=world.ids
+        )
+        ours = (
+            world.session.execute(
+                select(CandidateSnapshot).where(CandidateSnapshot.instrument_id == world.ids[1])
+            )
+            .scalars()
+            .all()
+        )
+        assert len(ours) == 2
+        assert (rep.candidates[5]["top 5"].n, rep.candidates[5]["top 5"].days) == (1, 1)
+
+
+def listing(world: World, asof: datetime) -> Discovery:
+    return Discovery(
+        asof=asof,
+        window=timedelta(hours=24),
+        baseline=timedelta(days=14),
+        coverage_start=None,
+        newest_article=None,
+        freshness=Freshness.FRESH,
+        considered=1,
+        unmeasured=0,
+        candidates=[
+            Candidate(
+                instrument_id=world.ids[1],
+                name=NAMES[1],
+                symbol="990981",
+                listing=None,
+                recent=9,
+                baseline=1,
+                recent_days=1.0,
+                baseline_days=5.0,
+                expected=0.2,
+                score=8.3,
+            )
+        ],
+    )

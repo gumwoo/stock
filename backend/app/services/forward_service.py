@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -48,6 +48,7 @@ from app.models import (
 from app.models.collector import CollectorStatus
 from app.models.forward import HORIZONS
 from app.repositories import candle_repo
+from app.scoring.policy import STRATEGY_VERSION
 from app.services import discovery_service
 
 # How far back evaluation looks for rows still missing an outcome. The longest
@@ -311,21 +312,35 @@ class ForwardReport:
     snapshots_recorded: int = 0
 
 
-def _first_signals(session: Session) -> list[int]:
-    """One signal per instrument, decision moment and strategy: the first made.
+def _first_signals(session: Session, strategy_version: str) -> list[int]:
+    """One signal per instrument and decision moment under one strategy: the first made.
 
     A manual rescore on top of the scheduled one would otherwise count the
-    same judgement twice.
+    same judgement twice, and two strategy versions are two different rules.
+    A signal written after its own entry time is left out: it was made with
+    the entry already past, which is a backtest of one day, not a forward test.
     """
-    first = select(func.min(Signal.id)).group_by(
-        Signal.instrument_id, Signal.decision_at, Signal.strategy_version
+    first = (
+        select(func.min(Signal.id))
+        .where(
+            Signal.strategy_version == strategy_version,
+            Signal.ingested_at <= Signal.earliest_execution_at,
+        )
+        .group_by(Signal.instrument_id, Signal.decision_at)
     )
     return list(session.execute(first).scalars())
 
 
-def report(session: Session) -> ForwardReport:
+def report(
+    session: Session,
+    *,
+    strategy_version: str = STRATEGY_VERSION,
+    instrument_ids: Collection[int] | None = None,
+) -> ForwardReport:
+    """The record so far. `instrument_ids` narrows it — and with it the
+    cross-section that excess returns are measured against."""
     out = ForwardReport()
-    ids = _first_signals(session)
+    ids = _first_signals(session, strategy_version)
     out.signals_recorded = len(ids)
     rows = session.execute(
         select(
@@ -339,7 +354,14 @@ def report(session: Session) -> ForwardReport:
         .join(Signal, Signal.id == SignalOutcome.signal_id)
         .join(Instrument, Instrument.instrument_id == Signal.instrument_id)
         .outerjoin(SignalOverlay, SignalOverlay.signal_id == Signal.id)
-        .where(Signal.id.in_(ids))
+        .where(
+            Signal.id.in_(ids),
+            *(
+                [Signal.instrument_id.in_(list(instrument_ids))]
+                if instrument_ids is not None
+                else []
+            ),
+        )
     ).all()
 
     # The same day's cross-section, per market and horizon: what an equal
@@ -369,13 +391,29 @@ def report(session: Session) -> ForwardReport:
             [i[0] for i in items], [i[1] for i in items], len({i[2] for i in items})
         )
 
+    # One listing per name and entry: a hand-run list taken the same evening
+    # as the scheduled one enters at the same open, and is the same bet.
+    first_listing = (
+        select(func.min(CandidateOutcome.snapshot_id))
+        .join(CandidateSnapshot, CandidateSnapshot.id == CandidateOutcome.snapshot_id)
+        .group_by(CandidateSnapshot.instrument_id, CandidateOutcome.entry_at)
+    )
     snaps = session.execute(
         select(
             CandidateOutcome.horizon_sessions,
             CandidateOutcome.return_pct,
             CandidateOutcome.entry_at,
             CandidateSnapshot.rank,
-        ).join(CandidateSnapshot, CandidateSnapshot.id == CandidateOutcome.snapshot_id)
+        )
+        .join(CandidateSnapshot, CandidateSnapshot.id == CandidateOutcome.snapshot_id)
+        .where(
+            CandidateOutcome.snapshot_id.in_(first_listing),
+            *(
+                [CandidateSnapshot.instrument_id.in_(list(instrument_ids))]
+                if instrument_ids is not None
+                else []
+            ),
+        )
     ).all()
     out.snapshots_recorded = int(
         session.execute(select(func.count()).select_from(CandidateSnapshot)).scalar_one()
