@@ -113,6 +113,7 @@ def hit(
     by: Decider = Decider.RULE,
     at: datetime = T0,
     version: int = RULE_VERSION,
+    snippet: str | None = "",
 ) -> QueryHitRow:
     return QueryHitRow(
         news_item_id=item,
@@ -121,6 +122,7 @@ def hit(
         decision=decision,
         decision_reason="test",
         match_method=None if decision is HitDecision.REJECTED else MatchMethod.NAME,
+        snippet=snippet,
         rule_version=version,
         decided_by=by,
         decided_at=at,
@@ -192,6 +194,24 @@ class TestTheMentionTableIsAProjection:
         session.commit()
 
         assert stored(session, lead, inst.instrument_id).decision is HitDecision.CONFIRMED
+
+
+class TestWhatAVerdictRead:
+    def test_a_later_sweep_replaces_the_snippet_with_its_own(
+        self, world: tuple[Session, Instrument, list[int]]
+    ) -> None:
+        """The stored snippet must be the one the stored verdict read."""
+        session, inst, (lead, _, _) = world
+        news_repo.record_hits(
+            session, [hit(lead, inst.instrument_id, HitDecision.PENDING, snippet="first")]
+        )
+        session.commit()
+        news_repo.record_hits(
+            session, [hit(lead, inst.instrument_id, HitDecision.CONFIRMED, snippet="second")]
+        )
+        session.commit()
+
+        assert stored(session, lead, inst.instrument_id).snippet == "second"
 
 
 class TestWhenAVerdictWasReached:
@@ -298,6 +318,61 @@ class TestRejudgingStoredHits:
         assert result.judged == 0
         assert stored(session, garden, inst.instrument_id).decision is HitDecision.CONFIRMED
 
+    def test_the_snippet_the_verdict_read_is_what_it_is_judged_by(
+        self, world: tuple[Session, Instrument, list[int]]
+    ) -> None:
+        """Not the article's summary, which another search may have written.
+
+        Naver cuts the snippet around the query. The article's stored summary
+        is whichever search reached it first, and here names nobody; judged by
+        it, a confirmed hit would turn into "absent" on a rule change alone.
+        """
+        session, inst, (_, _, absent) = world
+        session.execute(
+            text("UPDATE news_item SET summary = :s WHERE id = :i"),
+            {"s": "메모리 가격 반등", "i": absent},
+        )
+        news_repo.record_hits(
+            session,
+            [
+                hit(
+                    absent,
+                    inst.instrument_id,
+                    HitDecision.CONFIRMED,
+                    version=0,
+                    snippet="(주)" + SHORT + " 측은 증설을 검토 중이다",
+                )
+            ],
+        )
+        session.commit()
+
+        result = rejudge_hits(session, instrument_ids=[inst.instrument_id])
+
+        row = stored(session, absent, inst.instrument_id)
+        assert result.judged == 1
+        assert (row.decision, row.decision_reason) == (
+            HitDecision.CONFIRMED,
+            "strong:corporate_mark",
+        )
+
+    def test_a_hit_with_no_snippet_is_left_as_it_was(
+        self, world: tuple[Session, Instrument, list[int]]
+    ) -> None:
+        """Stored before hits kept their snippet: what it read is unknown."""
+        session, inst, (_, garden, _) = world
+        news_repo.record_hits(
+            session,
+            [hit(garden, inst.instrument_id, HitDecision.CONFIRMED, version=0, snippet=None)],
+        )
+        session.commit()
+
+        result = rejudge_hits(session, instrument_ids=[inst.instrument_id])
+
+        row = stored(session, garden, inst.instrument_id)
+        assert (result.judged, result.unread) == (0, 1)
+        assert (row.decision, row.rule_version) == (HitDecision.CONFIRMED, 0)
+        assert mention_pairs(session, inst.instrument_id) == {garden}
+
     def test_a_current_verdict_is_left_alone(
         self, world: tuple[Session, Instrument, list[int]]
     ) -> None:
@@ -324,7 +399,7 @@ class TestTheSweepWritesVerdicts:
         items = [
             {
                 "title": SHORT + ", 신규 공장 착공",
-                "description": "",
+                "description": "<b>" + SHORT + "</b> 측은 착공식을 연다",
                 "originallink": f"https://{HOST}/sweep-lead",
                 "link": "",
                 "pubDate": pub,
@@ -372,6 +447,47 @@ class TestTheSweepWritesVerdicts:
         )
 
         assert verdicts == {lead_id: HitDecision.CONFIRMED, garden_id: HitDecision.PENDING}
+        # What the verdict read, kept so a later rule reads the same text.
+        assert stored(session, lead_id, inst.instrument_id).snippet == SHORT + " 측은 착공식을 연다"
         assert mention_pairs(session, inst.instrument_id) == {lead_id}
         assert "1 pending" in (result.detail or "")
+        assert news_repo.projection_drift(session) == (0, 0)
+
+
+class TestAFullSweepFitsInOneCall:
+    def test_nine_thousand_pairs_are_written_and_withdrawn(
+        self, world: tuple[Session, Instrument, list[int]]
+    ) -> None:
+        """A full sweep records about 30,000 hits at once.
+
+        The mention sync matches `(item, instrument)` pairs with a tuple list,
+        and Postgres refused 8,000 of them in one statement. All PENDING, so
+        the withdrawal path meets the same number the lookup does.
+        """
+        session, inst, _ = world
+        count = 9_000
+        rows = [
+            news_repo.NewsItemRow(
+                source=NewsSource.NAVER_NEWS,
+                url_hash=f"bulk-{n}-{HOST}".ljust(64, "0")[:64],
+                url=f"https://{HOST}/bulk/{n}",
+                naver_url=None,
+                publisher_host=HOST,
+                title="bulk",
+                summary=None,
+                published_at=T0,
+                available_at=T0,
+            )
+            for n in range(count)
+        ]
+        _, ids = news_repo.save_news_items(session, rows)
+        session.commit()
+        assert len(ids) == count
+
+        written = news_repo.record_hits(
+            session, [hit(i, inst.instrument_id, HitDecision.PENDING) for i in ids.values()]
+        )
+        session.commit()
+
+        assert written == news_repo.HitWrite(0, 0)
         assert news_repo.projection_drift(session) == (0, 0)

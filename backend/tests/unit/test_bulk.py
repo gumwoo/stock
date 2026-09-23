@@ -80,8 +80,8 @@ class TestTheWidthsTheRepositoriesPass:
     def test_a_news_item_row_binds_nine(self) -> None:
         assert len(NewsItemRow._fields) == 9
 
-    def test_a_news_mention_row_binds_four(self) -> None:
-        assert len(QueryHitRow._fields) == 9
+    def test_a_query_hit_row_binds_ten(self) -> None:
+        assert len(QueryHitRow._fields) == 10
 
     def test_a_fundamental_row_binds_sixteen(self) -> None:
         assert len(FundamentalRow._fields) == 16

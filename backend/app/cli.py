@@ -187,6 +187,10 @@ def cmd_rejudge_news() -> int:
     print(f"mentions: +{result.mentions_added} -{result.mentions_removed}")
     if result.skipped:
         print(f"skipped {result.skipped} whose company is no longer in the Korean universe")
+    if result.unread:
+        print(
+            f"left {result.unread} stored before hits kept their snippet; the next sweep re-reads them"
+        )
     print("hits now: " + ", ".join(f"{k.value} {v}" for k, v in sorted(counts.items())))
     print(
         f"projection drift: {missing} confirmed without a mention, {orphaned} mentions unconfirmed"

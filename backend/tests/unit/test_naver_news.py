@@ -1040,6 +1040,69 @@ class TestTheRelevanceRule:
             assert judge(title)[0] == "CONFIRMED", title
 
 
+class TestWhereTheWordEnds:
+    """The name must be a word of its own, and the evidence must be about it.
+
+    Each case is one the verification of the first rule reproduced: the rule
+    confirmed it, and the article was not about the company.
+    """
+
+    def test_a_particle_must_attach_to_the_name(self) -> None:
+        """`원림 이야기` is not `원림이`; the space was stripped before looking."""
+        for title, name in (
+            ("원림 이야기가 있는 정원", "원림"),
+            ("남성 가수 신곡 발표", "남성"),
+            ("나노 이하 공정 경쟁", "나노"),
+            ("노을 가득한 서해 바다", "노을"),
+        ):
+            assert judge(title, name=name, symbol=None)[0] == "PENDING", title
+
+    def test_a_particle_that_runs_into_a_word_is_not_one(self) -> None:
+        assert judge("원림이야기 전시회 개막")[0] == "PENDING"
+        assert judge("원림은행나무 길")[0] == "PENDING"
+
+    def test_an_attached_particle_still_leads(self) -> None:
+        assert judge("원림이 3분기 보고서를 냈다") == ("CONFIRMED", "strong:title_lead")
+        assert judge("원림 , ESG 혁신") == ("CONFIRMED", "strong:title_lead")
+
+    def test_a_name_inside_another_word_is_not_there(self) -> None:
+        """`상보` inside `예상보다`, with two context words beside it."""
+        assert judge("예상보다 좋은 실적, 매출 증가", name="상보", symbol="027580") == (
+            "REJECTED",
+            "absent:inside_word",
+        )
+        assert judge("리레이팅 기대, 실적 매출", name="레이", symbol="228670")[0] == "REJECTED"
+
+    def test_the_code_still_counts_when_the_name_is_only_inside_a_word(self) -> None:
+        assert judge("예상보다 좋은 실적", "(027580)", name="상보", symbol="027580") == (
+            "CONFIRMED",
+            "strong:symbol",
+        )
+
+    def test_one_standalone_occurrence_is_enough(self) -> None:
+        assert judge("예상보다 좋은 실적", "상보 매출 증가", name="상보", symbol=None)[0] == (
+            "CONFIRMED"
+        )
+
+    def test_a_corporate_mark_covers_only_the_name_it_marks(self) -> None:
+        """`㈜남성산업` is another firm whose name begins the same way."""
+        assert judge("가을 신상품", "㈜남성산업 관계자는", name="남성", symbol=None)[0] == "PENDING"
+        assert judge("가을 신상품", "(주) 남성산업", name="남성", symbol=None)[0] == "PENDING"
+        assert judge("가을 신상품", "㈜남성의 관계자는", name="남성", symbol=None) == (
+            "CONFIRMED",
+            "strong:corporate_mark",
+        )
+        assert judge("가을 신상품", "남성㈜ 관계자", name="남성", symbol=None) == (
+            "CONFIRMED",
+            "strong:corporate_mark",
+        )
+        # The name stands alone elsewhere, so only the mark can decide, and
+        # `대남성㈜` marks a different firm.
+        assert judge("가을 신상품", "남성 의류 대남성㈜ 관계자", name="남성", symbol=None)[0] == (
+            "PENDING"
+        )
+
+
 class TestTheReportCountsTheUndecided:
     def test_pending_is_in_the_headline(self) -> None:
         report = NaverNewsCollector.reject_report(

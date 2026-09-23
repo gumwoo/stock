@@ -67,6 +67,7 @@ class QueryHitRow(NamedTuple):
     decision: HitDecision
     decision_reason: str
     match_method: MatchMethod | None
+    snippet: str | None
     rule_version: int
     decided_by: Decider
     decided_at: datetime
@@ -80,13 +81,18 @@ class HitWrite(NamedTuple):
 
 
 class HitToJudge(NamedTuple):
-    """A stored hit with the text a rule needs to judge it again."""
+    """A stored hit with the text its verdict read.
+
+    `snippet` is the hit's own, not the article's summary. The summary is
+    whatever the first search to store the article returned, and another
+    company's search may have read a different cut of the same article.
+    """
 
     news_item_id: int
     instrument_id: int
     matched_query: str
     title: str
-    summary: str | None
+    snippet: str | None
 
 
 def save_news_items(session: Session, rows: Sequence[NewsItemRow]) -> tuple[int, dict[str, int]]:
@@ -157,6 +163,7 @@ def record_hits(session: Session, rows: Sequence[QueryHitRow]) -> HitWrite:
                 "decision": incoming.decision,
                 "decision_reason": incoming.decision_reason,
                 "match_method": incoming.match_method,
+                "snippet": incoming.snippet,
                 "rule_version": incoming.rule_version,
                 "decided_by": incoming.decided_by,
                 "decided_at": case(
@@ -174,10 +181,23 @@ def record_hits(session: Session, rows: Sequence[QueryHitRow]) -> HitWrite:
     return _sync_mentions(session, list(by_pair))
 
 
+# Pairs per `(a, b) IN (...)`. Not the parameter ceiling, which would allow
+# 32,767: Postgres refused 8,000 pairs with `statement_too_complex` (the parser
+# ran out of stack) and accepted 4,000. A full sweep writes about 30,000.
+_PAIRS_PER_STATEMENT = 1000
+
+
+def _pair_chunks(pairs: Sequence[tuple[int, int]]) -> list[Sequence[tuple[int, int]]]:
+    return [
+        pairs[start : start + _PAIRS_PER_STATEMENT]
+        for start in range(0, len(pairs), _PAIRS_PER_STATEMENT)
+    ]
+
+
 def _sync_mentions(session: Session, pairs: list[tuple[int, int]]) -> HitWrite:
     """Make the mention set for these pairs equal to their CONFIRMED hits."""
     current: dict[tuple[int, int], tuple[HitDecision, str, MatchMethod | None]] = {}
-    for chunk in bulk.batched(pairs, columns=2):
+    for chunk in _pair_chunks(pairs):
         found = session.execute(
             select(
                 NewsQueryHit.news_item_id,
@@ -192,7 +212,7 @@ def _sync_mentions(session: Session, pairs: list[tuple[int, int]]) -> HitWrite:
 
     not_confirmed = [pair for pair, (d, _, _) in current.items() if d is not HitDecision.CONFIRMED]
     removed = 0
-    for chunk in bulk.batched(not_confirmed, columns=2):
+    for chunk in _pair_chunks(not_confirmed):
         result = session.execute(
             delete(NewsMention).where(
                 tuple_(NewsMention.news_item_id, NewsMention.instrument_id).in_(list(chunk))
@@ -225,9 +245,10 @@ def rule_hits_before(
     rule_version: int,
     instrument_ids: Collection[int] | None = None,
 ) -> list[HitToJudge]:
-    """RULE verdicts reached by an older rule, with the text to judge them by.
+    """RULE verdicts reached by an older rule, with the text they read.
 
-    Model verdicts are left alone: a rule does not overrule them.
+    Model verdicts are left alone: a rule does not overrule them. Hits with no
+    snippet are returned too, so the caller can count what it had to skip.
     `instrument_ids` narrows the set, which is how tests re-judge their own
     rows without touching anyone else's.
     """
@@ -237,7 +258,7 @@ def rule_hits_before(
             NewsQueryHit.instrument_id,
             NewsQueryHit.matched_query,
             NewsItem.title,
-            NewsItem.summary,
+            NewsQueryHit.snippet,
         )
         .join(NewsItem, NewsItem.id == NewsQueryHit.news_item_id)
         .where(

@@ -155,6 +155,20 @@ def _is_hangul(char: str) -> bool:
     return "가" <= char <= "힣" or "ᄀ" <= char <= "ᇿ" or "㄰" <= char <= "㆏"
 
 
+def _word_ends_at(text: str, pos: int, particles: Collection[str]) -> bool:
+    """Whether the word ends at `pos`, allowing one attached particle.
+
+    Korean attaches particles on the right, so a Hangul syllable after a name
+    does not by itself make it a different word — unless it is not a particle,
+    or the particle itself runs on into more Hangul.
+    """
+    following = text[pos : pos + 1]
+    if not following or not _is_hangul(following):
+        return True
+    after_particle = text[pos + 1 : pos + 2]
+    return following in particles and not (after_particle and _is_hangul(after_particle))
+
+
 _TAG = re.compile(r"<[^>]+>")
 _SPACE = re.compile(r"\s+")
 # Whether a neighbouring character continues a number, for symbol matching.
@@ -209,7 +223,7 @@ class Yield:
 # The relevance rule's version. Bump it whenever `judge` would reach a
 # different verdict on the same text, and `rejudge` will find and re-decide
 # exactly the hits an older rule decided.
-RULE_VERSION = 1
+RULE_VERSION = 2
 
 # Words that put a company, rather than the ordinary word, in the sentence.
 # Weak on their own — "투자" or "계약" turn up in anything — so two are needed.
@@ -235,8 +249,13 @@ WEAK_SIGNALS_NEEDED = 2
 # A headline about a company leads with its name, then a comma or a subject
 # particle: `원림, ESG 혁신 TF 가동`, `원림은 ...`. An article about a garden
 # does not open that way. Tags like `[단독]` or `[카드]` come first and are
-# skipped before the check.
-TITLE_LEAD_FOLLOWERS = (",", "은", "는", "이", "가")
+# skipped before the check. The particle must attach to the name and end the
+# word; `원림 이야기` and `원림이야기` are not `원림이`.
+TITLE_LEAD_PARTICLES = frozenset("은는이가")
+# One-syllable particles that may attach to a name without making it another
+# word: `㈜남성의` is 남성, `㈜남성산업` is not. Two-syllable ones (`에서`,
+# `으로`) are left out on purpose; missing them only sends a hit to PENDING.
+_ATTACHED_PARTICLES = frozenset("은는이가의을를와과도에로")
 _TITLE_TAG = re.compile(r"^\s*(?:\[[^\]]*\]|<[^>]*>|【[^】]*】|\([^)]*\))\s*")
 _CORPORATE_MARKS = ("(주)", "㈜")
 # Space and the quotation marks a headline may open with, straight and curly.
@@ -687,19 +706,55 @@ class NaverNewsCollector(BaseCollector):
             headline = stripped
         headline = headline.lstrip(_OPENING_QUOTES)
         pattern = cls.term_pattern(name)
-        if pattern is not None:
-            lead = pattern.match(headline)
-            if lead is not None:
-                rest = headline[lead.end() :].lstrip()
-                if rest.startswith(TITLE_LEAD_FOLLOWERS):
-                    return "title_lead"
+        if pattern is None:
+            return None
 
-        squeezed = _SPACE.sub("", text)
-        flat = _SPACE.sub("", name)
+        lead = pattern.match(headline)
+        if lead is not None:
+            rest = headline[lead.end() :]
+            # A comma may sit after a space; a particle may not. The first
+            # version stripped spaces before looking, so `원림 이야기` read as
+            # `원림이` and a garden article was confirmed — the very case this
+            # rule exists to hold back. `남성 가수` and `나노 이하` went the same way.
+            if rest.lstrip().startswith(","):
+                return "title_lead"
+            if rest[:1] in TITLE_LEAD_PARTICLES and not _is_hangul(rest[1:2] or " "):
+                return "title_lead"
+
+        # `(주)원림`, `원림㈜` — with the name ending, or starting, where the mark
+        # says it does. Comparing whitespace-free text confirmed 남성 on
+        # `㈜남성산업`, a different firm whose name merely begins the same way.
         for mark in _CORPORATE_MARKS:
-            if mark + flat in squeezed or flat + mark in squeezed:
-                return "corporate_mark"
+            escaped = re.escape(mark)
+            for hit in re.finditer(
+                escaped + r"\s*(?:" + pattern.pattern + ")", text, re.IGNORECASE
+            ):
+                if _word_ends_at(text, hit.end(), _ATTACHED_PARTICLES):
+                    return "corporate_mark"
+            for hit in re.finditer(
+                "(?:" + pattern.pattern + r")\s*" + escaped, text, re.IGNORECASE
+            ):
+                if not _is_hangul(text[hit.start() - 1 : hit.start()] or " "):
+                    return "corporate_mark"
         return None
+
+    @classmethod
+    def stands_as_a_word(cls, text: str, name: str, conflicts: Sequence[str]) -> bool:
+        """Whether the name occurs at the start of a word, not inside another.
+
+        Only the left edge is checked. Particles attach on the right — `원림은`,
+        `원림이` — so a following syllable proves nothing, but nothing attaches
+        in front of a company name. A Hangul syllable there means the match is
+        the middle of some other word: `상보` inside `예상보다`, `레이` inside
+        `리레이팅`. Two context words nearby were enough to confirm those.
+        """
+        covers = [span for other in conflicts for span in cls.spans(text, other)]
+        for start, end in cls.spans(text, name):
+            if cls.swallowed_by((start, end), covers):
+                continue
+            if not _is_hangul(text[start - 1 : start] or " "):
+                return True
+        return False
 
     @staticmethod
     def weak_signals(text: str) -> list[str]:
@@ -729,8 +784,20 @@ class NaverNewsCollector(BaseCollector):
         method = cls.match_method(
             text, name=name, aliases=aliases, symbol=symbol, conflicts=conflicts
         )
+        absent = "absent"
+        if (
+            method is MatchMethod.NAME
+            and cls.requires_context(name)
+            and not cls.stands_as_a_word(text, name, conflicts)
+        ):
+            # The two syllables appear only inside other words, so the name
+            # was never there. An alias or the stock code may still be.
+            method = cls.match_method(
+                text, name="", aliases=aliases, symbol=symbol, conflicts=conflicts
+            )
+            absent = "absent:inside_word"
         if method is None:
-            return Judgement(HitDecision.REJECTED, None, "absent")
+            return Judgement(HitDecision.REJECTED, None, absent)
         if method is MatchMethod.SYMBOL:
             return Judgement(HitDecision.CONFIRMED, method, "strong:symbol")
         if method is MatchMethod.ALIAS or not cls.requires_context(name):
@@ -977,6 +1044,7 @@ class NaverNewsCollector(BaseCollector):
                             decision=verdict.decision,
                             decision_reason=verdict.reason,
                             match_method=verdict.method,
+                            snippet=row.summary,
                             rule_version=RULE_VERSION,
                             decided_by=Decider.RULE,
                             decided_at=now,
@@ -1101,15 +1169,22 @@ class RejudgeResult(NamedTuple):
     mentions_added: int
     mentions_removed: int
     skipped: int
+    # Stored before hits kept their own snippet. What those verdicts read is
+    # unknown, so they are left as they are rather than judged on other text.
+    unread: int = 0
 
 
 def rejudge_hits(
     session: Session, *, instrument_ids: Collection[int] | None = None
 ) -> RejudgeResult:
-    """Re-decide every RULE verdict an older rule reached, from stored text.
+    """Re-decide every RULE verdict an older rule reached, from what it read.
 
-    No request is made: the title and summary are already in `news_item`, and
-    the query that surfaced each article is on the hit. The whole instrument
+    No request is made: the title is on `news_item`, and the snippet the
+    verdict read is on the hit. Not `news_item.summary` — that is the snippet
+    of whichever search stored the article first, and judging another
+    company's hit by it turned a confirmed 삼성전자 hit into "absent" the
+    moment the rule version moved. Hits with no snippet are counted as
+    `unread` and left alone. The whole instrument
     master is loaded for the same reason `collect` loads it — whether a name is
     swallowed by a longer one depends on every registered name, not on the
     handful being re-judged.
@@ -1135,7 +1210,11 @@ def rejudge_hits(
     tally = {HitDecision.CONFIRMED: 0, HitDecision.PENDING: 0, HitDecision.REJECTED: 0}
     skipped = 0
 
+    unread = 0
     for hit in stale:
+        if hit.snippet is None:
+            unread += 1
+            continue
         instrument = by_id.get(hit.instrument_id)
         if instrument is None:
             skipped += 1
@@ -1151,7 +1230,7 @@ def rejudge_hits(
 
         verdict = NaverNewsCollector.judge(
             hit.title,
-            hit.summary or "",
+            hit.snippet,
             name=instrument.name,
             aliases=aliases,
             symbol=symbol,
@@ -1166,6 +1245,7 @@ def rejudge_hits(
                 decision=verdict.decision,
                 decision_reason=verdict.reason,
                 match_method=verdict.method,
+                snippet=hit.snippet,
                 rule_version=RULE_VERSION,
                 decided_by=Decider.RULE,
                 decided_at=now,
@@ -1182,4 +1262,5 @@ def rejudge_hits(
         mentions_added=written.mentions_added,
         mentions_removed=written.mentions_removed,
         skipped=skipped,
+        unread=unread,
     )

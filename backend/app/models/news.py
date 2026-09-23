@@ -246,6 +246,15 @@ class NewsQueryHit(Base):
         nullable=True,
         doc="How the name was found. Null when it was not found at all.",
     )
+    snippet: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="The description this search returned, which is what the verdict "
+        "read. Naver cuts the snippet around the query, so two companies' "
+        "searches can return different text for one article, and "
+        "`news_item.summary` keeps only the first. Null on hits stored before "
+        "the column existed; those cannot be judged again from what was read.",
+    )
     rule_version: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
