@@ -21,6 +21,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Claude through the Agent SDK, billed to the owner's Claude subscription. An
+# extra, not a dependency: the wheel carries the Claude Code binary (about
+# 100 MB), and nothing but `judge-news` and `read-news` needs it.
+llm = [
+    "claude-agent-sdk>=0.2.158",
+]
 dev = [
     "ruff>=0.8",
     "mypy>=1.13",

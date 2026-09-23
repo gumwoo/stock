@@ -33,7 +33,18 @@ from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from sqlalchemy import Subquery, delete, func, insert, literal, select, tuple_, union_all
+from sqlalchemy import (
+    Subquery,
+    and_,
+    delete,
+    func,
+    insert,
+    literal,
+    or_,
+    select,
+    tuple_,
+    union_all,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -47,6 +58,7 @@ from app.models.news import (
     NewsMention,
     NewsQueryHit,
     NewsRelevanceDecision,
+    NewsSentiment,
     NewsSource,
     NewsSweepCoverage,
 )
@@ -81,6 +93,10 @@ class QueryHitRow(NamedTuple):
     snippet: str | None
     rule_version: int
     decided_by: Decider
+    # An LLM verdict's provenance. Left empty by the rule.
+    model: str | None = None
+    prompt_version: int | None = None
+    rationale: str | None = None
 
 
 class HitWrite(NamedTuple):
@@ -164,6 +180,9 @@ _VERDICT_FIELDS = (
     "snippet",
     "rule_version",
     "decided_by",
+    "model",
+    "prompt_version",
+    "rationale",
 )
 
 
@@ -352,6 +371,120 @@ def rule_hits_before(
     if instrument_ids is not None:
         stmt = stmt.where(NewsQueryHit.instrument_id.in_(list(instrument_ids)))
     return [HitToJudge(*row) for row in session.execute(stmt).all()]
+
+
+class OpenHit(NamedTuple):
+    """A hit waiting for a model: its latest verdict, and the text that verdict read."""
+
+    news_item_id: int
+    instrument_id: int
+    matched_query: str
+    title: str
+    snippet: str
+    match_method: MatchMethod | None
+    rule_version: int
+    available_at: datetime
+
+
+def _open_hits(
+    session: Session,
+    *,
+    decision: HitDecision | None,
+    limit: int,
+    instrument_ids: Collection[int] | None,
+    extra: Any = None,
+) -> list[OpenHit]:
+    latest = _latest()
+    stmt = (
+        select(
+            NewsQueryHit.news_item_id,
+            NewsQueryHit.instrument_id,
+            latest.c.matched_query,
+            NewsItem.title,
+            latest.c.snippet,
+            latest.c.match_method,
+            latest.c.rule_version,
+            NewsItem.available_at,
+        )
+        .select_from(latest)
+        .join(NewsQueryHit, NewsQueryHit.id == latest.c.query_hit_id)
+        .join(NewsItem, NewsItem.id == NewsQueryHit.news_item_id)
+        .where(latest.c.snippet.is_not(None))
+        .order_by(NewsItem.available_at.desc(), NewsQueryHit.id)
+        .limit(limit)
+    )
+    if decision is not None:
+        stmt = stmt.where(latest.c.decision == decision)
+    if extra is not None:
+        stmt = stmt.where(extra(latest))
+    if instrument_ids is not None:
+        stmt = stmt.where(NewsQueryHit.instrument_id.in_(list(instrument_ids)))
+    return [OpenHit(*row) for row in session.execute(stmt).all()]
+
+
+def pending_for_model(
+    session: Session,
+    *,
+    limit: int,
+    prompt_version: int,
+    instrument_ids: Collection[int] | None = None,
+) -> list[OpenHit]:
+    """Hits for the model to judge under `prompt_version`, newest article first.
+
+    PENDING hits the rule left undecided, and every verdict a model reached
+    under an older prompt, whatever it was — the first prompt confirmed
+    baseball teams and news bylines, and a model verdict is otherwise final.
+    Not an UNSURE under the current prompt: asking again gets the same
+    answer. Only with a snippet: a verdict carried over from before snippets
+    were kept has no record of what it read.
+    """
+    return _open_hits(
+        session,
+        decision=None,
+        limit=limit,
+        instrument_ids=instrument_ids,
+        extra=lambda latest: or_(
+            and_(
+                latest.c.decided_by == Decider.RULE,
+                latest.c.decision == HitDecision.PENDING,
+            ),
+            and_(
+                latest.c.decided_by == Decider.LLM,
+                latest.c.prompt_version < prompt_version,
+            ),
+        ),
+    )
+
+
+def confirmed_unread(
+    session: Session,
+    *,
+    model: str,
+    prompt_version: int,
+    limit: int,
+    instrument_ids: Collection[int] | None = None,
+) -> list[OpenHit]:
+    """CONFIRMED hits no reading exists for under this model and prompt, newest first."""
+
+    def unread(latest: Any) -> Any:
+        return ~(
+            select(NewsSentiment.id)
+            .where(
+                NewsSentiment.news_item_id == NewsQueryHit.news_item_id,
+                NewsSentiment.instrument_id == NewsQueryHit.instrument_id,
+                NewsSentiment.model == model,
+                NewsSentiment.prompt_version == prompt_version,
+            )
+            .exists()
+        )
+
+    return _open_hits(
+        session,
+        decision=HitDecision.CONFIRMED,
+        limit=limit,
+        instrument_ids=instrument_ids,
+        extra=unread,
+    )
 
 
 def decisions_asof(

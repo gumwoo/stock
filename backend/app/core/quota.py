@@ -215,6 +215,33 @@ DEFAULT_PLAN = QuotaPlan(
                 "configuration. Treated as typical rather than promised."
             ),
         ),
+        # Calls to Claude through the owner's subscription. Anthropic publishes
+        # no per-call limit for it, only five-hour and seven-day usage windows
+        # shared with the owner's own use of Claude, which the provider reads
+        # back on every call and stops on. These two are a floor under that:
+        # ceilings we chose, so a bug cannot loop through the subscription.
+        Quota(
+            key="claude_subscription_5h",
+            group="claude_subscription",
+            official_limit=60,
+            window=timedelta(hours=5),
+            limit_source=LimitSource.INTERNAL,
+            note=(
+                "Our own ceiling, not Anthropic's. The real limit is a share of "
+                "the plan's five-hour usage window, reported per call as utilisation."
+            ),
+        ),
+        Quota(
+            key="claude_subscription_daily",
+            group="claude_subscription",
+            official_limit=240,
+            window=timedelta(hours=24),
+            limit_source=LimitSource.INTERNAL,
+            note=(
+                "Our own ceiling, not Anthropic's. Keeps a day's batch jobs to a "
+                "small part of the plan's seven-day window."
+            ),
+        ),
     )
 )
 

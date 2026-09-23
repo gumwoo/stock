@@ -70,6 +70,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -314,6 +315,20 @@ class NewsRelevanceDecision(Base):
         Enum(Decider, name="news_decider", native_enum=False, length=8),
         nullable=False,
     )
+    model: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        doc="The model that reached an LLM verdict. Null for a rule's.",
+    )
+    prompt_version: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc="The prompt an LLM verdict was reached with, so a new prompt can find "
+        "and re-ask exactly the verdicts an older one produced.",
+    )
+    rationale: Mapped[str | None] = mapped_column(
+        Text, nullable=True, doc="The model's one-line reason, kept as evidence."
+    )
     decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.clock_timestamp(),
@@ -386,4 +401,83 @@ class NewsSweepCoverage(Base):
         Index("ix_news_sweep_coverage_instrument_to", "instrument_id", "covered_to"),
         Index("ix_news_sweep_coverage_collector", "collector", "recorded_at"),
         Index("ix_news_sweep_coverage_recorded", "recorded_at"),
+    )
+
+
+class SentimentEvent(StrEnum):
+    """What kind of thing the article reports about the company."""
+
+    EARNINGS = "EARNINGS"
+    GUIDANCE = "GUIDANCE"
+    ORDER_CONTRACT = "ORDER_CONTRACT"
+    PRODUCT = "PRODUCT"
+    SHAREHOLDER_RETURN = "SHAREHOLDER_RETURN"
+    CAPITAL_RAISE = "CAPITAL_RAISE"
+    MERGER_ACQUISITION = "MERGER_ACQUISITION"
+    LEGAL_REGULATORY = "LEGAL_REGULATORY"
+    MANAGEMENT = "MANAGEMENT"
+    ANALYST_RATING = "ANALYST_RATING"
+    PRICE_MOVE = "PRICE_MOVE"
+    INDUSTRY = "INDUSTRY"
+    OTHER = "OTHER"
+
+
+class NewsSentiment(Base):
+    """What one article says about one company, as one model read it once.
+
+    Keyed on (article, company, model, prompt version) and never re-written:
+    the same four inputs are the same reading, so a second run skips it, and a
+    new model or prompt is a new row beside the old one rather than a
+    replacement. That is what makes a score reproducible, and what lets two
+    prompts be compared on the same articles.
+
+    Only articles whose relevance verdict was CONFIRMED when read are scored,
+    and the text read is the snippet that verdict read. `created_at` is set by
+    the database; a reader at a moment sees what had been scored by then.
+
+    Not an input to any score yet. The overlay that would use it (with decay,
+    and with one event reported by twenty outlets counted once) is a later
+    step.
+    """
+
+    __tablename__ = "news_sentiment"
+
+    id: Mapped[BigIntPk]
+    news_item_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("news_item.id", ondelete="CASCADE"), nullable=False
+    )
+    instrument_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("instrument.instrument_id", ondelete="CASCADE"), nullable=False
+    )
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    sentiment: Mapped[float] = mapped_column(
+        Float, nullable=False, doc="-1 (clearly bad for the company) to +1 (clearly good)."
+    )
+    event_type: Mapped[SentimentEvent] = mapped_column(
+        Enum(SentimentEvent, name="sentiment_event", native_enum=False, length=24),
+        nullable=False,
+    )
+    intensity: Mapped[float] = mapped_column(
+        Float, nullable=False, doc="0 to 1: how material the event is for the company."
+    )
+    confidence: Mapped[float] = mapped_column(
+        Float, nullable=False, doc="0 to 1: how sure the reading is, given only a snippet."
+    )
+    evidence: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="The words in the text the reading rests on."
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "news_item_id",
+            "instrument_id",
+            "model",
+            "prompt_version",
+            name="uq_news_sentiment_reading",
+        ),
+        Index("ix_news_sentiment_instrument_created", "instrument_id", "created_at"),
     )

@@ -92,10 +92,25 @@ class Settings(BaseSettings):
     reddit_client_secret: str = ""
     reddit_user_agent: str = "stock-research/0.1"
 
-    # --- sentiment scoring ------------------------------------------------
+    # --- language model ---------------------------------------------------
+    # Claude through the Agent SDK, billed to the owner's Claude subscription.
+    # `anthropic_api_key` is deliberately unused by it: a key in the
+    # environment makes Claude Code bill the API instead, and the provider
+    # refuses to run when one is set. See app/llm/provider.py.
     anthropic_api_key: str = ""
-    sentiment_llm_model: str = "claude-sonnet-5"
-    sentiment_prompt_version: str = "v1"
+    # Off unless named. The subscription login cannot be checked from here,
+    # and a capability that turns itself on because a package is installed
+    # would spend the owner's Claude usage without being asked to.
+    llm_provider: str = ""
+    # Haiku: 8 of 8 on the relevance cases the rule got wrong, at a fraction
+    # of the subscription usage a larger model takes.
+    relevance_llm_model: str = "claude-haiku-4-5"
+    sentiment_llm_model: str = "claude-haiku-4-5"
+    llm_batch_size: int = Field(default=25, gt=0, le=60)
+    # Stop before the owner's own Claude usage runs out. The subscription's
+    # windows are shared with every other use of Claude on the account.
+    llm_max_five_hour_utilization: float = Field(default=0.5, gt=0, le=1)
+    llm_max_seven_day_utilization: float = Field(default=0.8, gt=0, le=1)
 
     # --- notifications ----------------------------------------------------
     smtp_host: str = ""
@@ -195,7 +210,13 @@ class Settings(BaseSettings):
 
     @property
     def llm_sentiment_enabled(self) -> bool:
-        return bool(self.anthropic_api_key)
+        if self.llm_provider != "claude_agent_sdk":
+            return False
+        try:
+            import claude_agent_sdk  # noqa: F401
+        except ImportError:
+            return False
+        return True
 
     @property
     def email_alerts_enabled(self) -> bool:
@@ -262,9 +283,10 @@ class Settings(BaseSettings):
             cap(
                 "llm_sentiment",
                 self.llm_sentiment_enabled,
-                ("ANTHROPIC_API_KEY",),
-                "Sentiment text is scored by the deterministic rule-based scorer "
-                "instead. This is a supported fallback, not an outage.",
+                ("LLM_PROVIDER=claude_agent_sdk", "pip install claude-agent-sdk", "claude login"),
+                "PENDING news hits stay undecided and articles go unread for "
+                "sentiment. A supported fallback, not an outage: nothing else "
+                "depends on it yet.",
             ),
             cap(
                 "email_alerts",

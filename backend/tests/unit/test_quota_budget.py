@@ -64,6 +64,8 @@ class TestBudgets:
             "threads_keyword_search": 1_100,
             "reddit_search": 500,
             "dart_daily": 10_000,
+            "claude_subscription_5h": 30,
+            "claude_subscription_daily": 120,
         }
         actual = {q.key: budget(q) for q in DEFAULT_PLAN.quotas}
 
@@ -150,9 +152,12 @@ class TestQuotaPlan:
             assert isinstance(q.limit_source, LimitSource)
             assert q.note.strip()
 
-        # Every figure now comes from a provider. `dart_daily` is the one the
-        # provider itself hedges on, and says so rather than being quoted flat.
-        assert not [q for q in DEFAULT_PLAN.quotas if q.limit_source is LimitSource.INTERNAL]
+        # Every figure comes from a provider except the Claude subscription's,
+        # for which Anthropic publishes no per-call limit at all — only usage
+        # windows the provider reads back. Those two are ours, and marked so.
+        # `dart_daily` is the one the provider itself hedges on.
+        internal = {q.key for q in DEFAULT_PLAN.quotas if q.limit_source is LimitSource.INTERNAL}
+        assert internal == {"claude_subscription_5h", "claude_subscription_daily"}
         typical = {q.key for q in DEFAULT_PLAN.quotas if q.limit_source is LimitSource.TYPICAL}
         assert typical == {"dart_daily"}
 

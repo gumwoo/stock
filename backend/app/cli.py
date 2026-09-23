@@ -40,7 +40,7 @@ from app.db import session_scope
 from app.models import Interval
 from app.repositories import candle_repo, instrument_repo, news_repo
 from app.seed import seed_watchlist
-from app.services import discovery_service, promotion_service
+from app.services import discovery_service, llm_service, promotion_service
 from app.services.discovery_service import Candidate, Discovery
 
 logger = logging.getLogger("app.cli")
@@ -305,6 +305,51 @@ def cmd_promote(args: argparse.Namespace) -> int:
     return 0 if any(o.promoted for o in outcomes) else 1
 
 
+def _print_llm_report(report: llm_service.LlmRunReport) -> None:
+    print(
+        f"{report.purpose}: asked about {report.asked} in {report.calls} calls, wrote {report.written}"
+        + (
+            f", {report.malformed_batches} malformed batches skipped"
+            if report.malformed_batches
+            else ""
+        )
+    )
+    if report.counts:
+        print("  " + ", ".join(f"{k} {v}" for k, v in sorted(report.counts.items())))
+    print(f"  tokens in/out {report.input_tokens:,}/{report.output_tokens:,}")
+    if report.five_hour_utilization is not None or report.seven_day_utilization is not None:
+        five = report.five_hour_utilization
+        seven = report.seven_day_utilization
+        print(
+            "  subscription usage after the last call: "
+            f"5h {'-' if five is None else f'{five:.0%}'}, 7d {'-' if seven is None else f'{seven:.0%}'}"
+        )
+    if report.stopped:
+        print(f"  stopped early: {report.stopped}")
+
+
+def cmd_judge_news(limit: int, tracked_only: bool) -> int:
+    """PENDING hits the rule could not settle, asked of the model. Uses the subscription."""
+    with session_scope() as session:
+        ids = llm_service.tracked_ids(session) if tracked_only else None
+        report = llm_service.judge_pending(session, limit=limit, instrument_ids=ids)
+        missing, orphaned = news_repo.projection_drift(session)
+    _print_llm_report(report)
+    print(
+        f"projection drift: {missing} confirmed without a mention, {orphaned} mentions unconfirmed"
+    )
+    return 0 if (missing, orphaned) == (0, 0) else 1
+
+
+def cmd_read_news(limit: int, everyone: bool) -> int:
+    """CONFIRMED articles read for direction, event and intensity. Uses the subscription."""
+    with session_scope() as session:
+        ids = None if everyone else llm_service.tracked_ids(session)
+        report = llm_service.read_confirmed(session, limit=limit, instrument_ids=ids)
+    _print_llm_report(report)
+    return 0
+
+
 def cmd_runs() -> int:
     """Latest run per collector, as JSON."""
     from sqlalchemy import select
@@ -389,6 +434,23 @@ def main(argv: list[str] | None = None) -> int:
             cmd.add_argument("--top", type=int, help="promote the top N of the discovery")
             cmd.add_argument("--symbols", help="promote these, comma-separated")
 
+    judge = sub.add_parser(
+        "judge-news",
+        help="ask the model about PENDING news hits; uses the Claude subscription",
+    )
+    judge.add_argument("--limit", type=int, default=100)
+    judge.add_argument(
+        "--tracked-only", action="store_true", help="only hits for tracked instruments"
+    )
+    read = sub.add_parser(
+        "read-news",
+        help="read CONFIRMED articles for sentiment and event; uses the Claude subscription",
+    )
+    read.add_argument("--limit", type=int, default=100)
+    read.add_argument(
+        "--all", dest="everyone", action="store_true", help="every instrument, not only tracked"
+    )
+
     candles = sub.add_parser("candles", help="print stored daily bars")
     candles.add_argument("--symbol", required=True)
     candles.add_argument("--market", default="KR", choices=[m.value for m in Market])
@@ -415,6 +477,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_discover(args)
         case "promote":
             return cmd_promote(args)
+        case "judge-news":
+            return cmd_judge_news(args.limit, args.tracked_only)
+        case "read-news":
+            return cmd_read_news(args.limit, args.everyone)
         case "candles":
             return cmd_candles(args.symbol, Market(args.market), args.limit)
         case _:  # pragma: no cover

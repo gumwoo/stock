@@ -16,6 +16,7 @@ from app.models.fundamental import (
     FundamentalSource,
 )
 from app.models.instrument import Instrument, Listing, SymbolHistory
+from app.models.llm import LlmCall
 from app.models.market import (
     Candle,
     CorporateAction,
@@ -65,15 +66,18 @@ __all__ = [
     "InstrumentPromotion",
     "Interval",
     "Listing",
+    "LlmCall",
     "MatchMethod",
     "NewsItem",
     "NewsMention",
     "NewsQueryHit",
     "NewsRelevanceDecision",
+    "NewsSentiment",
     "NewsSource",
     "NewsSweepCoverage",
     "PortfolioSnapshot",
     "SampleType",
+    "SentimentEvent",
     "Signal",
     "SignalFactor",
     "StrategyConfig",
