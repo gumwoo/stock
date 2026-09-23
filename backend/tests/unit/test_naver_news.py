@@ -966,9 +966,19 @@ class TestWhichNamesNeedContext:
         for name in ("원림", "남성", "노을", "나노"):
             assert NaverNewsCollector.requires_context(name), name
 
+    def test_three_syllables_and_short_acronyms_do_too(self) -> None:
+        for name in ("오로라", "제우스", "카카오", "SK", "KD", "NEW", "HMM"):
+            assert NaverNewsCollector.requires_context(name), name
+
     def test_longer_or_mixed_names_do_not(self) -> None:
-        for name in ("삼성전자", "알비더블유", "카페24", "SK", "KT&G", "원림산업"):
+        for name in ("삼성전자", "알비더블유", "카페24", "KT&G", "원림산업", "NAVER", "F&F"):
             assert not NaverNewsCollector.requires_context(name), name
+
+    def test_shorter_names_need_more_context(self) -> None:
+        assert NaverNewsCollector.weak_signals_needed("원림") == 2
+        assert NaverNewsCollector.weak_signals_needed("KD") == 2
+        assert NaverNewsCollector.weak_signals_needed("오로라") == 1
+        assert NaverNewsCollector.weak_signals_needed("HMM") == 1
 
 
 def judge(title: str, summary: str = "", **kw: object) -> tuple[str, str]:
@@ -1143,23 +1153,58 @@ class TestShortNamesFromTheFullSweep:
         ):
             assert judge(title, name=name, symbol=None) == ("PENDING", "context:compound"), title
 
-    def test_the_company_with_a_particle_is_still_confirmed(self) -> None:
+    def test_a_two_syllable_particle_ends_the_word(self) -> None:
+        """`카카오에서` is 카카오, not a compound."""
+        assert judge("카카오에서 3분기 실적 발표", name="카카오", symbol=None) == (
+            "CONFIRMED",
+            "weak:실적",
+        )
+
+    def test_a_three_syllable_common_word_is_held(self) -> None:
+        """Read out of rule 4's confirmed hits: not one of these is the company."""
         for title, name in (
-            ("카카오에서 신규 서비스 출시", "카카오"),
-            ("넷마블 '솔: 인챈트' 100일 이벤트", "넷마블"),
-            ("빙그레, 3분기 실적 발표", "빙그레"),
-            ("컴투스가 신작을 공개했다", "컴투스"),
+            ("첫째는 말 그대로 '나무가 무성하여 푸른 산'", "나무가"),
+            ("온도 변화에 따라 오로라 패턴이 달라진다", "오로라"),
+            ("'LoL' 국가대표팀은 한화생명e스포츠 '제우스' 최우제", "제우스"),
         ):
-            assert judge(title, name=name, symbol=None) == ("CONFIRMED", "name"), title
+            assert judge(title, name=name, symbol=None) == ("PENDING", "context:none"), title
+
+    def test_a_three_character_name_needs_one_context_word(self) -> None:
+        assert judge("아모텍도 11.54% 오른 주가", name="아모텍", symbol=None) == (
+            "CONFIRMED",
+            "weak:주가",
+        )
+        assert judge("HLB 3만원선 공방", "코스닥 바이오", name="HLB", symbol=None) == (
+            "CONFIRMED",
+            "weak:코스닥",
+        )
+
+    def test_a_two_letter_acronym_needs_two(self) -> None:
+        assert judge("판매자가 고객 응대(CS)까지 도맡는다", "투자", name="CS", symbol=None) == (
+            "PENDING",
+            "context:투자",
+        )
+
+    def test_the_lead_still_confirms_a_short_name(self) -> None:
+        assert judge("빙그레, 3분기 실적 발표", name="빙그레", symbol=None) == (
+            "CONFIRMED",
+            "strong:title_lead",
+        )
 
     def test_a_short_acronym_is_matched_in_capitals_only(self) -> None:
         assert judge("UN General Assembly in New York", name="NEW", symbol=None)[0] == "REJECTED"
-        assert judge("NEW, 신작 영화 배급", name="NEW", symbol=None) == ("CONFIRMED", "name")
+        assert judge("NEW, 신작 영화 배급", name="NEW", symbol=None) == (
+            "CONFIRMED",
+            "strong:title_lead",
+        )
 
     def test_a_latin_name_glued_to_hangul_in_front_is_another_name(self) -> None:
         assert judge("대전TP 원장 후보자 적격 의결", name="TP", symbol=None)[0] == "REJECTED"
         assert judge("암호자산 식별 솔루션 엣지CS 공개", name="CS", symbol=None)[0] == "REJECTED"
-        assert judge("SK는 3분기 실적을 발표했다", name="SK", symbol=None) == ("CONFIRMED", "name")
+        assert judge("SK는 3분기 실적을 발표했다", name="SK", symbol=None) == (
+            "CONFIRMED",
+            "strong:title_lead",
+        )
 
     def test_a_longer_latin_name_still_ignores_case(self) -> None:
         verdict = NaverNewsCollector.judge("Naver shares rose", "", name="NAVER", symbol=None)

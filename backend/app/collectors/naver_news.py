@@ -228,7 +228,7 @@ class Yield:
 # The relevance rule's version. Bump it whenever `judge` would reach a
 # different verdict on the same text, and `rejudge` will find and re-decide
 # exactly the hits an older rule decided.
-RULE_VERSION = 4
+RULE_VERSION = 5
 
 # Words that put a company, rather than the ordinary word, in the sentence.
 # Weak on their own — "투자" or "계약" turn up in anything — so two are needed.
@@ -249,7 +249,11 @@ CONTEXT_WORDS: tuple[str, ...] = (
     "계약",
     "배당",
 )
+# How many context words confirm a name that needs context, by name length.
+# The shorter the name, the more ordinary words it collides with: two
+# characters need two words, three need one.
 WEAK_SIGNALS_NEEDED = 2
+WEAK_SIGNALS_NEEDED_LONGER = 1
 
 # A headline about a company leads with its name, then a comma or a subject
 # particle: `원림, ESG 혁신 TF 가동`, `원림은 ...`. An article about a garden
@@ -733,17 +737,33 @@ class NaverNewsCollector(BaseCollector):
     def requires_context(name: str) -> bool:
         """Whether seeing this name is not enough to know the company is meant.
 
-        Two Hangul syllables and nothing else: 193 of the 2,648 listed Korean
-        names, among them 남성, 노을, 나노 and 원림 — words that turn up in
-        ordinary prose. The first rollout found seven of 원림's eighteen
-        accepted articles were about gardens. Three syllables is the next
-        candidate and is deliberately not included yet; the full sweep's
-        pending and no-reject lists are what should decide it.
+        Pure Hangul of two or three syllables, or a Latin acronym of three
+        letters or fewer. Two syllables came first: 원림 is a company and the
+        word for a garden, and seven of its first eighteen accepted articles
+        were gardens. The first full sweep settled the rest. Read in samples of
+        thirty after word boundaries were enforced (rule 4), confirmed hits for
+        three-syllable names were about 73% the company — 나무가 무성, LoL's
+        제우스, an 오로라 pattern, 유니온 스트릿 — and for short acronyms about
+        80%: `CS 대행`, `KD 사업`, `DSR`. The ones still confirmed with context
+        required read at or near 100%.
 
         A rule, not a list: a list covers only the names somebody noticed.
         """
         flat = _SPACE.sub("", name)
-        return len(flat) == 2 and all(_is_hangul(ch) for ch in flat)
+        if flat.isascii() and flat.isalnum():
+            return 0 < len(flat) <= _CASED_LATIN
+        return 2 <= len(flat) <= _BOUNDED_SYLLABLES and all(_is_hangul(ch) for ch in flat)
+
+    @staticmethod
+    def weak_signals_needed(name: str) -> int:
+        """Context words that confirm a name needing context. Fewer for longer names.
+
+        Three characters with one context word read 19 of 20 correct in the
+        full sweep's sample; two characters with one did not hold up, which is
+        how 원림's gardens got through in the first place.
+        """
+        flat = _SPACE.sub("", name)
+        return WEAK_SIGNALS_NEEDED if len(flat) <= 2 else WEAK_SIGNALS_NEEDED_LONGER
 
     @classmethod
     def strong_signal(cls, title: str, text: str, *, name: str, symbol: str | None) -> str | None:
@@ -874,7 +894,7 @@ class NaverNewsCollector(BaseCollector):
         if strong is not None:
             return Judgement(HitDecision.CONFIRMED, method, f"strong:{strong}")
         weak = cls.weak_signals(text)
-        if len(weak) >= WEAK_SIGNALS_NEEDED:
+        if len(weak) >= cls.weak_signals_needed(name):
             return Judgement(HitDecision.CONFIRMED, method, "weak:" + "+".join(weak[:3]))
         return Judgement(HitDecision.PENDING, method, "context:" + (weak[0] if weak else "none"))
 
