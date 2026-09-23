@@ -10,6 +10,7 @@ from app.models.backtest import BacktestRun, BacktestWindow
 from app.models.base import Base
 from app.models.collector import CollectorRun, CollectorStatus
 from app.models.filing import Filing
+from app.models.forward import CandidateOutcome, CandidateSnapshot, SignalOutcome
 from app.models.fundamental import (
     FiscalPeriod,
     Fundamental,
@@ -49,6 +50,8 @@ __all__ = [
     "BacktestRun",
     "BacktestWindow",
     "Base",
+    "CandidateOutcome",
+    "CandidateSnapshot",
     "Candle",
     "CollectorRun",
     "CollectorStatus",
@@ -80,6 +83,7 @@ __all__ = [
     "SentimentEvent",
     "Signal",
     "SignalFactor",
+    "SignalOutcome",
     "SignalOverlay",
     "StrategyConfig",
     "SymbolHistory",

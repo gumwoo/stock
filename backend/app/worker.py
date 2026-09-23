@@ -24,14 +24,17 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.collectors.base import CollectorError, run_collector
+from app.collectors.dart_fundamental import DartFundamentalCollector
 from app.collectors.naver_news import NaverNewsCollector
 from app.collectors.quota import QuotaGuard
+from app.collectors.sec_edgar import SecEdgarCollector
+from app.collectors.yfinance_history import YFinanceHistoryCollector
 from app.config import get_settings
 from app.core import logging as logging_setup
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import advisory_lock, session_scope
-from app.services import llm_service
+from app.services import forward_service, llm_service, scoring_service
 
 logger = logging.getLogger("app.worker")
 
@@ -70,6 +73,15 @@ def guarded(job_name: str, fn: Callable[[], None]) -> Callable[[], None]:
 # summer. The times are margin, not precision; `has_closed` does the deciding.
 _KR_PRE_OPEN = CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone="Asia/Seoul")
 _KR_AFTER_CLOSE = CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone="Asia/Seoul")
+# The daily loop the forward test lives on (Phase 4-8). Prices for the Korean
+# session once it has closed and the 16:00 news sweep has had its ten
+# minutes; then filings, scoring with its overlay, and the record of what
+# earlier judgements turned into. One job, so the steps cannot run out of order.
+_KR_DAILY_LOOP = CronTrigger(day_of_week="mon-fri", hour=16, minute=40, timezone="Asia/Seoul")
+# US prices after the NYSE close, which is early morning in Seoul the next day.
+_US_PRICES = CronTrigger(day_of_week="tue-sat", hour=7, minute=0, timezone="Asia/Seoul")
+_SEC_WEEKLY = CronTrigger(day_of_week="sat", hour=8, minute=0, timezone="Asia/Seoul")
+
 # After the morning sweep has landed and well before the 15:30 close. A signal
 # is judged at the close and sees only news read by then; reading the morning's
 # articles after the close would put them in tomorrow's signal instead.
@@ -103,6 +115,45 @@ def _collect_korean_news(*, require_close: bool) -> None:
 
     with session_scope() as session:
         run_collector(NaverNewsCollector(), session)
+
+
+def _daily_loop() -> None:
+    """Prices, filings, scores and the forward record, after a Korean session.
+
+    Holidays skip the whole loop: no session, no new bars, and a signal made
+    anyway would restate yesterday's under a new row the forward test would
+    have to explain away.
+    """
+    calendar = MarketCalendar(Market.KR)
+    now = utc_now()
+    if not calendar.is_session(calendar.local_today(now)) or not calendar.has_closed(now):
+        logger.info("daily loop: no finished Korean session today")
+        return
+    with session_scope() as session:
+        # A month of bars, not the default two years: the history is already
+        # stored, and this only has to close the gap since the last run.
+        run_collector(YFinanceHistoryCollector(period="1mo"), session)
+        # This year's reports, not five years': new filings are recent ones.
+        run_collector(DartFundamentalCollector(years_back=1), session)
+        scored = scoring_service.score_all(session)
+        logger.info("daily loop: scored %d", len(scored))
+        logger.info(
+            "daily loop: forward record +%d signal outcomes, %d candidates listed, "
+            "+%d candidate outcomes",
+            forward_service.evaluate_signals(session),
+            forward_service.snapshot_candidates(session),
+            forward_service.evaluate_candidates(session),
+        )
+
+
+def _us_prices() -> None:
+    with session_scope() as session:
+        run_collector(YFinanceHistoryCollector(period="1mo"), session)
+
+
+def _sec_weekly() -> None:
+    with session_scope() as session:
+        run_collector(SecEdgarCollector(), session)
 
 
 def _read_korean_news() -> None:
@@ -145,6 +196,20 @@ def build_scheduler() -> BlockingScheduler:
     ):
         scheduler.add_job(
             guarded(job_id, partial(_collect_korean_news, require_close=require_close)),
+            trigger,
+            id=job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+
+    for job_id, trigger, fn in (
+        ("daily_loop_after_kr_close", _KR_DAILY_LOOP, _daily_loop),
+        ("us_prices_after_close", _US_PRICES, _us_prices),
+        ("sec_weekly", _SEC_WEEKLY, _sec_weekly),
+    ):
+        scheduler.add_job(
+            guarded(job_id, fn),
             trigger,
             id=job_id,
             max_instances=1,

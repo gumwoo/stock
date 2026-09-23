@@ -41,7 +41,13 @@ from app.db import session_scope
 from app.models import Interval
 from app.repositories import candle_repo, instrument_repo, news_repo
 from app.seed import seed_watchlist
-from app.services import discovery_service, llm_service, overlay_service, promotion_service
+from app.services import (
+    discovery_service,
+    forward_service,
+    llm_service,
+    overlay_service,
+    promotion_service,
+)
 from app.services.discovery_service import Candidate, Discovery
 
 logger = logging.getLogger("app.cli")
@@ -392,6 +398,51 @@ def cmd_overlay(asof: str | None, symbol: str | None) -> int:
     return 0
 
 
+def cmd_forward_run() -> int:
+    """Add what has become measurable, and take today's candidate list."""
+    with session_scope() as session:
+        signals = forward_service.evaluate_signals(session)
+        listed = forward_service.snapshot_candidates(session)
+        candidates = forward_service.evaluate_candidates(session)
+    print(
+        f"signal outcomes +{signals}, candidates listed {listed}, candidate outcomes +{candidates}"
+    )
+    return 0
+
+
+def _fmt(value: float | None, spec: str) -> str:
+    return "-" if value is None else format(value, spec)
+
+
+def cmd_forward() -> int:
+    """What the record says so far. Reads only."""
+    with session_scope() as session:
+        rep = forward_service.report(session)
+    print(
+        f"{rep.signals_recorded} judgements on record, {rep.snapshots_recorded} candidate listings. "
+        "Returns in %; excess is against the same day's judged names in that market."
+    )
+    print("A few weeks are a handful of independent days: read counts before means.")
+    for title, table in (
+        ("by action", rep.by_action),
+        ("by news overlay", rep.by_overlay),
+        ("candidates", rep.candidates),
+    ):
+        print()
+        print(title)
+        if not table:
+            print("  nothing measured yet")
+            continue
+        for horizon in sorted(table):
+            for label, st in sorted(table[horizon].items()):
+                print(
+                    f"  {horizon:>2}d  {label:<14} n={st.n:<4} days={st.days:<3} "
+                    f"mean {_fmt(st.mean, '+.2f'):>6}  median {_fmt(st.median, '+.2f'):>6}  "
+                    f"hit {_fmt(st.hit_rate, '.0%'):>4}  excess {_fmt(st.mean_excess, '+.2f'):>6}"
+                )
+    return 0
+
+
 def cmd_runs() -> int:
     """Latest run per collector, as JSON."""
     from sqlalchemy import select
@@ -499,6 +550,12 @@ def main(argv: list[str] | None = None) -> int:
     overlay.add_argument("--asof", help="ISO time to ask about; default now")
     overlay.add_argument("--symbol")
 
+    sub.add_parser("forward", help="the forward-test record so far; reads only")
+    sub.add_parser(
+        "forward-run",
+        help="add measurable outcomes and take today's candidate list; fetches candidate prices",
+    )
+
     candles = sub.add_parser("candles", help="print stored daily bars")
     candles.add_argument("--symbol", required=True)
     candles.add_argument("--market", default="KR", choices=[m.value for m in Market])
@@ -531,6 +588,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_read_news(args.limit, args.everyone)
         case "overlay":
             return cmd_overlay(args.asof, args.symbol)
+        case "forward":
+            return cmd_forward()
+        case "forward-run":
+            return cmd_forward_run()
         case "candles":
             return cmd_candles(args.symbol, Market(args.market), args.limit)
         case _:  # pragma: no cover
