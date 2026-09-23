@@ -952,3 +952,124 @@ class TestNulTravelsTheSameRoadAsTheSurrogate:
                 canonical,
             ):
                 assert value is None or NUL not in value
+
+
+class TestWhichNamesNeedContext:
+    """Two Hangul syllables and nothing else: 193 of the 2,648 listed names.
+
+    원림 is a company and the word for a garden; seven of its first eighteen
+    accepted articles were gardens. A rule rather than a list, because a list
+    covers only the names somebody happened to notice.
+    """
+
+    def test_a_two_syllable_hangul_name_needs_context(self) -> None:
+        for name in ("원림", "남성", "노을", "나노"):
+            assert NaverNewsCollector.requires_context(name), name
+
+    def test_longer_or_mixed_names_do_not(self) -> None:
+        for name in ("삼성전자", "알비더블유", "카페24", "SK", "KT&G", "원림산업"):
+            assert not NaverNewsCollector.requires_context(name), name
+
+
+def judge(title: str, summary: str = "", **kw: object) -> tuple[str, str]:
+    kw.setdefault("name", "원림")
+    kw.setdefault("symbol", "005820")
+    verdict = NaverNewsCollector.judge(title, summary, **kw)  # type: ignore[arg-type]
+    return verdict.decision.value, verdict.reason
+
+
+class TestTheRelevanceRule:
+    """Named is not the same as meant. Each verdict carries its reason."""
+
+    def test_not_named_is_rejected(self) -> None:
+        assert judge("반도체 업황 회복") == ("REJECTED", "absent")
+
+    def test_a_long_name_is_confirmed_on_sight(self) -> None:
+        assert judge("삼성전자 실적 발표", name="삼성전자", symbol="005930") == (
+            "CONFIRMED",
+            "name",
+        )
+
+    def test_an_alias_is_confirmed_on_sight(self) -> None:
+        verdict = NaverNewsCollector.judge(
+            "네이버 신사업", "", name="NAVER", aliases=("네이버",), symbol="035420"
+        )
+        assert (verdict.decision.value, verdict.reason) == ("CONFIRMED", "alias")
+
+    def test_a_headline_leading_with_the_name_is_strong(self) -> None:
+        assert judge("원림, ESG 혁신 TF 가동") == ("CONFIRMED", "strong:title_lead")
+        assert judge("원림은 연말 보고서를 낸다") == ("CONFIRMED", "strong:title_lead")
+
+    def test_a_leading_tag_does_not_hide_the_lead(self) -> None:
+        assert judge("[카드] 원림, 대표이사 주도 TF") == ("CONFIRMED", "strong:title_lead")
+        assert judge("[단독] [종합] 원림, 수주") == ("CONFIRMED", "strong:title_lead")
+
+    def test_the_code_beside_the_name_is_strong(self) -> None:
+        assert judge("정원 이야기", "원림(005820) 관련") == ("CONFIRMED", "strong:symbol")
+
+    def test_a_corporate_mark_is_strong(self) -> None:
+        assert judge("정원 이야기", "(주)원림 측은") == ("CONFIRMED", "strong:corporate_mark")
+        assert judge("정원 이야기", "원림㈜ 관계자") == ("CONFIRMED", "strong:corporate_mark")
+
+    def test_two_weak_signals_are_enough(self) -> None:
+        decision, reason = judge("정원 이야기", "원림 3분기 실적과 수주 현황")
+        assert decision == "CONFIRMED"
+        assert reason.startswith("weak:")
+
+    def test_one_weak_signal_is_not(self) -> None:
+        assert judge("정원 이야기", "원림 투자 이야기") == ("PENDING", "context:투자")
+
+    def test_named_with_no_context_is_pending_not_rejected(self) -> None:
+        """Kept for a model to decide rather than thrown away."""
+        assert judge("완도의 푸른 바다와 산, 원림을 거닐다") == ("PENDING", "context:none")
+
+    def test_the_real_garden_articles_are_not_confirmed(self) -> None:
+        """Three of the seven the first rollout confirmed by mistake."""
+        for title in (
+            "한국문화정보원, 3D 문화데이터 활용 윤선도 원림 촉각 모형 공개",
+            "윤선도 원림 손끝으로 만난다",
+            "완도의 푸른 바다와 산, 가을에 가볼 만한 원림",
+        ):
+            assert judge(title)[0] == "PENDING", title
+
+    def test_the_real_company_articles_still_are(self) -> None:
+        for title in (
+            "원림, ESG 혁신 TF팀 가동…지속가능한 경영 체계 확립 박차",
+            "원림, 대표이사 직속 ESG 혁신 TF 가동…연말 첫 보고서 낸다",
+        ):
+            assert judge(title)[0] == "CONFIRMED", title
+
+
+class TestTheReportCountsTheUndecided:
+    def test_pending_is_in_the_headline(self) -> None:
+        report = NaverNewsCollector.reject_report(
+            [Yield("원림", "005820", matched=11, rejected=0, pending=7)]
+        )
+
+        assert report.startswith("reject rate 0/18 (0%), pending 7/18 (39%)")
+
+    def test_the_most_pending_are_listed(self) -> None:
+        report = NaverNewsCollector.reject_report(
+            [
+                Yield("원림", "005820", matched=11, rejected=0, pending=7),
+                Yield("남성", "004270", matched=1, rejected=0, pending=30),
+            ]
+        )
+
+        undecided = report.split("most pending: ")[1]
+        assert undecided.index("남성") < undecided.index("원림")
+        assert "남성(004270) 30/31" in undecided
+
+
+class TestAQueryTheSearchSplits:
+    def test_cafe24_is_searched_with_a_word_that_holds_it_together(self) -> None:
+        """`카페24` alone came back 96% cafés; see QUERY_OVERRIDES for the measurement."""
+        from app.models import Instrument
+
+        cafe24 = Instrument(name="카페24", market="KR")
+        assert NaverNewsCollector.query_for(cafe24) == "카페24 쇼핑몰"
+
+    def test_the_override_does_not_change_what_counts_as_named(self) -> None:
+        """The query is how articles are found; the name is how they are judged."""
+        verdict = NaverNewsCollector.judge("카페24, 창업 경진대회 개최", "", name="카페24")
+        assert verdict.decision.value == "CONFIRMED"

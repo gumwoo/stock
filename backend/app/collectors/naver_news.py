@@ -41,11 +41,11 @@ import hashlib
 import html
 import math
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -69,9 +69,9 @@ from app.config import get_settings
 from app.core.calendar import Market
 from app.core.clock import ensure_utc, utc_now
 from app.models import Instrument
-from app.models.news import MatchMethod, NewsSource
+from app.models.news import Decider, HitDecision, MatchMethod, NewsSource
 from app.repositories import instrument_repo, news_repo
-from app.repositories.news_repo import NewsItemRow, NewsMentionRow
+from app.repositories.news_repo import NewsItemRow, QueryHitRow
 
 # NAVER API Hub, not the developer centre. Naver stopped issuing search
 # credentials at developers.naver.com on 2026-07-31, so a new application gets
@@ -104,6 +104,15 @@ WATERMARK_OVERLAP = timedelta(hours=2)
 # names belong here — see the mention reject rate in the run detail.
 QUERY_OVERRIDES: Mapping[str, str] = {
     "NAVER": "네이버 주가",
+    # Naver splits `카페24` into `카페` and `24`, so the newest hundred results
+    # are cafés and anything with a 24 in it: 96 of 100 did not name the
+    # company. Measured on 2026-09-23 over one three-day window, one request
+    # each: `카페24` confirmed 4, `카페24 주가` 4, `cafe24` 0, and
+    # `카페24 쇼핑몰` 15 with the confirmed titles all about the company. The
+    # cost is recall on stories that never say 쇼핑몰, such as a bare price
+    # move. Quoting the name is not used: exact-match syntax is not part of
+    # the documented API, and correctness should not rest on it.
+    "카페24": "카페24 쇼핑몰",
 }
 
 # Spellings that count as the company appearing in the text. Same source of
@@ -165,10 +174,11 @@ class Yield:
     symbol: str | None
     matched: int
     rejected: int
+    pending: int = 0
 
     @property
     def evaluated(self) -> int:
-        return self.matched + self.rejected
+        return self.matched + self.rejected + self.pending
 
     @property
     def reject_rate(self) -> float:
@@ -194,6 +204,51 @@ class Yield:
         centre = p + z * z / (2 * n)
         margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
         return (centre - margin) / (1 + z * z / n)
+
+
+# The relevance rule's version. Bump it whenever `judge` would reach a
+# different verdict on the same text, and `rejudge` will find and re-decide
+# exactly the hits an older rule decided.
+RULE_VERSION = 1
+
+# Words that put a company, rather than the ordinary word, in the sentence.
+# Weak on their own — "투자" or "계약" turn up in anything — so two are needed.
+CONTEXT_WORDS: tuple[str, ...] = (
+    "실적",
+    "매출",
+    "영업이익",
+    "순이익",
+    "수주",
+    "공시",
+    "주가",
+    "주식",
+    "대표이사",
+    "상장",
+    "코스피",
+    "코스닥",
+    "투자",
+    "계약",
+    "배당",
+)
+WEAK_SIGNALS_NEEDED = 2
+
+# A headline about a company leads with its name, then a comma or a subject
+# particle: `원림, ESG 혁신 TF 가동`, `원림은 ...`. An article about a garden
+# does not open that way. Tags like `[단독]` or `[카드]` come first and are
+# skipped before the check.
+TITLE_LEAD_FOLLOWERS = (",", "은", "는", "이", "가")
+_TITLE_TAG = re.compile(r"^\s*(?:\[[^\]]*\]|<[^>]*>|【[^】]*】|\([^)]*\))\s*")
+_CORPORATE_MARKS = ("(주)", "㈜")
+# Space and the quotation marks a headline may open with, straight and curly.
+_OPENING_QUOTES = " \"'" + chr(0x201C) + chr(0x2018)
+
+
+class Judgement(NamedTuple):
+    """The verdict on one hit, and why."""
+
+    decision: HitDecision
+    method: MatchMethod | None
+    reason: str
 
 
 # How many companies each list in the report names. The plan asked for the
@@ -241,6 +296,7 @@ class NaverNewsCollector(BaseCollector):
         *,
         max_pages: int | None = None,
         max_instruments: int | None = None,
+        only: Sequence[str] | None = None,
         guard: QuotaGuard | None = None,
     ) -> None:
         settings = get_settings()
@@ -259,6 +315,11 @@ class NaverNewsCollector(BaseCollector):
         # Present so the end-to-end check can cost one call rather than a
         # full sweep. Never set in scheduled operation.
         self.max_instruments = max_instruments
+        # Company names to sweep and no others, for checking a rule change on
+        # the companies that prompted it before paying for the whole market.
+        # Never set in scheduled operation either, and a run using it is
+        # PARTIAL for the same reason a limited one is.
+        self.only = frozenset(only) if only else None
 
     def is_configured(self) -> bool:
         return bool(self._client_id and self._client_secret)
@@ -513,16 +574,24 @@ class NaverNewsCollector(BaseCollector):
                 if cls.stands_alone(text, span, term) and not cls.swallowed_by(span, covers):
                     return method
 
-        if symbol:
-            # Digit neighbours make it a different number. Squeezing whitespace
-            # out first, as this once did, turns `주가 100 5930 원` into a
-            # match for 005930.
-            for hit in re.finditer(re.escape(symbol), text):
-                before = text[hit.start() - 1 : hit.start()] if hit.start() else ""
-                after = text[hit.end() : hit.end() + 1]
-                if not _DIGIT.match(before) and not _DIGIT.match(after):
-                    return MatchMethod.SYMBOL
+        if symbol and cls.symbol_present(text, symbol):
+            return MatchMethod.SYMBOL
         return None
+
+    @staticmethod
+    def symbol_present(text: str, symbol: str) -> bool:
+        """The six-digit code standing on its own, not inside a longer number.
+
+        Digit neighbours make it a different number. Squeezing whitespace out
+        first, as this once did, turns `주가 100 5930 원` into a match for
+        005930.
+        """
+        for hit in re.finditer(re.escape(symbol), text):
+            before = text[hit.start() - 1 : hit.start()] if hit.start() else ""
+            after = text[hit.end() : hit.end() + 1]
+            if not _DIGIT.match(before) and not _DIGIT.match(after):
+                return True
+        return False
 
     @staticmethod
     def reject_report(yields: Sequence[Yield], *, top: int = REPORT_TOP) -> str:
@@ -543,7 +612,11 @@ class NaverNewsCollector(BaseCollector):
         if not evaluated:
             return "no articles evaluated"
         rejected = sum(y.rejected for y in yields)
-        parts = [f"reject rate {rejected}/{evaluated} ({rejected / evaluated:.0%})"]
+        pending = sum(y.pending for y in yields)
+        parts = [
+            f"reject rate {rejected}/{evaluated} ({rejected / evaluated:.0%}), "
+            f"pending {pending}/{evaluated} ({pending / evaluated:.0%})"
+        ]
 
         def label(y: Yield) -> str:
             return f"{y.name}({y.symbol})" if y.symbol else y.name
@@ -569,7 +642,107 @@ class NaverNewsCollector(BaseCollector):
                 "most mentions with no reject: "
                 + ", ".join(f"{label(y)} {y.matched}" for y in loud)
             )
+
+        # The companies whose name appeared and the rule could not tell whether
+        # the article meant them. This list is where the next rule, or the
+        # model pass, earns its keep.
+        undecided = sorted(
+            (y for y in yields if y.pending),
+            key=lambda y: (-y.pending, y.name),
+        )[:top]
+        if undecided:
+            parts.append(
+                "most pending: "
+                + ", ".join(f"{label(y)} {y.pending}/{y.evaluated}" for y in undecided)
+            )
         return "; ".join(parts)
+
+    @staticmethod
+    def requires_context(name: str) -> bool:
+        """Whether seeing this name is not enough to know the company is meant.
+
+        Two Hangul syllables and nothing else: 193 of the 2,648 listed Korean
+        names, among them 남성, 노을, 나노 and 원림 — words that turn up in
+        ordinary prose. The first rollout found seven of 원림's eighteen
+        accepted articles were about gardens. Three syllables is the next
+        candidate and is deliberately not included yet; the full sweep's
+        pending and no-reject lists are what should decide it.
+
+        A rule, not a list: a list covers only the names somebody noticed.
+        """
+        flat = _SPACE.sub("", name)
+        return len(flat) == 2 and all(_is_hangul(ch) for ch in flat)
+
+    @classmethod
+    def strong_signal(cls, title: str, text: str, *, name: str, symbol: str | None) -> str | None:
+        """One piece of evidence that the company, not the word, is meant."""
+        if symbol and cls.symbol_present(text, symbol):
+            return "symbol"
+
+        headline = title
+        while True:
+            stripped = _TITLE_TAG.sub("", headline, count=1)
+            if stripped == headline:
+                break
+            headline = stripped
+        headline = headline.lstrip(_OPENING_QUOTES)
+        pattern = cls.term_pattern(name)
+        if pattern is not None:
+            lead = pattern.match(headline)
+            if lead is not None:
+                rest = headline[lead.end() :].lstrip()
+                if rest.startswith(TITLE_LEAD_FOLLOWERS):
+                    return "title_lead"
+
+        squeezed = _SPACE.sub("", text)
+        flat = _SPACE.sub("", name)
+        for mark in _CORPORATE_MARKS:
+            if mark + flat in squeezed or flat + mark in squeezed:
+                return "corporate_mark"
+        return None
+
+    @staticmethod
+    def weak_signals(text: str) -> list[str]:
+        """Company-context words present, in the order they are listed."""
+        return [word for word in CONTEXT_WORDS if word in text]
+
+    @classmethod
+    def judge(
+        cls,
+        title: str,
+        summary: str,
+        *,
+        name: str,
+        aliases: Sequence[str] = (),
+        symbol: str | None = None,
+        conflicts: Sequence[str] = (),
+    ) -> Judgement:
+        """CONFIRMED, PENDING or REJECTED, with the reason recorded.
+
+        REJECTED when the company is not named at all. CONFIRMED when it is
+        named and the name cannot be mistaken for an ordinary word, or when it
+        can but the text says a company is meant: one strong signal, or two
+        weak ones. PENDING otherwise — named, and undecided. Kept rather than
+        dropped, so a model can decide it later.
+        """
+        text = f"{title} {summary}"
+        method = cls.match_method(
+            text, name=name, aliases=aliases, symbol=symbol, conflicts=conflicts
+        )
+        if method is None:
+            return Judgement(HitDecision.REJECTED, None, "absent")
+        if method is MatchMethod.SYMBOL:
+            return Judgement(HitDecision.CONFIRMED, method, "strong:symbol")
+        if method is MatchMethod.ALIAS or not cls.requires_context(name):
+            return Judgement(HitDecision.CONFIRMED, method, method.value.lower())
+
+        strong = cls.strong_signal(title, text, name=name, symbol=symbol)
+        if strong is not None:
+            return Judgement(HitDecision.CONFIRMED, method, f"strong:{strong}")
+        weak = cls.weak_signals(text)
+        if len(weak) >= WEAK_SIGNALS_NEEDED:
+            return Judgement(HitDecision.CONFIRMED, method, "weak:" + "+".join(weak[:3]))
+        return Judgement(HitDecision.PENDING, method, "context:" + (weak[0] if weak else "none"))
 
     @classmethod
     def to_rows(
@@ -732,11 +905,13 @@ class NaverNewsCollector(BaseCollector):
         )
 
         instruments = universe
-        if self.max_instruments is not None and self.max_instruments < len(universe):
+        if self.only is not None:
+            instruments = [i for i in universe if i.name in self.only]
+        elif self.max_instruments is not None and self.max_instruments < len(universe):
             instruments = universe[: self.max_instruments]
 
         since = self.watermark(session, now=now)
-        read = saved = mentions = rejected = unusable = 0
+        read = saved = mentions = rejected = pending = unusable = 0
         yields: list[Yield] = []
         asked = 0
         capped: list[str] = []
@@ -772,39 +947,49 @@ class NaverNewsCollector(BaseCollector):
                 written, ids = news_repo.save_news_items(session, [row for row, _ in pages.rows])
                 saved += written
 
-                links: list[NewsMentionRow] = []
-                matched_here = rejected_here = 0
+                hits: list[QueryHitRow] = []
+                matched_here = rejected_here = pending_here = 0
                 for row, _ in pages.rows:
-                    method = self.match_method(
-                        f"{row.title} {row.summary or ''}",
+                    verdict = self.judge(
+                        row.title,
+                        row.summary or "",
                         name=instrument.name,
                         aliases=aliases,
                         symbol=symbol,
                         conflicts=conflicts,
                     )
-                    if method is None:
+                    if verdict.decision is HitDecision.REJECTED:
                         rejected += 1
                         rejected_here += 1
-                        continue
-                    matched_here += 1
+                    elif verdict.decision is HitDecision.PENDING:
+                        pending += 1
+                        pending_here += 1
+                    else:
+                        matched_here += 1
                     item_id = ids.get(row.url_hash)
                     if item_id is None:
                         continue
-                    links.append(
-                        NewsMentionRow(
+                    hits.append(
+                        QueryHitRow(
                             news_item_id=item_id,
                             instrument_id=instrument.instrument_id,
                             matched_query=query,
-                            match_method=method,
+                            decision=verdict.decision,
+                            decision_reason=verdict.reason,
+                            match_method=verdict.method,
+                            rule_version=RULE_VERSION,
+                            decided_by=Decider.RULE,
+                            decided_at=now,
                         )
                     )
-                mentions += news_repo.save_mentions(session, links)
+                mentions += news_repo.record_hits(session, hits).mentions_added
                 yields.append(
                     Yield(
                         name=instrument.name,
                         symbol=symbol,
                         matched=matched_here,
                         rejected=rejected_here,
+                        pending=pending_here,
                     )
                 )
 
@@ -845,7 +1030,8 @@ class NaverNewsCollector(BaseCollector):
         detail = (
             f"{asked} of {len(universe)} instruments since "
             f"{since:%Y-%m-%d %H:%M}Z, {mentions} mentions, "
-            f"{rejected} rejected (name absent from title and summary)"
+            f"{rejected} rejected (name absent from title and summary), "
+            f"{pending} pending (name present, company not evident)"
         )
         if capped:
             detail += f"; {len(capped)} hit the {self.max_pages}-page cap"
@@ -903,3 +1089,97 @@ class NaverNewsCollector(BaseCollector):
             hit_page_cap=self.max_pages > 0,
             requests=sent,
         )
+
+
+class RejudgeResult(NamedTuple):
+    """What re-deciding stored hits under the current rule changed."""
+
+    judged: int
+    confirmed: int
+    pending: int
+    rejected: int
+    mentions_added: int
+    mentions_removed: int
+    skipped: int
+
+
+def rejudge_hits(
+    session: Session, *, instrument_ids: Collection[int] | None = None
+) -> RejudgeResult:
+    """Re-decide every RULE verdict an older rule reached, from stored text.
+
+    No request is made: the title and summary are already in `news_item`, and
+    the query that surfaced each article is on the hit. The whole instrument
+    master is loaded for the same reason `collect` loads it — whether a name is
+    swallowed by a longer one depends on every registered name, not on the
+    handful being re-judged.
+
+    Hits whose company is no longer in the Korean universe are counted as
+    skipped and left as they are.
+    """
+    stale = news_repo.rule_hits_before(
+        session, rule_version=RULE_VERSION, instrument_ids=instrument_ids
+    )
+    if not stale:
+        return RejudgeResult(0, 0, 0, 0, 0, 0, 0)
+
+    now = utc_now()
+    universe = instrument_repo.list_active(session, asof=now.date(), market=Market.KR)
+    by_id = {i.instrument_id: i for i in universe}
+    registry = NaverNewsCollector.registry(
+        [i.name for i in universe] + [a for v in ALIASES.values() for a in v]
+    )
+
+    context: dict[int, tuple[tuple[str, ...], str | None, tuple[str, ...]]] = {}
+    rows: list[QueryHitRow] = []
+    tally = {HitDecision.CONFIRMED: 0, HitDecision.PENDING: 0, HitDecision.REJECTED: 0}
+    skipped = 0
+
+    for hit in stale:
+        instrument = by_id.get(hit.instrument_id)
+        if instrument is None:
+            skipped += 1
+            continue
+        if hit.instrument_id not in context:
+            aliases = NaverNewsCollector.aliases_for(instrument)
+            context[hit.instrument_id] = (
+                aliases,
+                instrument_repo.current_symbol(session, instrument.instrument_id),
+                NaverNewsCollector.conflicts_for((instrument.name, *aliases), registry),
+            )
+        aliases, symbol, conflicts = context[hit.instrument_id]
+
+        verdict = NaverNewsCollector.judge(
+            hit.title,
+            hit.summary or "",
+            name=instrument.name,
+            aliases=aliases,
+            symbol=symbol,
+            conflicts=conflicts,
+        )
+        tally[verdict.decision] += 1
+        rows.append(
+            QueryHitRow(
+                news_item_id=hit.news_item_id,
+                instrument_id=hit.instrument_id,
+                matched_query=hit.matched_query,
+                decision=verdict.decision,
+                decision_reason=verdict.reason,
+                match_method=verdict.method,
+                rule_version=RULE_VERSION,
+                decided_by=Decider.RULE,
+                decided_at=now,
+            )
+        )
+
+    written = news_repo.record_hits(session, rows)
+    session.commit()
+    return RejudgeResult(
+        judged=len(rows),
+        confirmed=tally[HitDecision.CONFIRMED],
+        pending=tally[HitDecision.PENDING],
+        rejected=tally[HitDecision.REJECTED],
+        mentions_added=written.mentions_added,
+        mentions_removed=written.mentions_removed,
+        skipped=skipped,
+    )

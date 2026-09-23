@@ -25,7 +25,7 @@ from app import cli_backtest
 from app.collectors.base import run_collector
 from app.collectors.dart_fundamental import MAX_YEARS_BACK, DartFundamentalCollector
 from app.collectors.krx_master import KrxMasterCollector
-from app.collectors.naver_news import NaverNewsCollector
+from app.collectors.naver_news import NaverNewsCollector, rejudge_hits
 from app.collectors.quota import QuotaGuard
 from app.collectors.sec_edgar import SecEdgarCollector
 from app.collectors.yfinance_history import FxRateCollector, YFinanceHistoryCollector
@@ -35,7 +35,7 @@ from app.core.calendar import Market
 from app.core.clock import utc_now
 from app.db import session_scope
 from app.models import Interval
-from app.repositories import candle_repo, instrument_repo
+from app.repositories import candle_repo, instrument_repo, news_repo
 from app.seed import seed_watchlist
 
 logger = logging.getLogger("app.cli")
@@ -112,7 +112,12 @@ def cmd_quota() -> int:
     return 0
 
 
-def cmd_collect(source: str, period: str | None = None, limit: int | None = None) -> int:
+def cmd_collect(
+    source: str,
+    period: str | None = None,
+    limit: int | None = None,
+    only: str | None = None,
+) -> int:
     factory = COLLECTORS.get(source)
     if factory is None:
         print(f"unknown source {source!r}; known: {', '.join(sorted(COLLECTORS))}")
@@ -142,6 +147,18 @@ def cmd_collect(source: str, period: str | None = None, limit: int | None = None
             return 2
         kwargs = {"max_instruments": limit, "max_pages": 1}
 
+    # Named companies only, one page each: for checking a rule change on the
+    # companies that prompted it before paying for the whole market.
+    if only is not None:
+        if source != "naver":
+            print(f"--only applies to naver only, not to {source}")
+            return 2
+        names = [n.strip() for n in only.split(",") if n.strip()]
+        if not names:
+            print("--only needs at least one company name")
+            return 2
+        kwargs = {"only": names, "max_pages": 1}
+
     with session_scope() as session:
         run = run_collector(factory(**kwargs), session)
         print(f"{run.source}: {run.status} read={run.items_read} saved={run.items_saved}")
@@ -150,6 +167,31 @@ def cmd_collect(source: str, period: str | None = None, limit: int | None = None
         if run.error:
             print(f"  error:  {run.error}")
     return 0 if run.status.value in {"SUCCESS", "PARTIAL", "SKIPPED"} else 1
+
+
+def cmd_rejudge_news() -> int:
+    """Re-decide stored query hits under the current relevance rule.
+
+    Costs no API call. Prints what moved and whether the mention table still
+    agrees with the confirmed hits, which it must.
+    """
+    with session_scope() as session:
+        result = rejudge_hits(session)
+        counts = news_repo.hit_counts(session)
+        missing, orphaned = news_repo.projection_drift(session)
+
+    print(
+        f"re-judged {result.judged}: {result.confirmed} confirmed, "
+        f"{result.pending} pending, {result.rejected} rejected"
+    )
+    print(f"mentions: +{result.mentions_added} -{result.mentions_removed}")
+    if result.skipped:
+        print(f"skipped {result.skipped} whose company is no longer in the Korean universe")
+    print("hits now: " + ", ".join(f"{k.value} {v}" for k, v in sorted(counts.items())))
+    print(
+        f"projection drift: {missing} confirmed without a mention, {orphaned} mentions unconfirmed"
+    )
+    return 0 if (missing, orphaned) == (0, 0) else 1
 
 
 def cmd_candles(symbol: str, market: Market, limit: int) -> int:
@@ -207,6 +249,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("seed", help="create the starting watchlist")
     sub.add_parser("runs", help="recent collector runs")
     sub.add_parser("quota", help="how much of each API budget is left")
+    sub.add_parser(
+        "rejudge-news", help="re-decide stored news hits under the current rule; no API calls"
+    )
 
     collect = sub.add_parser("collect", help="run one collector")
     collect.add_argument("--source", required=True, choices=sorted(COLLECTORS))
@@ -215,6 +260,10 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="naver only: sweep at most N instruments, one page each. For "
         "checking the pipe end to end without spending a day's budget",
+    )
+    collect.add_argument(
+        "--only",
+        help="naver only: comma-separated company names to sweep, one page each",
     )
     collect.add_argument(
         "--period",
@@ -244,7 +293,9 @@ def main(argv: list[str] | None = None) -> int:
         case "quota":
             return cmd_quota()
         case "collect":
-            return cmd_collect(args.source, args.period, args.limit)
+            return cmd_collect(args.source, args.period, args.limit, args.only)
+        case "rejudge-news":
+            return cmd_rejudge_news()
         case "backtest":
             return cli_backtest.dispatch(args)
         case "candles":

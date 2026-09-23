@@ -27,6 +27,25 @@ on, so news cannot support a backtest over any earlier period. This is the
 concrete reason sentiment is an event overlay with its own half-life rather
 than a weighted factor in the base score: the base score has ten years of
 history behind it and this does not.
+
+**Three layers, and only the last is a claim about a company.**
+
+    news_item       what was published            a fact
+    news_query_hit  which query surfaced it       a fact, plus a verdict
+    news_mention    it is about this company      the verdict, when CONFIRMED
+
+A search result is not evidence that the article is about the company the
+query named. The first rollout showed it within ten companies: `원림` is a
+listed company and also the ordinary word for a garden, and seven of its
+eighteen accepted articles were about gardens. So every hit is recorded with
+its verdict — CONFIRMED, PENDING or REJECTED — and `news_mention` holds only
+the CONFIRMED ones. Keeping the rejected and the undecided is what lets the
+reject rate be computed again later, lets a later rule re-judge old hits, and
+leaves the undecided ones for a model to judge instead of dropping them.
+
+`news_mention` is a projection of `news_query_hit` and has one writer,
+`news_repo.record_hits`. Two tables that both say "confirmed" and were written
+separately would drift.
 """
 
 from __future__ import annotations
@@ -40,9 +59,11 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -168,4 +189,94 @@ class NewsMention(Base):
         return (
             f"<NewsMention item={self.news_item_id} instrument={self.instrument_id} "
             f"via={self.match_method}>"
+        )
+
+
+class HitDecision(StrEnum):
+    """Whether an article the search returned is about the company searched for."""
+
+    CONFIRMED = "CONFIRMED"  # becomes a news_mention
+    PENDING = "PENDING"  # the name is there, the company may not be; left for a model
+    REJECTED = "REJECTED"  # the name is not there at all
+
+
+class Decider(StrEnum):
+    """Who reached the verdict. A later rule may overrule a rule; never a model."""
+
+    RULE = "RULE"
+    LLM = "LLM"
+
+
+class NewsQueryHit(Base):
+    """One article surfaced by one company's search, and the verdict on it.
+
+    Keyed on the pair, and re-judged in place. The same article comes back
+    every run while a window overlaps or a sweep is re-read after a PARTIAL, so
+    one row per run would grow without bound and say nothing new.
+
+    `decided_at` moves only when the verdict changes. A PENDING hit confirmed by
+    a model next month did not exist as a confirmation today, and a reader
+    reconstructing an earlier moment must be able to tell.
+    """
+
+    __tablename__ = "news_query_hit"
+
+    id: Mapped[BigIntPk]
+    news_item_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("news_item.id", ondelete="CASCADE"), nullable=False
+    )
+    instrument_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("instrument.instrument_id", ondelete="CASCADE"), nullable=False
+    )
+    matched_query: Mapped[str] = mapped_column(
+        String(200), nullable=False, doc="The query that surfaced the article, most recently."
+    )
+    decision: Mapped[HitDecision] = mapped_column(
+        Enum(HitDecision, name="news_hit_decision", native_enum=False, length=12),
+        nullable=False,
+    )
+    decision_reason: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        doc="Why, in a short machine-readable form: `absent`, `name`, "
+        "`strong:title_lead`, `weak:실적+수주`, `context:none`, `legacy:mention`.",
+    )
+    match_method: Mapped[MatchMethod | None] = mapped_column(
+        Enum(MatchMethod, name="news_match_method", native_enum=False, length=16),
+        nullable=True,
+        doc="How the name was found. Null when it was not found at all.",
+    )
+    rule_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="The rule set that reached a RULE verdict, so a newer rule can find "
+        "and re-judge exactly the hits an older one decided.",
+    )
+    decided_by: Mapped[Decider] = mapped_column(
+        Enum(Decider, name="news_decider", native_enum=False, length=8),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        doc="When this pair was first seen.",
+    )
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        doc="When the current verdict was reached. Unchanged by a re-judgment "
+        "that reaches the same verdict.",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("news_item_id", "instrument_id", name="uq_news_query_hit_item_instrument"),
+        Index("ix_news_query_hit_instrument_decision", "instrument_id", "decision"),
+        Index("ix_news_query_hit_decision_rule", "decision", "decided_by", "rule_version"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<NewsQueryHit item={self.news_item_id} instrument={self.instrument_id} "
+            f"{self.decision} ({self.decision_reason})>"
         )

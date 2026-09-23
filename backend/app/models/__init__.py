@@ -22,7 +22,15 @@ from app.models.market import (
     CorporateActionType,
     FxRate,
 )
-from app.models.news import MatchMethod, NewsItem, NewsMention, NewsSource
+from app.models.news import (
+    Decider,
+    HitDecision,
+    MatchMethod,
+    NewsItem,
+    NewsMention,
+    NewsQueryHit,
+    NewsSource,
+)
 from app.models.portfolio import (
     Holding,
     PortfolioSnapshot,
@@ -42,11 +50,13 @@ __all__ = [
     "CollectorStatus",
     "CorporateAction",
     "CorporateActionType",
+    "Decider",
     "Filing",
     "FiscalPeriod",
     "Fundamental",
     "FundamentalSource",
     "FxRate",
+    "HitDecision",
     "Holding",
     "Instrument",
     "Interval",
@@ -54,6 +64,7 @@ __all__ = [
     "MatchMethod",
     "NewsItem",
     "NewsMention",
+    "NewsQueryHit",
     "NewsSource",
     "PortfolioSnapshot",
     "SampleType",
