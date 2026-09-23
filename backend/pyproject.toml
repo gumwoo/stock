@@ -127,6 +127,12 @@ strict = true
 module = ["yfinance.*", "exchange_calendars.*", "apscheduler.*"]
 ignore_missing_imports = true
 
+# The `llm` extra, which CI does not install: its wheel carries the Claude Code
+# binary. Imported lazily, only where a model is actually called.
+[[tool.mypy.overrides]]
+module = ["claude_agent_sdk", "claude_agent_sdk.*"]
+ignore_missing_imports = true
+
 # =============================================================================
 # pytest
 # =============================================================================
