@@ -313,7 +313,7 @@ class TestTheGroupReachesTheScore:
 
         roe = next(m for m in factor.metrics if m.name == "ROE")
         assert roe.detail is not None
-        assert f"ranked against {MEMBERS} peers" in roe.detail
+        assert f"비교군 {MEMBERS}개 중 순위" in roe.detail
 
     def test_asking_for_peers_counts_as_reading_financials(
         self, market: tuple[Session, list[Instrument]]

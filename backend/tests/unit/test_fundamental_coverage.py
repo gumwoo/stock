@@ -188,7 +188,7 @@ class TestCoveragePolicy:
         assert factor.availability is Availability.UNAVAILABLE
         assert factor.effective_weight == 0.0
         assert factor.availability_reason is not None
-        assert "at least 3" in factor.availability_reason
+        assert "3개 이상" in factor.availability_reason
 
     def test_enough_metrics_scores_normally(self) -> None:
         snap = build(
@@ -242,7 +242,7 @@ class TestCoveragePolicy:
 
         assert factor.availability is Availability.UNAVAILABLE
         assert factor.availability_reason is not None
-        assert "profitability" in factor.availability_reason
+        assert "수익성 지표" in factor.availability_reason
 
     def test_the_requirement_is_configurable(self) -> None:
         """It is a strategy opinion, not a law."""

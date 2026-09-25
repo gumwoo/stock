@@ -209,7 +209,7 @@ class TestAvailabilityResolution:
         assert verdict.availability is Availability.UNAVAILABLE
         assert verdict.effective_weight == 0.0
         assert verdict.reason is not None
-        assert "8.0h old" in verdict.reason
+        assert "8.0시간 전" in verdict.reason
 
     def test_stale_source_check_says_a_filing_may_have_been_missed(self) -> None:
         """The message should name the real risk, not just report a duration."""
@@ -230,7 +230,7 @@ class TestAvailabilityResolution:
         )
 
         assert verdict.reason is not None
-        assert "newer filing may have been missed" in verdict.reason
+        assert "새 공시를 놓쳤을 수 있음" in verdict.reason
 
 
 class TestRenormalization:

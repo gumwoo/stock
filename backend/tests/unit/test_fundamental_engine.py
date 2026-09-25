@@ -181,7 +181,7 @@ class TestGuards:
 
         assert per is not None
         assert per.normalized == 0.0  # type: ignore[attr-defined]
-        assert any("no meaningful P/E" in r.text for r in reasons)
+        assert any("PER이 의미 없음" in r.text for r in reasons)
 
     def test_negative_equity_does_not_produce_a_flattering_roe(self) -> None:
         """A loss over negative equity comes out positive."""
@@ -192,7 +192,7 @@ class TestGuards:
 
         assert roe is not None
         assert roe.normalized == 0.0  # type: ignore[attr-defined]
-        assert any("not interpretable" in r.text for r in reasons)
+        assert any("ROE를 해석할 수 없음" in r.text for r in reasons)
 
     def test_zero_revenue_skips_the_margin_rather_than_dividing(self) -> None:
         factor, _ = run(

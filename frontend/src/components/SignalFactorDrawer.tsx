@@ -1,5 +1,14 @@
 import type { Factor, Signal } from "../api/types";
-import { datetime, percent, signed } from "../api/format";
+import {
+  ACTION_LABEL,
+  datetime,
+  engineLabel,
+  freshnessLabel,
+  metricLabel,
+  percent,
+  policyLabel,
+  signed,
+} from "../api/format";
 import "./SignalFactorDrawer.css";
 
 /**
@@ -33,9 +42,9 @@ function FactorBlock({ factor }: { factor: Factor }) {
   return (
     <section className={`factor ${unavailable ? "factor--out" : ""}`}>
       <header className="factor__head">
-        <h3 className="factor__name">{factor.engine}</h3>
+        <h3 className="factor__name">{engineLabel(factor.engine)}</h3>
         {unavailable ? (
-          <span className="factor__badge">UNAVAILABLE</span>
+          <span className="factor__badge">사용 불가</span>
         ) : (
           <span className="factor__score num">
             {factor.score.toFixed(1)}
@@ -52,16 +61,16 @@ function FactorBlock({ factor }: { factor: Factor }) {
         <table className="metrics">
           <thead>
             <tr>
-              <th>metric</th>
-              <th className="r">raw</th>
-              <th className="r">normalized</th>
+              <th>지표</th>
+              <th className="r">원값</th>
+              <th className="r">점수(0~100)</th>
             </tr>
           </thead>
           <tbody>
             {factor.metrics.map((m) => (
               <tr key={m.name}>
                 <td>
-                  {m.name}
+                  {metricLabel(m.name)}
                   {m.detail && <span className="metrics__detail">{m.detail}</span>}
                 </td>
                 <td className="r num">{signed(m.raw, 3)}</td>
@@ -76,11 +85,11 @@ function FactorBlock({ factor }: { factor: Factor }) {
 
       <dl className="weights">
         <div>
-          <dt>requested</dt>
+          <dt>요청 가중치</dt>
           <dd className="num">{(factor.requested_weight * 100).toFixed(0)}%</dd>
         </div>
         <div>
-          <dt>effective</dt>
+          <dt>실제 가중치</dt>
           <dd
             className={`num ${
               factor.effective_weight !== factor.requested_weight ? "weights--changed" : ""
@@ -90,17 +99,17 @@ function FactorBlock({ factor }: { factor: Factor }) {
           </dd>
         </div>
         <div>
-          <dt>contribution</dt>
+          <dt>기여 점수</dt>
           <dd className="num weights--contrib">{signed(factor.contribution, 2)}</dd>
         </div>
       </dl>
 
       <p className="provenance">
         <span className={`freshness freshness--${factor.freshness_status.toLowerCase()}`}>
-          {factor.freshness_status}
+          {freshnessLabel(factor.freshness_status)}
         </span>
-        {factor.source_asof && <> · data {datetime(factor.source_asof)}</>}
-        {factor.source_checked_at && <> · source checked {datetime(factor.source_checked_at)}</>}
+        {factor.source_asof && <> · 데이터 {datetime(factor.source_asof)}</>}
+        {factor.source_checked_at && <> · 출처 확인 {datetime(factor.source_checked_at)}</>}
       </p>
     </section>
   );
@@ -116,23 +125,23 @@ export function SignalFactorDrawer({ signal, onClose }: Props) {
         className="drawer"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
-        aria-label={`How ${signal.symbol} scored ${signal.total_score.toFixed(1)}`}
+        aria-label={`${signal.symbol} 점수 ${signal.total_score.toFixed(1)}의 계산 과정`}
       >
         <header className="drawer__head">
           <div>
-            <p className="drawer__eyebrow">How this score was reached</p>
+            <p className="drawer__eyebrow">이 점수가 나온 과정</p>
             <h2 className="drawer__title">
               {signal.name} <span className="drawer__symbol">{signal.symbol}</span>
             </h2>
           </div>
-          <button className="drawer__close" onClick={onClose} aria-label="Close">
+          <button className="drawer__close" onClick={onClose} aria-label="닫기">
             ✕
           </button>
         </header>
 
         <div className="drawer__total">
           <span className="drawer__total-num num">{signal.total_score.toFixed(1)}</span>
-          <span className="drawer__total-label">{signal.action.replace("_", " ")}</span>
+          <span className="drawer__total-label">{ACTION_LABEL[signal.action] ?? signal.action}</span>
         </div>
 
         {signal.abstained_reason && (
@@ -154,14 +163,14 @@ export function SignalFactorDrawer({ signal, onClose }: Props) {
 
         {shrunk && (
           <p className="drawer__shrunk">
-            Effective weight totals {percent(weightTotal * 100, 0)}, so the score is
-            measured against a reduced maximum. A factor sat out.
+            실제 가중치 합이 {percent(weightTotal * 100, 0)}라서 점수의 최대치가 줄어든 상태입니다.
+            빠진 요인이 있습니다.
           </p>
         )}
 
         {signal.reasons.length > 0 && (
           <section className="evidence">
-            <h3 className="evidence__title">Evidence</h3>
+            <h3 className="evidence__title">근거</h3>
             <ul>
               {signal.reasons.map((r, i) => {
                 const m = MARKER[r.status] ?? MARKER.NEUTRAL;
@@ -180,30 +189,29 @@ export function SignalFactorDrawer({ signal, onClose }: Props) {
 
         {/* The three clocks. Surfacing them is the point of separating them. */}
         <section className="clocks">
-          <h3 className="clocks__title">Timing</h3>
+          <h3 className="clocks__title">시각</h3>
           <dl>
             <div>
-              <dt>data as of</dt>
+              <dt>데이터 기준</dt>
               <dd className="num">{datetime(signal.data_asof)}</dd>
             </div>
             <div>
-              <dt>decided at</dt>
+              <dt>판단 시각</dt>
               <dd className="num">{datetime(signal.decision_at)}</dd>
             </div>
             <div>
-              <dt>earliest execution</dt>
+              <dt>최초 체결 가능</dt>
               <dd className="num">{datetime(signal.earliest_execution_at)}</dd>
             </div>
           </dl>
           <p className="clocks__note">
-            A decision made on a session's close cannot fill at that close, so the
-            earliest honest fill is the next session's open. This system places no
-            orders — nothing here was executed.
+            마감 가격으로 내린 판단은 그 마감 가격에 체결될 수 없으므로, 가장 이른 체결은 다음 거래일
+            시가입니다. 이 시스템은 주문을 넣지 않으며, 여기 있는 어떤 것도 실제로 체결되지 않았습니다.
           </p>
         </section>
 
         <footer className="drawer__foot">
-          strategy {signal.strategy_version} · policy {signal.policy}
+          전략 {signal.strategy_version} · 결측 처리: {policyLabel(signal.policy)}
         </footer>
       </aside>
     </div>

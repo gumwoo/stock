@@ -1,5 +1,5 @@
 /* TradingView density, applied only here. The chart is the subject, so the
- * surface is dark and the indicators sit beside it rather than below the fold. */
+ * indicators sit beside it rather than below the fold. */
 
 .detail {
   display: flex;

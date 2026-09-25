@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import { datetime, direction, money, percent, signed } from "../api/format";
+import { datetime, direction, marketLabel, metricLabel, money, percent, signed } from "../api/format";
 import type { Candle, Instrument, Signal } from "../api/types";
 import { movingAverage, useCandleChart } from "../hooks/useCandleChart";
 import "./InstrumentDetail.css";
@@ -10,8 +10,8 @@ import "./InstrumentDetail.css";
  *
  * Dashboard and portfolio are deliberately sparse — one number, then a summary.
  * Here the chart is the subject and the indicators belong beside it, so this
- * follows TradingView's arrangement rather than Toss's. It also defaults to
- * dark, since a chart read for any length of time is easier on a dark surface.
+ * follows TradingView's arrangement rather than Toss's. It stays in the same
+ * light theme as the rest of the app.
  *
  * The evidence list is rendered from the signal's stored reasons, never
  * composed here. If the UI wrote its own sentences they would drift from the
@@ -19,11 +19,11 @@ import "./InstrumentDetail.css";
  */
 
 const RANGES = [
-  { label: "1M", bars: 22 },
-  { label: "3M", bars: 66 },
-  { label: "6M", bars: 130 },
-  { label: "1Y", bars: 250 },
-  { label: "2Y", bars: 500 },
+  { label: "1개월", bars: 22 },
+  { label: "3개월", bars: 66 },
+  { label: "6개월", bars: 130 },
+  { label: "1년", bars: 250 },
+  { label: "2년", bars: 500 },
 ] as const;
 
 const MARKER: Record<string, { glyph: string; cls: string }> = {
@@ -45,7 +45,7 @@ function IndicatorStrip({ signal }: { signal: Signal }) {
     <div className="strip">
       {technical.metrics.map((m) => (
         <div key={m.name} className="strip__item">
-          <span className="strip__label">{m.name}</span>
+          <span className="strip__label">{metricLabel(m.name)}</span>
           <span className="strip__raw num">{signed(m.raw, 2)}</span>
           <span className="strip__norm num">{m.normalized.toFixed(0)}</span>
         </div>
@@ -58,14 +58,8 @@ export function InstrumentDetail({ instrumentId, onBack }: Props) {
   const [candles, setCandles] = useState<Candle[]>([]);
   const [signal, setSignal] = useState<Signal | null>(null);
   const [instrument, setInstrument] = useState<Instrument | null>(null);
-  const [range, setRange] = useState<(typeof RANGES)[number]["label"]>("6M");
+  const [range, setRange] = useState<(typeof RANGES)[number]["label"]>("6개월");
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    // Dark is the default here; the rest of the app stays light.
-    document.documentElement.setAttribute("data-theme", "dark");
-    return () => document.documentElement.removeAttribute("data-theme");
-  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -118,7 +112,7 @@ export function InstrumentDetail({ instrumentId, onBack }: Props) {
         <div>
           <h1 className="detail__name">{instrument?.name ?? signal?.name ?? "—"}</h1>
           <p className="detail__symbol">
-            {instrument?.symbol ?? signal?.symbol} · {instrument?.market ?? signal?.market}
+            {instrument?.symbol ?? signal?.symbol} · {marketLabel(instrument?.market ?? signal?.market)}
           </p>
         </div>
         {last && (
@@ -133,7 +127,7 @@ export function InstrumentDetail({ instrumentId, onBack }: Props) {
         )}
       </header>
 
-      <nav className="ranges" aria-label="Chart range">
+      <nav className="ranges" aria-label="차트 기간">
         {RANGES.map((r) => (
           <button
             key={r.label}
@@ -147,10 +141,10 @@ export function InstrumentDetail({ instrumentId, onBack }: Props) {
 
       <div className="chart" ref={chartRef} />
       <p className="chart__legend">
-        <span className="chart__ma20">MA20</span>
-        <span className="chart__ma60">MA60</span>
+        <span className="chart__ma20">20일선</span>
+        <span className="chart__ma60">60일선</span>
         <span className="chart__note">
-          원본 시세 · 수정주가는 corporate action으로 조회 시점에 계산합니다
+          원본 시세 · 수정주가는 배당·분할 같은 기업 이벤트로 조회 시점에 계산합니다
         </span>
       </p>
 
@@ -181,9 +175,9 @@ export function InstrumentDetail({ instrumentId, onBack }: Props) {
           </section>
 
           <footer className="detail__clocks">
-            <span>data_asof {datetime(signal.data_asof)}</span>
-            <span>decision_at {datetime(signal.decision_at)}</span>
-            <span>earliest exec {datetime(signal.earliest_execution_at)}</span>
+            <span>데이터 기준 {datetime(signal.data_asof)}</span>
+            <span>판단 시각 {datetime(signal.decision_at)}</span>
+            <span>최초 체결 가능 {datetime(signal.earliest_execution_at)}</span>
           </footer>
         </>
       )}

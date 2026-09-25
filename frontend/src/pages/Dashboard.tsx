@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import { datetime, direction, money, percent } from "../api/format";
+import { datetime, direction, marketLabel, money, percent } from "../api/format";
 import type { Instrument, Signal } from "../api/types";
 import { SignalFactorDrawer } from "../components/SignalFactorDrawer";
 import "./Dashboard.css";
@@ -51,7 +51,7 @@ function SignalCard({
         <div>
           <h3 className="card__name">{signal.name}</h3>
           <p className="card__symbol">
-            {signal.symbol} · {signal.market}
+            {signal.symbol} · {marketLabel(signal.market)}
           </p>
         </div>
         <span className={`tag tag--${signal.action.toLowerCase()}`}>

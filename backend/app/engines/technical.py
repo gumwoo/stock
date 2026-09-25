@@ -126,9 +126,7 @@ class TechnicalEngine:
         rsi = relative_strength_index(closes, p.rsi_period)
         if rsi is not None:
             score = peak_at(rsi, p.rsi_ideal, p.rsi_tolerance)
-            metrics.append(
-                Metric("RSI", raw=rsi, normalized=score, detail=f"{p.rsi_period}-period")
-            )
+            metrics.append(Metric("RSI", raw=rsi, normalized=score, detail=f"{p.rsi_period}일"))
             reasons.append(self._rsi_reason(rsi))
 
         # --- distance from the short moving average ----------------------
@@ -143,7 +141,7 @@ class TechnicalEngine:
                         f"MA{p.ma_short} distance",
                         raw=distance,
                         normalized=score,
-                        detail=f"price vs {p.ma_short}-day average",
+                        detail=f"현재가 대비 {p.ma_short}일 평균",
                     )
                 )
                 reasons.append(self._ma_reason(distance, p.ma_short))
@@ -168,7 +166,7 @@ class TechnicalEngine:
                     "Volume z-score",
                     raw=volume_z,
                     normalized=score,
-                    detail=f"vs {p.volume_period}-day mean",
+                    detail=f"{p.volume_period}일 평균 대비",
                 )
             )
             reasons.append(self._volume_reason(volume_z))
@@ -181,7 +179,7 @@ class TechnicalEngine:
             score = clamp_score(position * 100.0)
             metrics.append(
                 Metric(
-                    "Bollinger position", raw=position, normalized=score, detail="0=lower, 1=upper"
+                    "Bollinger position", raw=position, normalized=score, detail="0=하단, 1=상단"
                 )
             )
 
@@ -214,21 +212,22 @@ class TechnicalEngine:
     # --- evidence lines ---------------------------------------------------
     # Each returns a rendered sentence plus its status, produced here rather
     # than in the frontend so the displayed claim always matches the number
-    # that was actually computed.
+    # that was actually computed. The sentences are for the reader, who reads
+    # Korean; metric names stay as they are, since code keys on them.
 
     @staticmethod
     def _rsi_reason(rsi: float) -> SignalReason:
         if rsi >= 70:
             return SignalReason(
-                ReasonStatus.OPPOSES, f"RSI {rsi:.1f} — overbought", Engine.TECHNICAL, "RSI"
+                ReasonStatus.OPPOSES, f"RSI {rsi:.1f} — 과매수", Engine.TECHNICAL, "RSI"
             )
         if rsi <= 30:
             return SignalReason(
-                ReasonStatus.OPPOSES, f"RSI {rsi:.1f} — oversold", Engine.TECHNICAL, "RSI"
+                ReasonStatus.OPPOSES, f"RSI {rsi:.1f} — 과매도", Engine.TECHNICAL, "RSI"
             )
         return SignalReason(
             ReasonStatus.SUPPORTS,
-            f"RSI {rsi:.1f} — not in an extreme zone",
+            f"RSI {rsi:.1f} — 극단 구간 아님",
             Engine.TECHNICAL,
             "RSI",
         )
@@ -238,20 +237,20 @@ class TechnicalEngine:
         if distance > 1.0:
             return SignalReason(
                 ReasonStatus.SUPPORTS,
-                f"Trading {distance:+.1f}% above the {period}-day average",
+                f"{period}일 평균보다 {distance:+.1f}% 위에서 거래",
                 Engine.TECHNICAL,
                 f"MA{period} distance",
             )
         if distance < -1.0:
             return SignalReason(
                 ReasonStatus.OPPOSES,
-                f"Trading {distance:+.1f}% below the {period}-day average",
+                f"{period}일 평균보다 {distance:+.1f}% 아래에서 거래",
                 Engine.TECHNICAL,
                 f"MA{period} distance",
             )
         return SignalReason(
             ReasonStatus.NEUTRAL,
-            f"Sitting on the {period}-day average ({distance:+.1f}%)",
+            f"{period}일 평균 부근 ({distance:+.1f}%)",
             Engine.TECHNICAL,
             f"MA{period} distance",
         )
@@ -261,12 +260,12 @@ class TechnicalEngine:
         if spread > 0:
             return SignalReason(
                 ReasonStatus.SUPPORTS,
-                f"MA{short} is {spread:+.1f}% above MA{long} — uptrend",
+                f"{short}일선이 {long}일선보다 {spread:+.1f}% 위 — 상승 추세",
                 Engine.TECHNICAL,
             )
         return SignalReason(
             ReasonStatus.OPPOSES,
-            f"MA{short} is {spread:+.1f}% below MA{long} — downtrend",
+            f"{short}일선이 {long}일선보다 {spread:+.1f}% 아래 — 하락 추세",
             Engine.TECHNICAL,
         )
 
@@ -275,29 +274,29 @@ class TechnicalEngine:
         if z >= 1.0:
             return SignalReason(
                 ReasonStatus.SUPPORTS,
-                f"Volume {z:+.1f} sigma above its 20-day normal",
+                f"거래량이 20일 평소보다 {z:+.1f} 표준편차 많음",
                 Engine.TECHNICAL,
                 "Volume z-score",
             )
         if z <= -1.0:
             return SignalReason(
                 ReasonStatus.OPPOSES,
-                f"Volume {z:+.1f} sigma below its 20-day normal",
+                f"거래량이 20일 평소보다 {z:+.1f} 표준편차 적음",
                 Engine.TECHNICAL,
                 "Volume z-score",
             )
         return SignalReason(
-            ReasonStatus.NEUTRAL, f"Volume close to normal ({z:+.1f} sigma)", Engine.TECHNICAL
+            ReasonStatus.NEUTRAL, f"거래량 평소 수준 ({z:+.1f} 표준편차)", Engine.TECHNICAL
         )
 
     @staticmethod
     def _macd_reason(histogram: float) -> SignalReason:
         if histogram > 0:
             return SignalReason(
-                ReasonStatus.SUPPORTS, "MACD histogram positive", Engine.TECHNICAL, "MACD histogram"
+                ReasonStatus.SUPPORTS, "MACD 히스토그램 양수", Engine.TECHNICAL, "MACD histogram"
             )
         return SignalReason(
-            ReasonStatus.OPPOSES, "MACD histogram negative", Engine.TECHNICAL, "MACD histogram"
+            ReasonStatus.OPPOSES, "MACD 히스토그램 음수", Engine.TECHNICAL, "MACD histogram"
         )
 
     def _insufficient(
@@ -314,8 +313,8 @@ class TechnicalEngine:
         noisier average; it is a different statistic with the same label.
         """
         reason = (
-            f"only {available} bars available, {self.params.min_bars} needed "
-            f"for MA{self.params.ma_long}"
+            f"일봉이 {available}개뿐입니다. {self.params.ma_long}일선에는 "
+            f"{self.params.min_bars}개가 필요합니다"
         )
         factor = Factor(
             engine=Engine.TECHNICAL,

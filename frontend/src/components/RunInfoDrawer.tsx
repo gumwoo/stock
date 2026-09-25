@@ -21,94 +21,93 @@ export function RunInfoDrawer({
   onClose: () => void;
 }) {
   return (
-    <div className="runinfo" role="dialog" aria-label={`Run ${run.id} information`}>
+    <div className="runinfo" role="dialog" aria-label={`실행 ${run.id} 정보`}>
       <div className="runinfo__head">
         <div>
-          <div className="runinfo__eyebrow">Run information</div>
-          <h2 className="runinfo__title">Run #{run.id}</h2>
+          <div className="runinfo__eyebrow">실행 정보</div>
+          <h2 className="runinfo__title">실행 #{run.id}</h2>
         </div>
-        <button className="runinfo__close" onClick={onClose} aria-label="Close">
+        <button className="runinfo__close" onClick={onClose} aria-label="닫기">
           ✕
         </button>
       </div>
 
-      <Section title="Strategy">
-        <Row label="Kind" value={run.strategy_kind} />
-        <Row label="Version" value={run.strategy_version} />
-        <Row label="Parameters" value={describeParams(run.strategy_params)} mono />
-        <Row label="Fingerprint" value={run.strategy_fingerprint} mono />
+      <Section title="전략">
+        <Row label="종류" value={run.strategy_kind} />
+        <Row label="버전" value={run.strategy_version} />
+        <Row label="파라미터" value={describeParams(run.strategy_params)} mono />
+        <Row label="지문" value={run.strategy_fingerprint} mono />
         {run.fitter_version ? (
-          <Row label="Fitter" value={run.fitter_version} />
+          <Row label="학습기" value={run.fitter_version} />
         ) : null}
-        <Row label="Fit trace" value={run.fit_trace_fingerprint} mono />
+        <Row label="학습 기록 지문" value={run.fit_trace_fingerprint} mono />
       </Section>
 
-      <Section title="Code">
-        <Row label="Commit" value={run.git_commit_sha} mono />
+      <Section title="코드">
+        <Row label="커밋" value={run.git_commit_sha} mono />
         {run.git_dirty ? (
           <p className="runinfo__warn">
-            The working tree had uncommitted changes when this ran, so the commit
-            alone does not describe the code that produced these numbers.
+            실행할 때 커밋하지 않은 변경이 있었습니다. 그래서 커밋만으로는 이 숫자를 만든 코드를 다
+            설명하지 못합니다.
           </p>
         ) : null}
       </Section>
 
-      <Section title="Data">
-        <Row label="Snapshot" value={run.data_snapshot_at} mono />
-        <Row label="Period" value={`${run.period_start} — ${run.period_end}`} />
-        <Row label="Interval" value={run.interval} />
+      <Section title="데이터">
+        <Row label="스냅샷" value={run.data_snapshot_at} mono />
+        <Row label="기간" value={`${run.period_start} — ${run.period_end}`} />
+        <Row label="봉 간격" value={run.interval} />
         <Row
-          label="Missing sessions"
+          label="빠진 거래일"
           value={
             run.require_complete_sessions
-              ? "refused"
-              : "accepted, marked at the last printed price"
+              ? "허용하지 않음"
+              : "허용, 마지막 체결가로 평가"
           }
         />
         <Row
-          label="Peer group"
+          label="비교 종목군"
           value={
             run.universe
-              ? `${run.universe.length} instruments (#${run.universe.join(", #")})`
-              : "none — fundamental ratios scored on their fixed scale"
+              ? `${run.universe.length}개 종목 (#${run.universe.join(", #")})`
+              : "없음 — 재무 비율은 고정 척도로 채점"
           }
         />
       </Section>
 
-      <Section title="Execution">
-        <Row label="Model" value={run.execution_model} />
-        <Row label="Starting cash" value={run.starting_cash.toLocaleString()} />
-        <Row label="Commission" value={`${run.commission_bps} bp`} />
-        <Row label="Slippage" value={`${run.slippage_bps} bp`} />
-        <Row label="Minimum commission" value={String(run.min_commission)} />
+      <Section title="체결 가정">
+        <Row label="모델" value={run.execution_model} />
+        <Row label="시작 자금" value={run.starting_cash.toLocaleString("ko-KR")} />
+        <Row label="수수료" value={`${run.commission_bps} bp`} />
+        <Row label="슬리피지" value={`${run.slippage_bps} bp`} />
+        <Row label="최소 수수료" value={String(run.min_commission)} />
       </Section>
 
-      <Section title="Split">
-        <Row label="Train" value={`${run.train_sessions} sessions`} />
-        <Row label="Evaluate" value={`${run.eval_sessions} sessions`} />
-        <Row label="Training window" value={run.anchored ? "anchored" : "rolling"} />
+      <Section title="구간 나누기">
+        <Row label="학습" value={`${run.train_sessions}세션`} />
+        <Row label="평가" value={`${run.eval_sessions}세션`} />
+        <Row label="학습 창" value={run.anchored ? "시작 고정" : "이동 창"} />
         <Row
-          label="Holdout"
+          label="홀드아웃"
           value={
             run.holdout_start
               ? `${run.holdout_start} — ${run.holdout_end}`
-              : "none reserved"
+              : "떼어 두지 않음"
           }
         />
         <Row
-          label="Holdout taken"
+          label="홀드아웃 측정"
           value={
             run.has_holdout
-              ? `yes, with ${run.holdout_strategy_fingerprint ?? "an unrecorded strategy"}`
-              : "not yet"
+              ? `했음, 전략 ${run.holdout_strategy_fingerprint ?? "(기록 없음)"}`
+              : "아직 안 함"
           }
         />
       </Section>
 
-      <Section title="Reproduce">
+      <Section title="재현">
         <p className="runinfo__note">
-          Re-runs every window from its own stored strategy, under this snapshot,
-          and reports any figure that comes back different.
+          구간마다 저장된 전략을 이 스냅샷 그대로 다시 돌리고, 다르게 나온 숫자를 모두 보고합니다.
         </p>
         <code className="runinfo__cmd">
           python -m app.cli backtest reproduce --run {run.id}
@@ -148,7 +147,7 @@ function Row({
 
 function describeParams(params: Record<string, unknown>): string {
   const entries = Object.entries(params);
-  if (entries.length === 0) return "none";
+  if (entries.length === 0) return "없음";
   return entries
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, value]) => `${key}=${String(value)}`)

@@ -253,20 +253,30 @@ def renormalized_weights(
     return {e: scaled.get(e, 0.0) for e in requested}
 
 
+# How the reader sees each engine named in a reason. The reader reads Korean.
+ENGINE_NAME = {
+    Engine.TECHNICAL: "기술적 분석",
+    Engine.FUNDAMENTAL: "재무 분석",
+    Engine.SENTIMENT: "뉴스 심리",
+    Engine.PORTFOLIO: "포트폴리오",
+}
+
+
 def _explain(engine: Engine, provenance: DataProvenance) -> str:
     """A reason a person can act on, not just a status code."""
+    name = ENGINE_NAME.get(engine, engine.value)
     if provenance.freshness is Freshness.MISSING:
-        return f"{engine.value.lower()}: no data available"
+        return f"{name}: 데이터 없음"
 
     if provenance.source_checked_at is not None and provenance.source_asof is not None:
         return (
-            f"{engine.value.lower()}: source last checked "
-            f"{provenance.source_checked_at:%Y-%m-%d %H:%M} UTC — too long ago, "
-            "a newer filing may have been missed"
+            f"{name}: 출처를 마지막으로 확인한 때가 "
+            f"{provenance.source_checked_at:%Y-%m-%d %H:%M} UTC — 너무 오래되어 "
+            "새 공시를 놓쳤을 수 있음"
         )
 
     if provenance.data_age is not None:
         hours = provenance.data_age.total_seconds() / 3600
-        return f"{engine.value.lower()}: newest data is {hours:.1f}h old"
+        return f"{name}: 가장 최근 데이터가 {hours:.1f}시간 전"
 
-    return f"{engine.value.lower()}: stale"
+    return f"{name}: 오래된 데이터"

@@ -28,6 +28,7 @@ from app.core.types import (
     SignalAction,
     SignalReason,
 )
+from app.scoring.availability import ENGINE_NAME
 
 
 class ExecutionTimingError(Exception):
@@ -175,7 +176,7 @@ def _abstain(
     backtest. Deleting periods where data happened to be missing is itself a
     bias, and usually a flattering one.
     """
-    names = ", ".join(sorted(e.value for e in missing))
+    names = ", ".join(ENGINE_NAME.get(e, e.value) for e in sorted(missing, key=lambda e: e.value))
     return ScoredSignal(
         instrument_id=instrument_id,
         data_asof=data_asof,
@@ -188,7 +189,7 @@ def _abstain(
         strategy_version=strategy_version,
         policy=MissingFactorPolicy.ABSTAIN,
         abstained_reason=(
-            f"required factor(s) unavailable: {names}. "
-            "No judgement made; existing positions are unaffected."
+            f"필수 요인을 쓸 수 없음: {names}. "
+            "판단하지 않았고, 이미 가진 포지션에는 영향이 없습니다."
         ),
     )

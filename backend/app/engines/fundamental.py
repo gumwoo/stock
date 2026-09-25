@@ -421,16 +421,14 @@ class FundamentalEngine:
 
         if len(metrics) < self.params.min_metrics:
             return (
-                f"only {len(metrics)} of the ratios could be computed "
-                f"({', '.join(sorted(names))}); at least {self.params.min_metrics} "
-                "are needed before a score means anything"
+                f"계산된 재무 비율이 {len(metrics)}개뿐입니다({', '.join(sorted(names))}). "
+                f"점수가 의미를 가지려면 {self.params.min_metrics}개 이상 필요합니다"
             )
 
         if self.params.require_profitability and not (names & PROFITABILITY_METRICS):
             return (
-                "no profitability measure available "
-                f"({' or '.join(sorted(PROFITABILITY_METRICS))}); leverage and "
-                "growth alone do not say whether the business earns"
+                f"수익성 지표({' 또는 '.join(sorted(PROFITABILITY_METRICS))})가 없습니다. "
+                "부채와 성장만으로는 회사가 돈을 버는지 알 수 없습니다"
             )
 
         return None
@@ -454,18 +452,18 @@ class FundamentalEngine:
         """
         higher_is_better = CROSS_SECTIONAL.get(name)
         if higher_is_better is None:
-            return fixed(raw), "fixed scale"
+            return fixed(raw), "고정 척도"
         if peers is None:
-            return fixed(raw), "fixed scale, no peer group"
+            return fixed(raw), "고정 척도, 비교군 없음"
 
         population = peers.population(name)
         if len(population) < self.params.min_peers:
-            return fixed(raw), f"fixed scale, only {len(population)} in the peer group"
+            return fixed(raw), f"고정 척도, 비교군이 {len(population)}개뿐"
 
         rank = percentile_rank(raw, population)
         if not higher_is_better:
             rank = 100.0 - rank
-        return rank, f"ranked against {len(population)} peers"
+        return rank, f"비교군 {len(population)}개 중 순위"
 
     # --- individual ratios ------------------------------------------------
 
@@ -483,11 +481,11 @@ class FundamentalEngine:
         if eps <= 0:
             # A negative or zero P/E is not a cheap stock, it is a company that
             # did not earn. Scoring the ratio would produce a flattering number.
-            metrics.append(Metric("P/E", raw=0.0, normalized=0.0, detail="loss-making"))
+            metrics.append(Metric("P/E", raw=0.0, normalized=0.0, detail="적자"))
             reasons.append(
                 SignalReason(
                     ReasonStatus.OPPOSES,
-                    f"Negative or zero annual EPS ({eps:.2f}) — no meaningful P/E",
+                    f"연간 EPS가 0 이하({eps:.2f}) — PER이 의미 없음",
                     Engine.FUNDAMENTAL,
                     "P/E",
                 )
@@ -511,7 +509,7 @@ class FundamentalEngine:
                 "P/E",
                 raw=per,
                 normalized=score,
-                detail=f"price / annual basic EPS · {scale}",
+                detail=f"주가 / 연간 기본 EPS · {scale}",
             )
         )
         reasons.append(self._per_reason(per))
@@ -535,11 +533,11 @@ class FundamentalEngine:
             # a loss divided by negative equity comes out positive. Scored as an
             # explicit zero here, and `_roe_of` keeps the number itself out of
             # every peer's population for the same reason.
-            metrics.append(Metric("ROE", raw=0.0, normalized=0.0, detail="negative equity"))
+            metrics.append(Metric("ROE", raw=0.0, normalized=0.0, detail="자본잠식"))
             reasons.append(
                 SignalReason(
                     ReasonStatus.OPPOSES,
-                    "Shareholders' equity is negative — ROE is not interpretable",
+                    "자기자본이 음수 — ROE를 해석할 수 없음",
                     Engine.FUNDAMENTAL,
                     "ROE",
                 )
@@ -561,7 +559,7 @@ class FundamentalEngine:
                 "ROE",
                 raw=roe * 100.0,
                 normalized=score,
-                detail=f"net income / equity, % · {scale}",
+                detail=f"순이익 / 자기자본, % · {scale}",
             )
         )
         reasons.append(self._roe_reason(roe))
@@ -590,7 +588,7 @@ class FundamentalEngine:
                 "Debt ratio",
                 raw=ratio * 100.0,
                 normalized=score,
-                detail=f"liabilities / assets, % · {scale}",
+                detail=f"부채 / 자산, % · {scale}",
             )
         )
         reasons.append(self._debt_reason(ratio))
@@ -619,7 +617,7 @@ class FundamentalEngine:
                 "Operating margin",
                 raw=margin * 100.0,
                 normalized=score,
-                detail=f"operating income / revenue, % · {scale}",
+                detail=f"영업이익 / 매출, % · {scale}",
             )
         )
         reasons.append(self._margin_reason(margin))
@@ -648,7 +646,7 @@ class FundamentalEngine:
                 "Revenue growth",
                 raw=growth * 100.0,
                 normalized=score,
-                detail=f"year over year, % · {scale}",
+                detail=f"전년 대비, % · {scale}",
             )
         )
         reasons.append(self._growth_reason(growth))
@@ -659,17 +657,17 @@ class FundamentalEngine:
         p = self.params
         if per > p.per_ideal + p.per_tolerance / 2:
             return SignalReason(
-                ReasonStatus.OPPOSES, f"P/E {per:.1f} — richly valued", Engine.FUNDAMENTAL, "P/E"
+                ReasonStatus.OPPOSES, f"PER {per:.1f} — 비싸게 평가됨", Engine.FUNDAMENTAL, "P/E"
             )
         if per < p.per_ideal - p.per_tolerance / 2:
             return SignalReason(
                 ReasonStatus.NEUTRAL,
-                f"P/E {per:.1f} — cheap, though a very low multiple can signal distress",
+                f"PER {per:.1f} — 싸지만, 지나치게 낮은 배수는 어려움의 신호일 수 있음",
                 Engine.FUNDAMENTAL,
                 "P/E",
             )
         return SignalReason(
-            ReasonStatus.SUPPORTS, f"P/E {per:.1f} — unremarkable", Engine.FUNDAMENTAL, "P/E"
+            ReasonStatus.SUPPORTS, f"PER {per:.1f} — 무난함", Engine.FUNDAMENTAL, "P/E"
         )
 
     @staticmethod
@@ -681,12 +679,12 @@ class FundamentalEngine:
         if roe <= 0:
             return SignalReason(
                 ReasonStatus.OPPOSES,
-                f"ROE {roe * 100:.1f}% — losing money",
+                f"ROE {roe * 100:.1f}% — 적자",
                 Engine.FUNDAMENTAL,
                 "ROE",
             )
         return SignalReason(
-            ReasonStatus.NEUTRAL, f"ROE {roe * 100:.1f}% — modest", Engine.FUNDAMENTAL, "ROE"
+            ReasonStatus.NEUTRAL, f"ROE {roe * 100:.1f}% — 보통", Engine.FUNDAMENTAL, "ROE"
         )
 
     @staticmethod
@@ -694,13 +692,13 @@ class FundamentalEngine:
         if ratio >= 0.7:
             return SignalReason(
                 ReasonStatus.OPPOSES,
-                f"Liabilities are {ratio * 100:.0f}% of assets",
+                f"부채가 자산의 {ratio * 100:.0f}%",
                 Engine.FUNDAMENTAL,
                 "Debt ratio",
             )
         return SignalReason(
             ReasonStatus.SUPPORTS,
-            f"Liabilities are {ratio * 100:.0f}% of assets",
+            f"부채가 자산의 {ratio * 100:.0f}%",
             Engine.FUNDAMENTAL,
             "Debt ratio",
         )
@@ -710,20 +708,20 @@ class FundamentalEngine:
         if margin <= 0:
             return SignalReason(
                 ReasonStatus.OPPOSES,
-                f"Operating margin {margin * 100:.1f}% — operating at a loss",
+                f"영업이익률 {margin * 100:.1f}% — 영업적자",
                 Engine.FUNDAMENTAL,
                 "Operating margin",
             )
         if margin >= 0.20:
             return SignalReason(
                 ReasonStatus.SUPPORTS,
-                f"Operating margin {margin * 100:.1f}%",
+                f"영업이익률 {margin * 100:.1f}%",
                 Engine.FUNDAMENTAL,
                 "Operating margin",
             )
         return SignalReason(
             ReasonStatus.NEUTRAL,
-            f"Operating margin {margin * 100:.1f}%",
+            f"영업이익률 {margin * 100:.1f}%",
             Engine.FUNDAMENTAL,
             "Operating margin",
         )
@@ -733,20 +731,20 @@ class FundamentalEngine:
         if growth >= 0.10:
             return SignalReason(
                 ReasonStatus.SUPPORTS,
-                f"Revenue {growth * 100:+.1f}% year over year",
+                f"매출 전년 대비 {growth * 100:+.1f}%",
                 Engine.FUNDAMENTAL,
                 "Revenue growth",
             )
         if growth < 0:
             return SignalReason(
                 ReasonStatus.OPPOSES,
-                f"Revenue {growth * 100:+.1f}% year over year",
+                f"매출 전년 대비 {growth * 100:+.1f}%",
                 Engine.FUNDAMENTAL,
                 "Revenue growth",
             )
         return SignalReason(
             ReasonStatus.NEUTRAL,
-            f"Revenue {growth * 100:+.1f}% year over year",
+            f"매출 전년 대비 {growth * 100:+.1f}%",
             Engine.FUNDAMENTAL,
             "Revenue growth",
         )
@@ -786,12 +784,12 @@ class FundamentalEngine:
             # One representative explanation, plus a count. Listing ten
             # near-identical sentences helps nobody.
             lead = absent[0]
-            extra = f" (and {len(absent) - 1} more)" if len(absent) > 1 else ""
+            extra = f" (외 {len(absent) - 1}개)" if len(absent) > 1 else ""
             reason = f"{lead.concept}: {lead.explanation}{extra}"
         elif snapshot.price is None:
-            reason = "no price available to compute valuation ratios"
+            reason = "가치 비율을 계산할 주가가 없습니다"
         else:
-            reason = "no fundamental inputs available"
+            reason = "재무 입력값이 없습니다"
 
         return Factor(
             engine=Engine.FUNDAMENTAL,

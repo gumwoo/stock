@@ -232,7 +232,7 @@ class TestThinPopulations:
 
         assert metric.normalized == pytest.approx(bounded(0.04, 0.0, 0.30))
         assert metric.detail is not None
-        assert "only 4 in the peer group" in metric.detail
+        assert "비교군이 4개뿐" in metric.detail
 
     def test_the_floor_is_a_parameter_of_the_strategy(self) -> None:
         """Lowering `min_peers` is a change to the rule, not to plumbing."""
@@ -242,7 +242,7 @@ class TestThinPopulations:
 
         assert permissive.normalized == pytest.approx(87.5)
         assert permissive.detail is not None
-        assert "ranked against 4 peers" in permissive.detail
+        assert "비교군 4개 중 순위" in permissive.detail
 
 
 class TestTheScaleIsRecorded:
@@ -252,9 +252,9 @@ class TestTheScaleIsRecorded:
         for name, metric in score(members[0], peers).items():
             assert metric.detail is not None
             if name in CROSS_SECTIONAL:
-                assert "ranked against 5 peers" in metric.detail
+                assert "비교군 5개 중 순위" in metric.detail
             else:
-                assert "fixed scale" in metric.detail
+                assert "고정 척도" in metric.detail
 
     def test_no_peer_group_is_stated_rather_than_implied(self) -> None:
         """A run with no universe is a different rule, and the row says so.
@@ -266,9 +266,9 @@ class TestTheScaleIsRecorded:
         for name, metric in score(company()).items():
             assert metric.detail is not None
             if name in CROSS_SECTIONAL:
-                assert "fixed scale, no peer group" in metric.detail
+                assert "고정 척도, 비교군 없음" in metric.detail
             else:
-                assert metric.detail.endswith("fixed scale")
+                assert metric.detail.endswith("고정 척도")
 
     def test_without_peers_the_engine_scores_exactly_as_before(self) -> None:
         """Every run stored before ranking existed still reproduces.
@@ -305,7 +305,7 @@ class TestUninterpretableFiguresStayOut:
 
         metric = score(broken, peers)["ROE"]
         assert metric.normalized == 0.0
-        assert metric.detail == "negative equity"
+        assert metric.detail == "자본잠식"
 
     def test_a_company_missing_a_ratio_shrinks_only_that_population(self) -> None:
         members = [company(i, roe=r) for i, r in enumerate([0.05, 0.10, 0.15, 0.20], start=1)]

@@ -184,14 +184,14 @@ class TestAbstention:
 
         assert signal.action is SignalAction.ABSTAINED
         assert signal.abstained_reason is not None
-        assert "FUNDAMENTAL" in signal.abstained_reason
+        assert "재무 분석" in signal.abstained_reason
 
     def test_abstention_says_existing_positions_are_untouched(self) -> None:
         """Declining to judge is not an instruction to do anything."""
         signal = self.build(MissingFactorPolicy.ABSTAIN)
 
         assert signal.abstained_reason is not None
-        assert "existing positions are unaffected" in signal.abstained_reason
+        assert "이미 가진 포지션에는 영향이 없습니다" in signal.abstained_reason
 
     def test_abstention_still_records_the_moment(self) -> None:
         """The period is not deleted — removing it would itself be a bias.

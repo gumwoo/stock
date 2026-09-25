@@ -45,15 +45,15 @@ export function Backtest() {
   }
 
   if (error) {
-    return <p className="bt__empty">Could not load backtests: {error}</p>;
+    return <p className="bt__empty">백테스트를 불러오지 못했습니다: {error}</p>;
   }
   if (runs === null) {
-    return <p className="bt__empty">Loading…</p>;
+    return <p className="bt__empty">불러오는 중…</p>;
   }
   if (runs.length === 0) {
     return (
       <div className="bt__empty">
-        <p>No backtest runs stored yet.</p>
+        <p>저장된 백테스트가 아직 없습니다.</p>
         <code className="bt__cmd">python -m app.cli backtest run --symbol 005930</code>
       </div>
     );
@@ -75,7 +75,7 @@ export function Backtest() {
             </span>
             <span className="bt__runMeta">
               #{run.id} · {run.period_start} — {run.period_end}
-              {run.has_holdout ? " · holdout taken" : ""}
+              {run.has_holdout ? " · 홀드아웃 측정됨" : ""}
             </span>
           </button>
         ))}
@@ -114,39 +114,39 @@ function RunDetail({
           </h2>
           <p className="bt__sub">
             {run.strategy_kind}@{run.strategy_version} ·{" "}
-            {run.period_start} — {run.period_end} · train {run.train_sessions} /
-            eval {run.eval_sessions} · {run.anchored ? "anchored" : "rolling"}
+            {run.period_start} — {run.period_end} · 학습 {run.train_sessions} /
+            평가 {run.eval_sessions}세션 · {run.anchored ? "시작 고정" : "이동 창"}
           </p>
         </div>
         <button className="bt__info" onClick={onInfo}>
-          Run info
+          실행 정보
         </button>
       </header>
 
       {run.fitter_version === null ? (
         <p className="bt__banner">
-          Nothing was fitted. The same fixed rule ran on both sides of every
-          split, so the in/out gap below says nothing about overfitting — there
-          were no parameters to overfit. It is two periods measured the same way.
+          학습한 파라미터가 없습니다. 모든 구간에서 같은 고정 규칙을 양쪽에 돌렸으므로, 아래의
+          표본 내/외 차이는 과최적화와 무관합니다. 맞출 파라미터가 없었기 때문입니다. 같은 방식으로 잰
+          두 기간일 뿐입니다.
         </p>
       ) : (
         <p className="bt__banner bt__banner--fitted">
-          Parameters were chosen per window by <b>{run.fitter_version}</b>, from
-          the training period only. The in/out gap is meaningful here.
+          파라미터는 구간마다 <b>{run.fitter_version}</b>이(가) 학습 기간만 보고 골랐습니다. 여기서는
+          표본 내/외 차이에 의미가 있습니다.
         </p>
       )}
 
       <table className="bt__table">
         <thead>
           <tr>
-            <th className="bt__th">Window</th>
-            <th className="bt__th">Evaluated</th>
-            <th className="bt__th bt__th--num">In-sample</th>
-            <th className="bt__th bt__th--num">Out-of-sample</th>
-            <th className="bt__th bt__th--num">MDD</th>
-            <th className="bt__th bt__th--num">Sharpe</th>
-            <th className="bt__th bt__th--num">Trades</th>
-            <th className="bt__th">Caveats</th>
+            <th className="bt__th">구간</th>
+            <th className="bt__th">평가 기간</th>
+            <th className="bt__th bt__th--num">표본 내</th>
+            <th className="bt__th bt__th--num">표본 외</th>
+            <th className="bt__th bt__th--num">최대 낙폭</th>
+            <th className="bt__th bt__th--num">샤프</th>
+            <th className="bt__th bt__th--num">거래 수</th>
+            <th className="bt__th">주의</th>
           </tr>
         </thead>
         <tbody>
@@ -166,7 +166,7 @@ function RunDetail({
           ))}
           <tr className="bt__mean">
             <td className="bt__td" colSpan={2}>
-              Mean
+              평균
             </td>
             <td className="bt__td bt__td--num">{pct(mean(inSample))}</td>
             <td className="bt__td bt__td--num">{pct(mean(outSample))}</td>
@@ -176,26 +176,26 @@ function RunDetail({
       </table>
 
       <div className="bt__holdout">
-        <h3 className="bt__holdoutTitle">Holdout</h3>
+        <h3 className="bt__holdoutTitle">홀드아웃</h3>
         {holdout ? (
           <>
             <p className="bt__holdoutNote">
-              Reserved before any window was built and measured once, after the
-              choices were made. Nothing above was allowed to see it.
+              어떤 구간도 만들기 전에 떼어 두고, 선택을 다 마친 뒤 한 번만 잰 기간입니다. 위의 어느 것도
+              이 기간을 보지 못했습니다.
             </p>
             <div className="bt__holdoutFigures">
-              <Figure label="Period" value={`${holdout.period_start} — ${holdout.period_end}`} />
-              <Figure label="Return" value={pct(holdout.total_return)} />
-              <Figure label="MDD" value={pct(holdout.max_drawdown)} />
-              <Figure label="Sharpe" value={num(holdout.sharpe)} />
-              <Figure label="Trades" value={String(holdout.trades)} />
+              <Figure label="기간" value={`${holdout.period_start} — ${holdout.period_end}`} />
+              <Figure label="수익률" value={pct(holdout.total_return)} />
+              <Figure label="최대 낙폭" value={pct(holdout.max_drawdown)} />
+              <Figure label="샤프" value={num(holdout.sharpe)} />
+              <Figure label="거래 수" value={String(holdout.trades)} />
             </div>
           </>
         ) : (
           <p className="bt__holdoutNote">
             {run.holdout_start
-              ? `Reserved ${run.holdout_start} — ${run.holdout_end} and not yet measured. It is taken once, deliberately, when the choices are made.`
-              : "None reserved for this run."}
+              ? `${run.holdout_start} — ${run.holdout_end}을(를) 떼어 두었고 아직 재지 않았습니다. 선택을 마쳤을 때 의도적으로 한 번만 잽니다.`
+              : "이 실행에는 떼어 둔 기간이 없습니다."}
           </p>
         )}
       </div>
@@ -214,9 +214,9 @@ function Figure({ label, value }: { label: string; value: string }) {
 
 function caveats(window: BacktestWindow): string {
   const parts: string[] = [];
-  if (window.abstained) parts.push(`${window.abstained} abstained`);
-  if (window.without_data) parts.push(`${window.without_data} no bar`);
-  if (window.unfilled) parts.push(`${window.unfilled} unfilled`);
+  if (window.abstained) parts.push(`판단 보류 ${window.abstained}`);
+  if (window.without_data) parts.push(`시세 없음 ${window.without_data}`);
+  if (window.unfilled) parts.push(`미체결 ${window.unfilled}`);
   return parts.join(", ") || "—";
 }
 

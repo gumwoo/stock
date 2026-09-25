@@ -14,14 +14,42 @@ import "./Live.css";
  */
 
 const REASONS: Record<string, string> = {
-  DISCOVERY_SURGE: "news surge",
-  POSITIVE_NEWS_OVERLAY: "good news",
-  NEGATIVE_NEWS_OVERLAY: "bad news",
-  DISCLOSURE_EVENT: "disclosure",
-  SEARCH_SURGE: "search surge",
-  TRACKED_HIGH_SCORE: "high score",
-  TRACKED: "tracked",
+  DISCOVERY_SURGE: "뉴스 급증",
+  POSITIVE_NEWS_OVERLAY: "좋은 뉴스",
+  NEGATIVE_NEWS_OVERLAY: "나쁜 뉴스",
+  DISCLOSURE_EVENT: "공시",
+  SEARCH_SURGE: "검색 급증",
+  TRACKED_HIGH_SCORE: "점수 상위",
+  TRACKED: "추적 종목",
 };
+
+const REGIMES: Record<string, string> = {
+  RISK_ON: "상승장",
+  NEUTRAL: "중립",
+  RISK_OFF: "하락장",
+  UNKNOWN: "국면 모름",
+};
+
+/** The feed's state, which the API reports as short English codes, in Korean. */
+function statusLabel(status: string): string {
+  if (status.startsWith("off")) return "꺼짐 (LIVE_FEED_ENABLED가 설정되지 않음)";
+  if (status.startsWith("idle")) return "대기 중 (장 시간이 아님)";
+  const refused = status.match(/^live \((\d+) subscriptions refused\)/);
+  if (refused) return `실시간 수신 중 (구독 거절 ${refused[1]}개)`;
+  if (status === "live") return "실시간 수신 중";
+  if (status.startsWith("another process")) return "다른 프로세스가 실시간 연결을 쓰는 중";
+  if (status.startsWith("no names")) return "오늘 볼 종목이 없음";
+  if (status.startsWith("closed")) return "오늘 장 마감";
+  if (status.startsWith("reconnecting")) return "재연결 중";
+  return status;
+}
+
+function sourceLabel(source: string | null): string {
+  if (!source) return "";
+  if (source === "morning list") return "오늘 아침 목록";
+  if (source.startsWith("tracked names")) return "추적 종목 (오늘 아침 목록 없음)";
+  return source;
+}
 
 type Interval = "1m" | "1s";
 
@@ -102,7 +130,7 @@ export function Live() {
       socket.onopen = () => setError(null);
       socket.onclose = () => {
         if (closed) return;
-        setError("the live socket closed; reconnecting…");
+        setError("실시간 연결이 끊겨 다시 연결하는 중…");
         retry = window.setTimeout(open, 3_000);
       };
     };
@@ -174,20 +202,22 @@ export function Live() {
     <section className="live">
       <header className="live__head">
         <div>
-          <h1 className="live__title">Today</h1>
+          <h1 className="live__title">오늘의 관찰</h1>
           <p className="live__status">
-            {state ? `${state.status}${state.source ? ` · ${state.source}` : ""}` : "loading…"}
+            {state
+              ? `${statusLabel(state.status)}${state.source ? ` · ${sourceLabel(state.source)}` : ""}`
+              : "불러오는 중…"}
             {error ? ` · ${error}` : ""}
           </p>
         </div>
-        <div className="live__intervals" role="group" aria-label="interval">
+        <div className="live__intervals" role="group" aria-label="봉 간격">
           {(["1m", "1s"] as Interval[]).map((i) => (
             <button
               key={i}
               className={interval === i ? "live__interval live__interval--on" : "live__interval"}
               onClick={() => setInterval_(i)}
             >
-              {i === "1m" ? "1 min" : "1 sec"}
+              {i === "1m" ? "1분봉" : "1초봉"}
             </button>
           ))}
         </div>
@@ -217,7 +247,7 @@ export function Live() {
               </button>
             </li>
           ))}
-          {state && state.members.length === 0 && <li className="live__empty">No names to watch.</li>}
+          {state && state.members.length === 0 && <li className="live__empty">볼 종목이 없습니다.</li>}
         </ol>
 
         <div className="live__main">
@@ -237,18 +267,18 @@ export function Live() {
                     {REASONS[r] ?? r}
                   </span>
                 ))}
-                <span className="live__fact">news overlay {signed(member.overlay_points)}</span>
+                <span className="live__fact">뉴스 점수 {signed(member.overlay_points)}</span>
                 <span className="live__fact">
-                  searches {member.attention_surge == null ? "–" : `${member.attention_surge.toFixed(2)}×`}
+                  검색량 {member.attention_surge == null ? "–" : `${member.attention_surge.toFixed(2)}배`}
                 </span>
-                {member.regime && <span className="live__fact">{member.regime}</span>}
+                {member.regime && <span className="live__fact">{REGIMES[member.regime] ?? member.regime}</span>}
               </div>
             </div>
           )}
           <div ref={container} className="live__chart" />
           <p className="live__note">
-            Built from trades as they arrive; for looking, not for the record. The record is the minute
-            bars fetched after the close.{interval === "1s" ? " One-second bars start when this view opens." : ""}
+            들어오는 체결로 그린 화면용 차트이고 기록이 아닙니다. 분석에 쓰는 기록은 장 마감 뒤 받는
+            1분봉입니다.{interval === "1s" ? " 1초봉은 이 화면을 연 때부터 그립니다." : ""}
           </p>
         </div>
       </div>

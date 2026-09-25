@@ -84,30 +84,8 @@
   --shadow-overlay: 0 8px 32px rgba(0, 0, 0, 0.12);
 }
 
-/* Dark is the default on the instrument detail screen, where a chart is the
- * subject; a global toggle is available for the rest. */
-[data-theme="dark"] {
-  --c-bg: #0e0e11;
-  --c-bg-subtle: #16161a;
-  --c-surface: #16161a;
-  --c-border: #26262c;
-  --c-border-strong: #35353d;
-
-  --c-text: #f2f2f5;
-  --c-text-secondary: #a1a1ad;
-  --c-text-tertiary: #71717d;
-
-  --c-up: #f0595e;
-  --c-up-soft: #241618;
-  --c-down: #4b8ff5;
-  --c-down-soft: #141c29;
-  --c-warn: #d9a04a;
-  --c-warn-soft: #241e14;
-
-  --c-supports: #34b681;
-  --c-neutral: #71717d;
-  --c-opposes: #e26b70;
-}
+/* One light theme throughout. The detail screen used to switch the whole app
+ * to dark while it was open, which read as the app changing under the reader. */
 
 /* Users who read US charts can flip the direction convention. */
 [data-updown="us"] {
@@ -115,13 +93,6 @@
   --c-up-soft: #f0f9f5;
   --c-down: #e5484d;
   --c-down-soft: #fdf3f3;
-}
-
-[data-theme="dark"][data-updown="us"] {
-  --c-up: #34b681;
-  --c-up-soft: #12241c;
-  --c-down: #f0595e;
-  --c-down-soft: #241618;
 }
 
 * {
