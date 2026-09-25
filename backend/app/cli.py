@@ -740,6 +740,8 @@ def cmd_overnight_study(folder: str, kis_minutes: str | None, fetch: bool) -> in
     print(f"목록 겹침: {res.overlaps or '없음'}")
     print(f"판정 단위 신호일(미국 데이터만): {res.signal_days}")
     print(f"관측 {len(res.observations)}일")
+    for d, why in sorted(res.lost.items()):
+        print(f"  신호일 {d} 관측 못 함: {why}")
     for v in res.verdicts:
         halves = ", ".join(_fmt(h * 100 if h is not None else None, "+.3f") for h in v.halves)
         print(

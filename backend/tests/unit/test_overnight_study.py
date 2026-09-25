@@ -139,3 +139,41 @@ def test_judgement_holds_out_the_last_sixty_sessions() -> None:
     assert s.build_v3(list(verdicts.values()))
     # 한 지표뿐이면 그 지표를 빼면 관측이 없다.
     assert all(v.state == "not enough days" for v in s.judge(obs, sessions, drop="^SOX"))
+
+
+def test_a_calendar_session_with_no_bars_is_not_a_session() -> None:
+    # XKRX는 2026-06-03(지방선거)을 세션으로 센다. 남기면 6/4의 전날이 휴장일이 된다.
+    cal = [date(2026, 6, 2), date(2026, 6, 3), date(2026, 6, 4)]
+    got = s.traded_sessions(cal, {date(2026, 6, 2), date(2026, 6, 4)})
+    assert got == [date(2026, 6, 2), date(2026, 6, 4)]
+
+
+def test_quality_rejects_a_front_list_of_three() -> None:
+    days, e, gaps = _gap_world()
+    three = {k: v for k, v in gaps.items() if k in {"L0", "L1", "L2"} or k.startswith("N")}
+    q = s.quality("X", e, three, days)
+    assert q.front_list == 3 and not q.passed
+
+
+def _verdicts(held_value: float) -> list[s.Verdict]:
+    sessions = [date(2025, 9, 22) + timedelta(days=i) for i in range(245)]
+    held = s.holdout_days(sessions)
+    obs = []
+    for i, d in enumerate(sessions[::3]):
+        o = s.Observation(d, ("^SOX",))
+        v = held_value if d in held else 0.006 + (0.001 if i % 2 else -0.001)
+        o.by_indicator["^SOX"] = {"O1": v, "O2": v, "O3": v, "O4": v}
+        obs.append(o)
+    return s.judge(obs, sessions)
+
+
+def test_a_negative_holdout_blocks_the_verdict() -> None:
+    assert all(v.state == "established" for v in _verdicts(0.001))
+    assert all(v.state == "not established" for v in _verdicts(-0.001))
+
+
+def test_v3_needs_both_o3_and_o4() -> None:
+    ok = {v.key: v for v in _verdicts(0.001)}
+    fails = next(v for v in _verdicts(-0.001) if v.key == "O4")
+    assert s.build_v3(list(ok.values()))
+    assert not s.build_v3([ok["O1"], ok["O2"], ok["O3"], fails])

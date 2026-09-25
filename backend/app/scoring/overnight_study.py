@@ -69,6 +69,13 @@ MIN_TRADED_VALUE = 1_000_000_000  # 원, 학습 구간 평균 일 거래대금
 # --- 정렬, 잔차, sigma -------------------------------------------------------------------
 
 
+def traded_sessions(calendar: Sequence[date], seen: set[date]) -> list[date]:
+    """달력 세션 중 한 종목이라도 봉이 있는 날만. XKRX 달력은 2026-06-03(지방선거)과 2026-07-17(제헌절,
+    2026년부터 공휴일)을 세션으로 센다. 그 날을 남기면 다음 날의 "전날"이 휴장일이 되어 갭과 미국 정렬이
+    함께 틀어진다. 일부 종목만 봉이 빠진 날(예: 2025-09-19 일봉)은 세션으로 남는다."""
+    return [d for d in calendar if d in seen]
+
+
 def align(
     kr_days: Sequence[date],
     kr_open: Mapping[date, datetime],

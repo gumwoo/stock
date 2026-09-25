@@ -224,6 +224,8 @@ class Result:
     per_indicator: dict[str, dict[str, tuple[int, float | None]]] = field(default_factory=dict)
     o3_costs: dict[float, tuple[float | None, float | None]] = field(default_factory=dict)
     build_v3: bool = False
+    lost: dict[date, str] = field(default_factory=dict)
+    """신호가 있었는데 관측하지 못한 평가일과 그 이유."""
 
 
 def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
@@ -241,7 +243,8 @@ def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
     daily = _load(folder / KR_DAILY_FILE)
     hour = _load(folder / KR_HOUR_FILE)
 
-    sessions = KR.sessions_between(date(2023, 6, 1), study.EVAL_LAST)
+    seen = {date.fromisoformat(r[0]) for f in (daily, hour) for rows in f.values() for r in rows}
+    sessions = study.traded_sessions(KR.sessions_between(date(2023, 6, 1), study.EVAL_LAST), seen)
     prev_of = {d: sessions[i - 1] for i, d in enumerate(sessions) if i}
     days = [d for d in sessions if d in prev_of and d >= study.TRAIN_FIRST]
     kr_open = {d: KR.session_open(d) for d in days}
@@ -309,7 +312,8 @@ def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
         **{i: sum(1 for d in evald if i in active[d]) for i in passed},
     }
 
-    # 평가: 60분봉 09:00 봉 + 전날 일봉 종가.
+    # 평가: 60분봉 09:00 봉 + 전날 일봉 종가. 전날 일봉 종가가 없으면 그 종목·날은 관측하지 않는다.
+    # 60분봉 마지막 봉으로 메우지 않는다 - 계획에 없던 대용치를 결과를 본 뒤 넣으면 사후 선택이 된다.
     lists = {i: [n for n, _ in res.lists[i]] for i in passed}
     need = {n for names in lists.values() for n in names}
     window = [d for d in sessions if d >= study.EVAL_FIRST - timedelta(days=120)]
@@ -337,6 +341,13 @@ def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
         o = study.observe(d, active[d], lists, bars, window_days, calm)
         if o is not None:
             res.observations.append(o)
+            continue
+        have = sum(1 for t in liquid if prev_of[d] in by_day[t])
+        res.lost[d] = (
+            f"전날({prev_of[d]}) 일봉 종가 {have}/{len(liquid)}종목뿐"
+            if have < len(liquid) // 2
+            else "쓸 수 있는 목록 종목 없음"
+        )
 
     res.verdicts = study.judge(res.observations, evald)
     res.leave_one_out = {i: study.judge(res.observations, evald, drop=i) for i in passed}
