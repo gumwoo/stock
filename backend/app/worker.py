@@ -168,7 +168,7 @@ def _sec_weekly() -> None:
 def _read_korean_news() -> None:
     """Judge undecided hits and read confirmed articles for tracked names.
 
-    Tracked names only, and a bounded number of each, within the
+    Tracked names and recent candidates only, and a bounded number of each, within the
     subscription's limits: this is the owner's Claude usage, spent unattended.
     """
     calendar = MarketCalendar(Market.KR)
@@ -176,12 +176,12 @@ def _read_korean_news() -> None:
         return
     limit = get_settings().llm_scheduled_limit
     with session_scope() as session:
-        tracked = llm_service.tracked_ids(session)
-        judged = llm_service.judge_pending(session, limit=limit, instrument_ids=tracked)
+        focus = llm_service.focus_ids(session)
+        judged = llm_service.judge_pending(session, limit=limit, instrument_ids=focus)
         logger.info("judge-news: %s", judged)
         if judged.stopped:
             return
-        read = llm_service.read_confirmed(session, limit=limit, instrument_ids=tracked)
+        read = llm_service.read_confirmed(session, limit=limit, instrument_ids=focus)
         logger.info("read-news: %s", read)
 
 

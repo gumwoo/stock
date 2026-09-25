@@ -78,7 +78,12 @@ def hit(item: int, instrument_id: int, decision: HitDecision, by: Decider) -> Qu
 
 
 def read(
-    item: int, instrument_id: int, *, model: str = MODEL, sentiment: float = 0.8
+    item: int,
+    instrument_id: int,
+    *,
+    model: str = MODEL,
+    sentiment: float = 0.8,
+    material: bool | None = True,
 ) -> SentimentRow:
     return SentimentRow(
         news_item_id=item,
@@ -90,6 +95,7 @@ def read(
         intensity=0.6,
         confidence=0.9,
         evidence="자사주 매입",
+        material=material,
     )
 
 
@@ -176,6 +182,21 @@ class TestWhatCounts:
         result = at(world)
         assert result.overlay.readings_used == 3
         assert result.unread_articles == 1
+
+    def test_a_reading_that_is_not_about_the_companys_value_is_left_out(self, world: World) -> None:
+        llm_repo.save_readings(
+            world.session, [read(world.items[3], world.id, sentiment=-1.0, material=False)]
+        )
+        world.session.commit()
+        result = at(world)
+        assert result.overlay.readings_used == 3
+        # Read, so not unread: the model looked and found nothing that moves the price.
+        assert result.unread_articles == 0
+
+    def test_a_reading_from_before_the_question_was_asked_is_kept(self, world: World) -> None:
+        llm_repo.save_readings(world.session, [read(world.items[3], world.id, material=None)])
+        world.session.commit()
+        assert at(world).overlay.readings_used == 4
 
     def test_a_korean_name_reads_the_news_feed_and_others_have_none(self, world: World) -> None:
         assert at(world).news_freshness is Freshness.FRESH

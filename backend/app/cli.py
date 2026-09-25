@@ -24,11 +24,14 @@ import logging
 import sys
 from datetime import datetime, timedelta
 
+from sqlalchemy.orm import Session
+
 from app import cli_backtest
 from app.collectors.base import run_collector
 from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import MAX_YEARS_BACK, DartFundamentalCollector
 from app.collectors.krx_master import KrxMasterCollector
+from app.collectors.naver_news import RULE_VERSION as NEWS_RULE_VERSION
 from app.collectors.naver_news import NaverNewsCollector, rejudge_hits
 from app.collectors.quota import QuotaGuard
 from app.collectors.sec_edgar import SecEdgarCollector
@@ -338,10 +341,19 @@ def _print_llm_report(report: llm_service.LlmRunReport) -> None:
         print(f"  stopped early: {report.stopped}")
 
 
-def cmd_judge_news(limit: int, tracked_only: bool) -> int:
+def _scope_ids(session: Session, scope: str) -> list[int] | None:
+    """The instruments a model run covers: focus (tracked and candidates), tracked, or all."""
+    if scope == "all":
+        return None
+    if scope == "tracked":
+        return llm_service.tracked_ids(session)
+    return llm_service.focus_ids(session)
+
+
+def cmd_judge_news(limit: int, scope: str) -> int:
     """PENDING hits the rule could not settle, asked of the model. Uses the subscription."""
     with session_scope() as session:
-        ids = llm_service.tracked_ids(session) if tracked_only else None
+        ids = _scope_ids(session, scope)
         report = llm_service.judge_pending(session, limit=limit, instrument_ids=ids)
         missing, orphaned = news_repo.projection_drift(session)
     _print_llm_report(report)
@@ -351,12 +363,30 @@ def cmd_judge_news(limit: int, tracked_only: bool) -> int:
     return 0 if (missing, orphaned) == (0, 0) else 1
 
 
-def cmd_read_news(limit: int, everyone: bool) -> int:
+def cmd_read_news(limit: int, scope: str) -> int:
     """CONFIRMED articles read for direction, event and intensity. Uses the subscription."""
     with session_scope() as session:
-        ids = None if everyone else llm_service.tracked_ids(session)
+        ids = _scope_ids(session, scope)
         report = llm_service.read_confirmed(session, limit=limit, instrument_ids=ids)
     _print_llm_report(report)
+    return 0
+
+
+def cmd_audit_rules(sample: int, report_only: bool) -> int:
+    """The model's second opinion on a sample of the rule's confirmations. Uses the subscription."""
+    with session_scope() as session:
+        if not report_only:
+            _print_llm_report(llm_service.audit_rules(session, sample=sample))
+        tables = llm_service.audit_report(session, rule_version=NEWS_RULE_VERSION)
+    print(f"rule v{NEWS_RULE_VERSION} confirmations, as the model judged them:")
+    for kind, rows in tables.items():
+        print(f"  by {kind}:")
+        for key, a in rows.items():
+            share = "-" if a.precision is None else f"{a.precision:.0%}"
+            print(
+                f"    {key:<24} audited {a.audited:>4}  agree {a.confirmed:>4}  "
+                f"reject {a.rejected:>4}  unsure {a.unsure:>4}  agreement {share}"
+            )
     return 0
 
 
@@ -535,7 +565,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     judge.add_argument("--limit", type=int, default=100)
     judge.add_argument(
-        "--tracked-only", action="store_true", help="only hits for tracked instruments"
+        "--scope",
+        choices=("focus", "tracked", "all"),
+        default="focus",
+        help="focus = tracked names and recent candidates (default)",
     )
     read = sub.add_parser(
         "read-news",
@@ -543,7 +576,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     read.add_argument("--limit", type=int, default=100)
     read.add_argument(
-        "--all", dest="everyone", action="store_true", help="every instrument, not only tracked"
+        "--scope",
+        choices=("focus", "tracked", "all"),
+        default="focus",
+        help="focus = tracked names and recent candidates (default)",
+    )
+    audit = sub.add_parser(
+        "audit-rules",
+        help="ask the model about a random sample of the rule's confirmations; "
+        "records its answers, changes no verdict; uses the Claude subscription",
+    )
+    audit.add_argument("--sample", type=int, default=50)
+    audit.add_argument(
+        "--report-only", action="store_true", help="print the agreement so far; no calls"
     )
 
     overlay = sub.add_parser(
@@ -585,9 +630,11 @@ def main(argv: list[str] | None = None) -> int:
         case "promote":
             return cmd_promote(args)
         case "judge-news":
-            return cmd_judge_news(args.limit, args.tracked_only)
+            return cmd_judge_news(args.limit, args.scope)
         case "read-news":
-            return cmd_read_news(args.limit, args.everyone)
+            return cmd_read_news(args.limit, args.scope)
+        case "audit-rules":
+            return cmd_audit_rules(args.sample, args.report_only)
         case "overlay":
             return cmd_overlay(args.asof, args.symbol)
         case "forward":

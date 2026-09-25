@@ -58,7 +58,8 @@ DEFAULT_HALF_LIVES: Mapping[str, float] = {
 @dataclass(frozen=True, slots=True)
 class OverlayParams:
     # 2: DART event disclosures join the news readings (see `EventReading.source`).
-    version: int = 2
+    # 3: readings marked not material (prompt version 2) are left out.
+    version: int = 3
     half_lives: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_HALF_LIVES))
     cluster_window: timedelta = timedelta(hours=24)
     max_points: float = 10.0

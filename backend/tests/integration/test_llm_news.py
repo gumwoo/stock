@@ -4,7 +4,10 @@ What is pinned: a model's verdict is appended with its provenance and projects
 to the mention table; a rule never overrules it; an UNSURE is not asked again;
 a malformed answer writes nothing; every call is recorded; and the loop stops
 on the call quota, on a refusal, and when the subscription is fuller than the
-owner allowed. Readings are stored once per model and prompt version.
+owner allowed. Readings are stored once per model and prompt version, and
+say whether the news is financially material. A rule audit records the
+model's opinion beside the rule's verdict and changes no verdict. The model's
+default scope is tracked names and recent candidates.
 """
 
 from __future__ import annotations
@@ -24,14 +27,17 @@ from app.core.calendar import Market
 from app.core.quota import LimitSource, Quota
 from app.llm.provider import LlmRateLimitedError, LlmResult, LlmUsage
 from app.models import Base, Instrument, SymbolHistory
+from app.models.forward import CandidateSnapshot
 from app.models.llm import LlmCall
 from app.models.news import (
     Decider,
     HitDecision,
     MatchMethod,
     NewsItem,
+    NewsQueryHit,
     NewsSentiment,
     NewsSource,
+    RuleAudit,
 )
 from app.repositories import news_repo
 from app.repositories.news_repo import QueryHitRow
@@ -383,7 +389,7 @@ class TestAcrossRuns:
         assert latest(world, world.items[1]).decided_by is Decider.RULE
 
 
-def readings(*items: tuple[int, float]) -> dict[str, Any]:
+def readings(*items: tuple[int, float], material: Any = True) -> dict[str, Any]:
     return {
         "readings": [
             {
@@ -393,6 +399,7 @@ def readings(*items: tuple[int, float]) -> dict[str, Any]:
                 "intensity": 0.6,
                 "confidence": 0.8,
                 "evidence": "자사주 매입",
+                "material": material,
             }
             for i, s in items
         ]
@@ -424,7 +431,9 @@ class TestReading:
         assert report.written == 2
         rows = stored_readings(world)
         assert {r.news_item_id for r in rows} == {world.items[4], world.items[5]}
-        assert all(r.model == MODEL and r.prompt_version == 1 for r in rows)
+        version = llm_service.SENTIMENT_PROMPT_VERSION
+        assert all(r.model == MODEL and r.prompt_version == version for r in rows)
+        assert all(r.material is True for r in rows)
 
         again = Script()
         assert read(world, again).asked == 0
@@ -433,9 +442,10 @@ class TestReading:
         self, world: World, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         read(world, Script(readings((1, 0.7), (2, -0.2))))
-        monkeypatch.setattr(llm_service, "SENTIMENT_PROMPT_VERSION", 2)
+        v = llm_service.SENTIMENT_PROMPT_VERSION
+        monkeypatch.setattr(llm_service, "SENTIMENT_PROMPT_VERSION", v + 1)
         read(world, Script(readings((1, 0.5), (2, -0.1))))
-        assert sorted(r.prompt_version for r in stored_readings(world)) == [1, 1, 2, 2]
+        assert sorted(r.prompt_version for r in stored_readings(world)) == [v, v, v + 1, v + 1]
 
     def test_a_value_outside_its_range_writes_nothing(self, world: World) -> None:
         report = read(world, Script(readings((1, 1.7), (2, 0.1))))
@@ -446,3 +456,104 @@ class TestReading:
         read(world, provider)
         assert f"{NAME} 스니펫 4" in provider.prompts[0]
         assert f"{NAME} 스니펫 0" not in provider.prompts[0]
+
+    def test_a_reading_says_whether_the_news_is_material(self, world: World) -> None:
+        read(world, Script(readings((1, 0.1), (2, 0.1), material=False)))
+        assert [r.material for r in stored_readings(world)] == [False, False]
+
+    @pytest.mark.parametrize("material", [None, "yes", 1])
+    def test_a_reading_without_a_true_or_false_material_writes_nothing(
+        self, world: World, material: Any
+    ) -> None:
+        report = read(world, Script(readings((1, 0.1), (2, 0.1), material=material)))
+        assert (report.malformed_batches, stored_readings(world)) == (1, [])
+
+
+def audit(world: World, provider: Any) -> llm_service.LlmRunReport:
+    return llm_service.audit_rules(
+        world.session,
+        sample=100,
+        instrument_ids=[world.instrument_id],
+        provider=provider,
+        guard=Guard(),
+    )
+
+
+def audits(world: World) -> list[RuleAudit]:
+    world.session.expire_all()
+    return list(
+        world.session.execute(
+            select(RuleAudit)
+            .join(NewsQueryHit, NewsQueryHit.id == RuleAudit.query_hit_id)
+            .where(NewsQueryHit.instrument_id == world.instrument_id)
+        ).scalars()
+    )
+
+
+class TestRuleAudit:
+    def test_only_the_rules_confirmations_are_asked(self, world: World) -> None:
+        provider = Script(verdicts((1, "REJECTED"), (2, "CONFIRMED")))
+        report = audit(world, provider)
+        assert report.asked == 2
+        assert f"{NAME} 스니펫 4" in provider.prompts[0]
+        assert f"{NAME} 스니펫 0" not in provider.prompts[0]
+
+    def test_answers_are_recorded_and_no_verdict_changes(self, world: World) -> None:
+        audit(world, Script(verdicts((1, "REJECTED"), (2, "REJECTED"))))
+        rows = audits(world)
+        assert sorted(r.model_verdict for r in rows) == ["REJECTED", "REJECTED"]
+        assert all(
+            r.rule_decision is HitDecision.CONFIRMED
+            and r.rule_reason == "strong:title_lead"
+            and r.rule_version == RULE_VERSION
+            and r.model == MODEL
+            for r in rows
+        )
+        for item in world.items[4:]:
+            verdict = latest(world, item)
+            assert (verdict.decision, verdict.decided_by) == (HitDecision.CONFIRMED, Decider.RULE)
+
+    def test_an_audited_hit_is_not_asked_again(self, world: World) -> None:
+        audit(world, Script(verdicts((1, "CONFIRMED"), (2, "UNSURE"))))
+        assert audit(world, Script()).asked == 0
+
+    def test_a_malformed_answer_records_nothing(self, world: World) -> None:
+        report = audit(world, Script(verdicts((1, "MAYBE"), (2, "CONFIRMED"))))
+        assert (report.malformed_batches, audits(world)) == (1, [])
+
+    def test_the_report_counts_by_name_shape_and_reason(self, world: World) -> None:
+        audit(world, Script(verdicts((1, "REJECTED"), (2, "CONFIRMED"))))
+        world.session.commit()
+        tables = llm_service.audit_report(world.session, rule_version=RULE_VERSION)
+        shape = tables["shape"]["hangul 3"]
+        reason = tables["reason"]["strong"]
+        # Other audits in the database may share these buckets; ours are in them.
+        assert shape.audited >= 2 and reason.audited >= 2
+        assert shape.confirmed >= 1 and shape.rejected >= 1
+
+
+class TestScope:
+    def test_focus_is_tracked_names_and_recent_candidates(self, world: World) -> None:
+        s = world.session
+        assert world.instrument_id not in llm_service.focus_ids(s)
+
+        now = datetime.now(UTC)  # noqa: TID251 - fixture timestamps only
+        snapshot = CandidateSnapshot(
+            asof=now - timedelta(days=llm_service.FOCUS_CANDIDATE_DAYS + 1),
+            rank=1,
+            instrument_id=world.instrument_id,
+            recent_mentions=3,
+            baseline_mentions=0,
+            recent_days=1.0,
+            baseline_days=7.0,
+            score=4.0,
+            news_freshness="FRESH",
+        )
+        s.add(snapshot)
+        s.flush()
+        assert world.instrument_id not in llm_service.focus_ids(s)
+
+        snapshot.asof = now - timedelta(hours=1)
+        s.flush()
+        assert world.instrument_id in llm_service.focus_ids(s)
+        assert set(llm_service.tracked_ids(s)) <= set(llm_service.focus_ids(s))

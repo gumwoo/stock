@@ -61,6 +61,7 @@ from app.models.news import (
     NewsSentiment,
     NewsSource,
     NewsSweepCoverage,
+    RuleAudit,
 )
 from app.repositories import bulk
 
@@ -454,6 +455,70 @@ def pending_for_model(
             ),
         ),
     )
+
+
+class AuditTarget(NamedTuple):
+    """A hit the rule confirmed, put to the model as a check on the rule."""
+
+    hit: OpenHit
+    query_hit_id: int
+    decision_reason: str
+
+
+def rule_confirmed_sample(
+    session: Session,
+    *,
+    limit: int,
+    model: str,
+    prompt_version: int,
+    instrument_ids: Collection[int] | None = None,
+) -> list[AuditTarget]:
+    """A random sample of hits whose latest verdict is the rule's CONFIRMED.
+
+    Random, not newest: the question is how often the rule is right across
+    what it confirms, and the newest hits are one day's news. Hits already
+    audited by this model under this prompt are left out, so repeated audits
+    widen the sample instead of re-asking it.
+    """
+    latest = _latest()
+    audited = (
+        select(RuleAudit.id)
+        .where(
+            RuleAudit.query_hit_id == NewsQueryHit.id,
+            RuleAudit.rule_version == latest.c.rule_version,
+            RuleAudit.model == model,
+            RuleAudit.prompt_version == prompt_version,
+        )
+        .exists()
+    )
+    stmt = (
+        select(
+            NewsQueryHit.news_item_id,
+            NewsQueryHit.instrument_id,
+            latest.c.matched_query,
+            NewsItem.title,
+            latest.c.snippet,
+            latest.c.match_method,
+            latest.c.rule_version,
+            NewsItem.available_at,
+            NewsQueryHit.id,
+            latest.c.decision_reason,
+        )
+        .select_from(latest)
+        .join(NewsQueryHit, NewsQueryHit.id == latest.c.query_hit_id)
+        .join(NewsItem, NewsItem.id == NewsQueryHit.news_item_id)
+        .where(
+            latest.c.decision == HitDecision.CONFIRMED,
+            latest.c.decided_by == Decider.RULE,
+            latest.c.snippet.is_not(None),
+            ~audited,
+        )
+        .order_by(func.random())
+        .limit(limit)
+    )
+    if instrument_ids is not None:
+        stmt = stmt.where(NewsQueryHit.instrument_id.in_(list(instrument_ids)))
+    return [AuditTarget(OpenHit(*row[:8]), row[8], row[9]) for row in session.execute(stmt).all()]
 
 
 def confirmed_unread(

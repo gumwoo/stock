@@ -28,8 +28,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.collectors.quota import QuotaExhausted, QuotaGuard
@@ -42,7 +44,9 @@ from app.llm.provider import (
     LlmResult,
     LlmUnavailableError,
 )
-from app.models.news import Decider, HitDecision, SentimentEvent
+from app.models import Instrument
+from app.models.forward import CandidateSnapshot
+from app.models.news import Decider, HitDecision, NewsQueryHit, RuleAudit, SentimentEvent
 from app.repositories import instrument_repo, llm_repo, news_repo
 from app.repositories.llm_repo import LlmCallRow, SentimentRow
 from app.repositories.news_repo import OpenHit, QueryHitRow
@@ -54,7 +58,10 @@ QUOTA_GROUP = "claude_subscription"
 # source, a hospital sharing the name, a listed affiliate. It rejected all 26
 # of its rejections correctly.
 RELEVANCE_PROMPT_VERSION = 2
-SENTIMENT_PROMPT_VERSION = 1
+# 2: asks whether the item matters to an investor at all (`material`). Articles
+# about the company that are not news about its value — a charity drive, a
+# sponsored team's game — were being read for sentiment like any other.
+SENTIMENT_PROMPT_VERSION = 2
 
 RELEVANCE_SYSTEM = """You judge Korean news search results for a stock research tool.
 Each item names one company listed on the Korean exchange (KOSPI or KOSDAQ) and gives a
@@ -105,6 +112,10 @@ For each item, judge only what the headline and snippet say about the named comp
 - intensity: from 0 (trivial) to 1 (material enough to move the stock by itself).
 - confidence: from 0 to 1, how sure you can be from this short text alone.
 - evidence: the exact words from the text your reading rests on, at most 120 characters.
+- material: true if an investor in the company would care — its business, results, stock,
+  contracts, capital, disputes, management or shareholders; false if the item is about the
+  company but not about its value (charity, sponsorships, sports teams, events, advertising,
+  a passing mention in a list unrelated to the company's business).
 Do not use outside knowledge about the company or the market."""
 
 SENTIMENT_SCHEMA: dict[str, Any] = {
@@ -121,6 +132,7 @@ SENTIMENT_SCHEMA: dict[str, Any] = {
                     "intensity": {"type": "number", "minimum": 0, "maximum": 1},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "evidence": {"type": "string", "maxLength": 200},
+                    "material": {"type": "boolean"},
                 },
                 "required": [
                     "id",
@@ -129,6 +141,7 @@ SENTIMENT_SCHEMA: dict[str, Any] = {
                     "intensity",
                     "confidence",
                     "evidence",
+                    "material",
                 ],
             },
         }
@@ -468,6 +481,9 @@ def read_confirmed(
             evidence = str(entry.get("evidence") or "").strip()
             if not evidence:
                 raise MalformedAnswerError(f"item {n}: no evidence")
+            material = entry.get("material")
+            if not isinstance(material, bool):
+                raise MalformedAnswerError(f"item {n}: material is not true or false")
             tally[event.value] = tally.get(event.value, 0) + 1
             rows.append(
                 SentimentRow(
@@ -480,6 +496,7 @@ def read_confirmed(
                     intensity=intensity,
                     confidence=confidence,
                     evidence=evidence[:500],
+                    material=material,
                 )
             )
         written = llm_repo.save_readings(session, rows)
@@ -508,3 +525,148 @@ def tracked_ids(session: Session) -> list[int]:
         i.instrument_id
         for i in instrument_repo.list_active(session, asof=utc_now().date(), tracked=True)
     ]
+
+
+# Candidates listed within this many days count as in focus.
+FOCUS_CANDIDATE_DAYS = 3
+
+
+def focus_ids(session: Session) -> list[int]:
+    """Where the model's reading is used: tracked names and recent candidates.
+
+    Tracked names carry an overlay into every signal; candidates are the names
+    the forward record follows. The rest of the master is left to the rule —
+    reading all of it would take the subscription's whole allowance every day.
+    """
+    recent = session.execute(
+        select(CandidateSnapshot.instrument_id).where(
+            CandidateSnapshot.asof > utc_now() - timedelta(days=FOCUS_CANDIDATE_DAYS)
+        )
+    ).scalars()
+    return sorted(set(tracked_ids(session)) | set(recent))
+
+
+def audit_rules(
+    session: Session,
+    *,
+    sample: int,
+    instrument_ids: Sequence[int] | None = None,
+    provider: LlmProvider | None = None,
+    guard: Any = None,
+) -> LlmRunReport:
+    """Put a random sample of the rule's confirmations to the model. Records, never re-judges.
+
+    The answers go to `rule_audit` beside the rule's verdict. The verdict is
+    left alone: the model's confirmations were wrong about one time in seven
+    in the sample read by hand, so letting it overrule the rule on a sample
+    would trade one error for another. What the audit gives is where the two
+    disagree, which is what the next rule version is written from.
+    """
+    model = get_settings().relevance_llm_model
+    targets = news_repo.rule_confirmed_sample(
+        session,
+        limit=sample,
+        model=model,
+        prompt_version=RELEVANCE_PROMPT_VERSION,
+        instrument_ids=instrument_ids,
+    )
+    by_pair = {(t.hit.news_item_id, t.hit.instrument_id): t for t in targets}
+
+    def apply(batch: Sequence[OpenHit], result: LlmResult, report: LlmRunReport) -> int:
+        answers = _answers(result, "verdicts", len(batch))
+        rows: list[RuleAudit] = []
+        for n, hit in enumerate(batch, 1):
+            entry = answers.get(n)
+            if entry is None:
+                continue
+            verdict = str(entry.get("verdict"))
+            if verdict not in _VERDICTS:
+                raise MalformedAnswerError(f"verdict {verdict!r}")
+            target = by_pair[(hit.news_item_id, hit.instrument_id)]
+            rows.append(
+                RuleAudit(
+                    query_hit_id=target.query_hit_id,
+                    rule_version=hit.rule_version,
+                    rule_decision=HitDecision.CONFIRMED,
+                    rule_reason=target.decision_reason[:64],
+                    model=result.model,
+                    prompt_version=RELEVANCE_PROMPT_VERSION,
+                    model_verdict=verdict,
+                    rationale=str(entry.get("reason") or "")[:500] or None,
+                )
+            )
+        session.add_all(rows)
+        session.flush()
+        report.unanswered += len(batch) - len(rows)
+        for row in rows:
+            report.counts[row.model_verdict] = report.counts.get(row.model_verdict, 0) + 1
+        return len(rows)
+
+    return _run(
+        session,
+        purpose="rule_audit",
+        hits=[t.hit for t in targets],
+        model=model,
+        prompt_version=RELEVANCE_PROMPT_VERSION,
+        system=RELEVANCE_SYSTEM,
+        schema=RELEVANCE_SCHEMA,
+        header="Judge each item.",
+        apply=apply,
+        provider=provider if provider is not None else default_provider(),
+        guard=guard if guard is not None else QuotaGuard(),
+    )
+
+
+def name_shape(name: str) -> str:
+    """The shape of a company name, which is where the rule's hard cases are."""
+    flat = "".join(name.split())
+    length = f"{len(flat)}" if len(flat) < 4 else "4+"
+    if flat.isascii() and flat.isalnum():
+        return f"latin {length}"
+    if flat and all("가" <= ch <= "힣" for ch in flat):
+        return f"hangul {length}"
+    return "mixed"
+
+
+@dataclass(frozen=True, slots=True)
+class Agreement:
+    audited: int
+    confirmed: int
+    rejected: int
+    unsure: int
+
+    @property
+    def precision(self) -> float | None:
+        """The share of the model's decided answers that agree with the rule."""
+        decided = self.confirmed + self.rejected
+        return self.confirmed / decided if decided else None
+
+
+def audit_report(session: Session, *, rule_version: int) -> dict[str, dict[str, Agreement]]:
+    """Agreement with the rule's confirmations, by name shape and by the rule's reason.
+
+    Only the current model and prompt: a different judge's answers are a
+    different measurement and are not added into this one.
+    """
+    stmt = (
+        select(RuleAudit.model_verdict, RuleAudit.rule_reason, Instrument.name)
+        .join(NewsQueryHit, NewsQueryHit.id == RuleAudit.query_hit_id)
+        .join(Instrument, Instrument.instrument_id == NewsQueryHit.instrument_id)
+        .where(
+            RuleAudit.rule_version == rule_version,
+            RuleAudit.model == get_settings().relevance_llm_model,
+            RuleAudit.prompt_version == RELEVANCE_PROMPT_VERSION,
+        )
+    )
+    tallies: dict[str, dict[str, list[int]]] = {"shape": {}, "reason": {}}
+    for verdict, reason, name in session.execute(stmt).all():
+        for kind, key in (("shape", name_shape(name)), ("reason", reason.split(":")[0])):
+            t = tallies[kind].setdefault(key, [0, 0, 0, 0])
+            t[0] += 1
+            t[1] += verdict == "CONFIRMED"
+            t[2] += verdict == "REJECTED"
+            t[3] += verdict == "UNSURE"
+    return {
+        kind: {key: Agreement(*t) for key, t in sorted(rows.items())}
+        for kind, rows in tallies.items()
+    }

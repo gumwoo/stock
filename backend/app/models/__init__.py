@@ -33,8 +33,11 @@ from app.models.news import (
     NewsMention,
     NewsQueryHit,
     NewsRelevanceDecision,
+    NewsSentiment,
     NewsSource,
     NewsSweepCoverage,
+    RuleAudit,
+    SentimentEvent,
 )
 from app.models.portfolio import (
     Holding,
@@ -81,6 +84,7 @@ __all__ = [
     "NewsSource",
     "NewsSweepCoverage",
     "PortfolioSnapshot",
+    "RuleAudit",
     "SampleType",
     "SentimentEvent",
     "Signal",

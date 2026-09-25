@@ -75,6 +75,7 @@ class SentimentRow(NamedTuple):
     intensity: float
     confidence: float
     evidence: str
+    material: bool | None = None
 
 
 def save_readings(session: Session, rows: Sequence[SentimentRow]) -> int:
@@ -96,6 +97,7 @@ class ReadingAsOf(NamedTuple):
     sentiment: float
     intensity: float
     confidence: float
+    material: bool | None = None
 
 
 def readings_asof(
@@ -134,6 +136,7 @@ def readings_asof(
             r.sentiment,
             r.intensity,
             r.confidence,
+            r.material,
         )
         .join(NewsItem, NewsItem.id == r.news_item_id)
         .where(
@@ -155,6 +158,7 @@ def readings_asof(
             sentiment=row[5],
             intensity=row[6],
             confidence=row[7],
+            material=row[8],
         )
         for row in rows
         if (row[0], row[1]) in confirmed

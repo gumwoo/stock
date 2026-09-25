@@ -467,6 +467,13 @@ class NewsSentiment(Base):
     evidence: Mapped[str] = mapped_column(
         Text, nullable=False, doc="The words in the text the reading rests on."
     )
+    material: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        doc="Whether the item matters to an investor at all: a charity drive or a "
+        "sponsored team's game is about the company and still not news about its "
+        "value. Asked from prompt version 2; null before.",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.clock_timestamp(), nullable=False
     )
@@ -481,3 +488,37 @@ class NewsSentiment(Base):
         ),
         Index("ix_news_sentiment_instrument_created", "instrument_id", "created_at"),
     )
+
+
+class RuleAudit(Base):
+    """A model's second opinion on a verdict the rule reached, kept apart from it.
+
+    The rule's precision is measured, not assumed: a sample of its CONFIRMED
+    hits is put to the model and the answers recorded here. The verdict itself
+    is left alone — the model is wrong often enough that letting it overrule
+    the rule by sampling would trade one error for another — so this table is
+    evidence for the next rule version, not a correction of this one.
+    """
+
+    __tablename__ = "rule_audit"
+
+    id: Mapped[BigIntPk]
+    query_hit_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("news_query_hit.id", ondelete="CASCADE"), nullable=False
+    )
+    rule_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    rule_decision: Mapped[HitDecision] = mapped_column(
+        Enum(HitDecision, name="news_hit_decision", native_enum=False, length=12), nullable=False
+    )
+    rule_reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    model_verdict: Mapped[str] = mapped_column(
+        String(12), nullable=False, doc="CONFIRMED, REJECTED or UNSURE."
+    )
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audited_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp(), nullable=False
+    )
+
+    __table_args__ = (Index("ix_rule_audit_rule_version", "rule_version", "audited_at"),)

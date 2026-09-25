@@ -96,6 +96,12 @@ def overlays_at(
 
     by_instrument: dict[int, list[EventReading]] = {i: [] for i in instrument_ids}
     for r in readings:
+        # Read as about the company but not about its value: charity, a
+        # sponsored team's game. Null means the prompt did not ask; only the
+        # current prompt's readings arrive here, and it asks, so null is a
+        # reading from a prompt that did not — kept rather than guessed at.
+        if r.material is False:
+            continue
         by_instrument.setdefault(r.instrument_id, []).append(
             EventReading(
                 news_item_id=r.news_item_id,
