@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.collectors.base import run_collector
 from app.collectors.yfinance_history import YFinanceHistoryCollector
+from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import ensure_utc, utc_now
 from app.core.types import SignalAction
@@ -51,7 +52,8 @@ from app.models.collector import CollectorStatus
 from app.models.forward import HORIZONS
 from app.repositories import candle_repo
 from app.scoring.policy import STRATEGY_VERSION
-from app.services import attention_service, discovery_service, regime_service
+from app.services import attention_service, discovery_service, overlay_service, regime_service
+from app.services.llm_service import SENTIMENT_PROMPT_VERSION
 
 # How far back evaluation looks for rows still missing an outcome. The longest
 # horizon is twenty sessions, about a month; twice that leaves room for gaps.
@@ -292,6 +294,11 @@ class Stats:
     mean_excess: float | None
 
 
+def _distinct_days(entries: Iterable[datetime]) -> int:
+    """Calendar days, not entry instants: a Korean and a US entry on one date are one day."""
+    return len({e.date() for e in entries})
+
+
 def _stats(returns: Sequence[float], excess: Sequence[float], days: int) -> Stats:
     if not returns:
         return Stats(0, days, None, None, None, None)
@@ -397,7 +404,17 @@ def signal_records(
         )
         .join(Signal, Signal.id == SignalOutcome.signal_id)
         .join(Instrument, Instrument.instrument_id == Signal.instrument_id)
-        .outerjoin(SignalOverlay, SignalOverlay.signal_id == Signal.id)
+        .outerjoin(
+            SignalOverlay,
+            # The overlay as it is now computed: another version, model or
+            # prompt is another measurement, and is left as no overlay.
+            and_(
+                SignalOverlay.signal_id == Signal.id,
+                SignalOverlay.overlay_version == overlay_service.PARAMS.version,
+                SignalOverlay.reading_model == get_settings().sentiment_llm_model,
+                SignalOverlay.reading_prompt_version == SENTIMENT_PROMPT_VERSION,
+            ),
+        )
         .outerjoin(
             SignalRegime,
             # One version's labels: a changed threshold is a different grouping.
@@ -492,7 +509,7 @@ def report(
     for (kind, h, label), items in groups.items():
         target = tables[kind]
         target.setdefault(h, {})[label] = _stats(
-            [i[0] for i in items], [i[1] for i in items], len({i[2] for i in items})
+            [i[0] for i in items], [i[1] for i in items], _distinct_days(i[2] for i in items)
         )
 
     # One listing per name and entry: a hand-run list taken the same evening
@@ -551,6 +568,6 @@ def report(
         target.setdefault(h, {})[label] = _stats(
             [p[0] for p in picks],
             [p[1] for p in picks if p[1] is not None],
-            len({p[2] for p in picks}),
+            _distinct_days(p[2] for p in picks),
         )
     return out

@@ -28,6 +28,7 @@ from app.models import (
     Interval,
     Signal,
     SignalOutcome,
+    SignalOverlay,
     SignalRegime,
     SymbolHistory,
 )
@@ -35,8 +36,15 @@ from app.models.attention import SignalAttention
 from app.models.collector import CollectorStatus
 from app.repositories import candle_repo
 from app.scoring.regime import Label, Regime
-from app.services import attention_service, discovery_service, forward_service, regime_service
+from app.services import (
+    attention_service,
+    discovery_service,
+    forward_service,
+    overlay_service,
+    regime_service,
+)
 from app.services.discovery_service import Candidate, Discovery
+from app.services.llm_service import SENTIMENT_PROMPT_VERSION
 
 pytestmark = pytest.mark.integration
 
@@ -293,6 +301,30 @@ class TestTheReport:
         assert rep.by_attention[5]["search surge"].n == 1
         assert rep.by_attention[5]["no search data"].n == 1
         assert "ordinary search" not in rep.by_attention[5]
+
+    def test_an_overlay_from_another_version_is_not_counted_as_news(self, world: World) -> None:
+        first = signal(world, world.ids[0], day=0, action=SignalAction.BUY_INTEREST)
+        world.session.add(
+            SignalOverlay(
+                signal_id=first.id,
+                asof=first.decision_at,
+                overlay_version=overlay_service.PARAMS.version - 1,
+                reading_model=get_settings().sentiment_llm_model,
+                reading_prompt_version=SENTIMENT_PROMPT_VERSION,
+                points=5.0,
+                raw=5.0,
+                events=1,
+                readings_used=1,
+                unread_articles=0,
+                news_freshness=Freshness.FRESH,
+                detail=[],
+            )
+        )
+        world.session.commit()
+        forward_service.evaluate_signals(world.session, now=NOW)
+        rep = forward_service.report(world.session, strategy_version=VERSION)
+        assert "good news" not in rep.by_overlay[5]
+        assert rep.by_overlay[5]["no overlay"].n == 1
 
     def test_a_rescore_of_the_same_judgement_counts_once(self, world: World) -> None:
         signal(world, world.ids[0], day=0, action=SignalAction.BUY_INTEREST)

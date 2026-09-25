@@ -37,7 +37,7 @@ from app.core import logging as logging_setup
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import advisory_lock, session_scope
-from app.services import forward_service, llm_service, scoring_service
+from app.services import forward_service, llm_service, regime_service, scoring_service
 
 logger = logging.getLogger("app.worker")
 
@@ -155,6 +155,9 @@ def _daily_loop() -> None:
         run_collector(DartDisclosureCollector(), session)
         scored = scoring_service.score_all(session)
         logger.info("daily loop: scored %d", len(scored))
+        # A regime held back because the day's index bar was late is filed
+        # once the bar is in, rather than waiting for a hand-run backfill.
+        logger.info("daily loop: regimes filed late %d", regime_service.backfill(session))
         logger.info(
             "daily loop: forward record +%d signal outcomes, %d candidates listed, "
             "+%d candidate outcomes",

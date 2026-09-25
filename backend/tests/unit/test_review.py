@@ -317,3 +317,11 @@ def test_a_regime_not_known_is_not_counted_as_another_regime(
     rev = review_service.review(None, now=day(80))  # type: ignore[arg-type]
     assert rev.verdict is not None and rev.verdict.passed is True
     assert any(r.startswith("other regimes: untested") for r in rev.verdict.reasons)
+
+
+def test_a_korean_and_a_us_entry_on_one_date_are_one_day() -> None:
+    from app.services.forward_service import _distinct_days
+
+    kr = datetime(2026, 9, 22, 0, 0, tzinfo=UTC)
+    us = datetime(2026, 9, 22, 13, 30, tzinfo=UTC)
+    assert _distinct_days([kr, us, kr + timedelta(days=1)]) == 2

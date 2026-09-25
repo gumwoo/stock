@@ -513,6 +513,13 @@ class TestRuleAudit:
             verdict = latest(world, item)
             assert (verdict.decision, verdict.decided_by) == (HitDecision.CONFIRMED, Decider.RULE)
 
+    def test_confirmations_under_an_older_rule_are_not_sampled(
+        self, world: World, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The stored verdicts are this rule's; a newer rule has confirmed nothing yet.
+        monkeypatch.setattr(llm_service, "NEWS_RULE_VERSION", RULE_VERSION + 1)
+        assert audit(world, Script()).asked == 0
+
     def test_an_audited_hit_is_not_asked_again(self, world: World) -> None:
         audit(world, Script(verdicts((1, "CONFIRMED"), (2, "UNSURE"))))
         assert audit(world, Script()).asked == 0

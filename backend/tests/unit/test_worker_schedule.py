@@ -81,6 +81,9 @@ def _loop(monkeypatch: pytest.MonkeyPatch, *, session: bool) -> list[str]:
     monkeypatch.setattr(worker, "session_scope", fake_scope)
     monkeypatch.setattr(worker, "run_collector", fake_run)
     monkeypatch.setattr(worker.scoring_service, "score_all", lambda s: steps.append("score") or [])
+    monkeypatch.setattr(
+        worker.regime_service, "backfill", lambda s: steps.append("regime_backfill") or 0
+    )
     for fn in ("evaluate_signals", "snapshot_candidates", "evaluate_candidates"):
         monkeypatch.setattr(worker.forward_service, fn, lambda s, _fn=fn: steps.append(_fn) or 0)
     worker._daily_loop()
@@ -96,6 +99,7 @@ def test_the_daily_loop_runs_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
         "dart:2",
         "DartDisclosureCollector",
         "score",
+        "regime_backfill",
         "evaluate_signals",
         "snapshot_candidates",
         "evaluate_candidates",

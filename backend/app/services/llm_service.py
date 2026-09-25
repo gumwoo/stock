@@ -34,6 +34,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.collectors.naver_news import RULE_VERSION as NEWS_RULE_VERSION
 from app.collectors.quota import QuotaExhausted, QuotaGuard
 from app.config import get_settings
 from app.core.clock import utc_now
@@ -568,6 +569,8 @@ def audit_rules(
         limit=sample,
         model=model,
         prompt_version=RELEVANCE_PROMPT_VERSION,
+        # The rule as it stands: an older version's confirmations are not what is measured.
+        rule_version=NEWS_RULE_VERSION,
         instrument_ids=instrument_ids,
     )
     by_pair = {(t.hit.news_item_id, t.hit.instrument_id): t for t in targets}

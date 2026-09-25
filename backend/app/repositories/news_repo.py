@@ -471,6 +471,7 @@ def rule_confirmed_sample(
     limit: int,
     model: str,
     prompt_version: int,
+    rule_version: int,
     instrument_ids: Collection[int] | None = None,
 ) -> list[AuditTarget]:
     """A random sample of hits whose latest verdict is the rule's CONFIRMED.
@@ -510,6 +511,7 @@ def rule_confirmed_sample(
         .where(
             latest.c.decision == HitDecision.CONFIRMED,
             latest.c.decided_by == Decider.RULE,
+            latest.c.rule_version == rule_version,
             latest.c.snippet.is_not(None),
             ~audited,
         )
