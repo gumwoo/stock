@@ -127,3 +127,54 @@ class TestBounded:
     def test_a_reading_the_model_was_unsure_of_does_not_count(self) -> None:
         overlay = compute_overlay([reading(1, confidence=0.2)], asof=T, params=P)
         assert (overlay.clusters, overlay.readings_dropped) == ((), 1)
+
+
+class TestDisclosuresJoinTheNews:
+    """A filing and the articles about it are one event, directed by what has direction."""
+
+    def filing(self, *, at: datetime, sentiment: float | None, event: str) -> EventReading:
+        return EventReading(
+            news_item_id=900,
+            available_at=at,
+            event_type=event,
+            sentiment=sentiment if sentiment is not None else 0.0,
+            intensity=0.5,
+            confidence=0.8,
+            title="[공시] 영업(잠정)실적",
+            source="DART",
+            directional=sentiment is not None,
+        )
+
+    def test_an_undirected_filing_does_not_dilute_the_news(self) -> None:
+        news = reading(1, event="EARNINGS", sentiment=0.8, confidence=0.9)
+        alone = compute_overlay([news], asof=T, params=P)
+        both = compute_overlay(
+            [news, self.filing(at=T - 2 * H, sentiment=None, event="EARNINGS")], asof=T, params=P
+        )
+        (c,) = both.clusters
+        assert c.sentiment == pytest.approx(alone.clusters[0].sentiment)
+        assert (c.articles, c.disclosure_ids, c.news_item_ids) == (2, (900,), (1,))
+        assert c.title == "article 1"
+
+    def test_an_undirected_filing_alone_is_an_event_without_a_view(self) -> None:
+        overlay = compute_overlay(
+            [self.filing(at=T - H, sentiment=None, event="EARNINGS")], asof=T, params=P
+        )
+        assert len(overlay.clusters) == 1
+        assert overlay.raw == 0.0
+
+    def test_a_directed_filing_counts_on_its_own(self) -> None:
+        overlay = compute_overlay(
+            [self.filing(at=T - H, sentiment=0.6, event="SHAREHOLDER_RETURN")], asof=T, params=P
+        )
+        assert overlay.points > 0
+        assert overlay.clusters[0].title == "[공시] 영업(잠정)실적"
+
+    def test_a_filing_and_its_articles_count_once(self) -> None:
+        articles = [reading(n, at=T - H - n * timedelta(minutes=5)) for n in range(5)]
+        filing = self.filing(
+            at=T - 30 * timedelta(minutes=1), sentiment=0.6, event="SHAREHOLDER_RETURN"
+        )
+        overlay = compute_overlay([*articles, filing], asof=T, params=P)
+        assert len(overlay.clusters) == 1
+        assert overlay.clusters[0].articles == 6

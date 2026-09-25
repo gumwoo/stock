@@ -7,6 +7,10 @@ then, whose relevance verdict at that moment was CONFIRMED. So an overlay
 asked for again about the same moment comes out the same after a re-judgment,
 a new sweep or a later reading.
 
+DART event disclosures join the readings (overlay version 2): a buyback or
+a contract classified from the filing's title, clustered with the articles
+about the same event so it counts once.
+
 Two things are recorded with it because the number alone would overstate
 itself. `unread_articles` is how many confirmed articles in the lookback had
 no reading yet — reading runs within the subscription's limits and lags the
@@ -34,8 +38,9 @@ from app.core.clock import ensure_utc
 from app.core.types import Freshness
 from app.models import Signal, SignalOverlay
 from app.models.news import NewsSource
-from app.repositories import instrument_repo, llm_repo, news_repo
+from app.repositories import disclosure_repo, instrument_repo, llm_repo, news_repo
 from app.scoring.availability import WallClockFreshnessRule, evaluate_freshness
+from app.scoring.disclosure_events import RULE_CONFIDENCE, classify
 from app.scoring.overlay import EventReading, Overlay, OverlayParams, compute_overlay
 from app.services.discovery_service import NEWS_MAX_AGE
 from app.services.llm_service import SENTIMENT_PROMPT_VERSION
@@ -102,6 +107,27 @@ def overlays_at(
                 title=r.title,
             )
         )
+    # DART's event disclosures, classified from their titles. Same bounds as
+    # the readings: available and stored by `asof`.
+    for d in disclosure_repo.disclosures_asof(
+        session, asof=asof, since=asof - params.lookback(), instrument_ids=instrument_ids
+    ):
+        event = classify(d.report_nm)
+        if event is None:
+            continue
+        by_instrument.setdefault(d.instrument_id, []).append(
+            EventReading(
+                news_item_id=d.id,
+                available_at=d.available_at,
+                event_type=event.event_type,
+                sentiment=event.sentiment if event.sentiment is not None else 0.0,
+                intensity=event.intensity,
+                confidence=RULE_CONFIDENCE,
+                title=f"[공시] {d.report_nm}",
+                source="DART",
+                directional=event.sentiment is not None,
+            )
+        )
     return {
         instrument_id: OverlayAt(
             instrument_id=instrument_id,
@@ -125,6 +151,7 @@ def _detail(result: OverlayAt, limit: int = 10) -> list[dict[str, object]]:
             "event_type": c.event_type,
             "first_at": c.first_at.isoformat(),
             "articles": c.articles,
+            "disclosures": len(c.disclosure_ids),
             "sentiment": round(c.sentiment, 3),
             "intensity": round(c.intensity, 3),
             "confidence": round(c.confidence, 3),

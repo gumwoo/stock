@@ -57,7 +57,8 @@ DEFAULT_HALF_LIVES: Mapping[str, float] = {
 
 @dataclass(frozen=True, slots=True)
 class OverlayParams:
-    version: int = 1
+    # 2: DART event disclosures join the news readings (see `EventReading.source`).
+    version: int = 2
     half_lives: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_HALF_LIVES))
     cluster_window: timedelta = timedelta(hours=24)
     max_points: float = 10.0
@@ -76,6 +77,14 @@ class OverlayParams:
 
 @dataclass(frozen=True, slots=True)
 class EventReading:
+    """One source's account of an event: a news reading or a disclosure.
+
+    `news_item_id` is the id within its source — a news item, or a disclosure
+    when `source` is "DART". `directional` is False for an event whose title
+    does not say which way it cuts (an earnings release, a merger): it still
+    anchors its cluster, but only directional readings set the direction.
+    """
+
     news_item_id: int
     available_at: datetime
     event_type: str
@@ -83,6 +92,8 @@ class EventReading:
     intensity: float
     confidence: float
     title: str = ""
+    source: str = "NEWS"
+    directional: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +108,7 @@ class Cluster:
     contribution: float
     title: str
     news_item_ids: tuple[int, ...]
+    disclosure_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +129,7 @@ def cluster(readings: Sequence[EventReading], window: timedelta) -> list[list[Ev
     """
     groups: list[list[EventReading]] = []
     open_by_type: dict[str, list[EventReading]] = {}
-    for reading in sorted(readings, key=lambda r: (r.available_at, r.news_item_id)):
+    for reading in sorted(readings, key=lambda r: (r.available_at, r.source, r.news_item_id)):
         current = open_by_type.get(reading.event_type)
         if current is not None and reading.available_at - current[0].available_at <= window:
             current.append(reading)
@@ -148,10 +160,15 @@ def compute_overlay(
         if age > half_life * params.horizon_half_lives:
             continue
         decay = 0.5 ** (age / half_life)
-        weight = sum(r.confidence for r in group)
-        sentiment = sum(r.sentiment * r.confidence for r in group) / weight
+        # Direction from the readings that have one. A disclosure of an
+        # earnings release adds the event, not a view of it; the articles
+        # about it supply the view. None at all leaves the event neutral.
+        pointed = [r for r in group if r.directional]
+        weight = sum(r.confidence for r in pointed)
+        sentiment = sum(r.sentiment * r.confidence for r in pointed) / weight if weight else 0.0
         intensity = max(r.intensity for r in group)
-        confidence = max(r.confidence for r in group)
+        confidence = max(r.confidence for r in pointed) if pointed else 0.0
+        news = [r for r in group if r.source == "NEWS"]
         clusters.append(
             Cluster(
                 event_type=first.event_type,
@@ -164,8 +181,11 @@ def compute_overlay(
                 contribution=sentiment * intensity * confidence * decay,
                 # The article that says most about the event, not merely the
                 # first: a market wrap often breaks a story before its own report.
-                title=max(group, key=lambda r: (r.intensity * r.confidence, -r.news_item_id)).title,
-                news_item_ids=tuple(r.news_item_id for r in group),
+                title=max(
+                    news or group, key=lambda r: (r.intensity * r.confidence, -r.news_item_id)
+                ).title,
+                news_item_ids=tuple(r.news_item_id for r in news),
+                disclosure_ids=tuple(r.news_item_id for r in group if r.source == "DART"),
             )
         )
     raw = sum(c.contribution for c in clusters)

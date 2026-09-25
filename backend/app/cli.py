@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 
 from app import cli_backtest
 from app.collectors.base import run_collector
+from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import MAX_YEARS_BACK, DartFundamentalCollector
 from app.collectors.krx_master import KrxMasterCollector
 from app.collectors.naver_news import NaverNewsCollector, rejudge_hits
@@ -57,6 +58,7 @@ COLLECTORS = {
     "fx": FxRateCollector,
     "sec": SecEdgarCollector,
     "dart": DartFundamentalCollector,
+    "disclosure": DartDisclosureCollector,
     "naver": NaverNewsCollector,
     "krx": KrxMasterCollector,
 }
@@ -76,7 +78,7 @@ PERIODS: dict[str, int] = {"2y": 2, "5y": 5, "10y": 10, "max": MAX_YEARS_BACK}
 # Sources whose range is decided by the source, not by us. SEC's companyfacts
 # is the filer's entire XBRL history in a single document; there is no shorter
 # request to make, so a period given here would be silently discarded.
-FIXED_RANGE = frozenset({"sec", "naver"})
+FIXED_RANGE = frozenset({"sec", "naver", "disclosure"})
 
 
 def cmd_config() -> int:

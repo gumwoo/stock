@@ -139,6 +139,9 @@ def world(engine: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
             s.execute(
                 text("DELETE FROM signal WHERE instrument_id = :i"), {"i": inst.instrument_id}
             )
+            s.execute(
+                text("DELETE FROM disclosure WHERE instrument_id = :i"), {"i": inst.instrument_id}
+            )
             s.execute(text("DELETE FROM news_item WHERE url LIKE :h"), {"h": f"%{HOST}%"})
             s.execute(
                 text("DELETE FROM symbol_history WHERE instrument_id = :i"),
@@ -209,6 +212,64 @@ class TestTheSameMomentGivesTheSameAnswer:
         )
         world.session.commit()
         assert at(world, moment).overlay.readings_used == 2
+
+
+class TestDisclosures:
+    def file(self, world: World, *, title: str, available: datetime, stored: datetime) -> None:
+        world.session.execute(
+            text(
+                "INSERT INTO disclosure (instrument_id, rcept_no, report_nm, pblntf_ty, filer, "
+                "filed_on, available_at, ingested_at) VALUES (:i, :r, :t, 'B', NULL, :f, :a, :s)"
+            ),
+            {
+                "i": world.id,
+                "r": f"2099{world.id:010d}"[:14],
+                "t": title,
+                "f": available.date(),
+                "a": available,
+                "s": stored,
+            },
+        )
+        world.session.commit()
+
+    def test_a_buyback_filing_joins_the_buyback_articles(self, world: World) -> None:
+        now = db_now(world.session)
+        self.file(
+            world,
+            title="주요사항보고서(자기주식취득결정)",
+            available=now - timedelta(hours=2),
+            stored=now - timedelta(hours=2),
+        )
+        result = at(world)
+        (cluster,) = result.overlay.clusters
+        assert (cluster.articles, len(cluster.disclosure_ids)) == (4, 1)
+
+    def test_a_filing_not_yet_available_or_not_yet_stored_is_not_there(self, world: World) -> None:
+        now = db_now(world.session)
+        self.file(
+            world,
+            title="주요사항보고서(유상증자결정)",
+            available=now + timedelta(hours=10),
+            stored=now - timedelta(hours=1),
+        )
+        assert all(c.event_type != "CAPITAL_RAISE" for c in at(world).overlay.clusters)
+        assert (
+            all(
+                c.event_type != "CAPITAL_RAISE"
+                for c in at(world, now + timedelta(hours=11)).overlay.clusters
+            )
+            is False
+        )
+
+    def test_a_filing_stored_after_the_moment_is_invisible(self, world: World) -> None:
+        now = db_now(world.session)
+        self.file(
+            world,
+            title="주요사항보고서(유상증자결정)",
+            available=now - timedelta(hours=1),
+            stored=now + timedelta(hours=1),
+        )
+        assert all(c.event_type != "CAPITAL_RAISE" for c in at(world, now).overlay.clusters)
 
 
 def signal_row(world: World) -> Signal:

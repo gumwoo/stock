@@ -93,6 +93,7 @@ def test_the_daily_loop_runs_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
         # Two business years: the collector counts back from the calendar
         # year, and this year's annual report is not filed until next March.
         "dart:2",
+        "DartDisclosureCollector",
         "score",
         "evaluate_signals",
         "snapshot_candidates",

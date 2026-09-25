@@ -24,6 +24,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.collectors.base import CollectorError, run_collector
+from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import DartFundamentalCollector
 from app.collectors.naver_news import NaverNewsCollector
 from app.collectors.quota import QuotaGuard
@@ -115,6 +116,9 @@ def _collect_korean_news(*, require_close: bool) -> None:
 
     with session_scope() as session:
         run_collector(NaverNewsCollector(), session)
+        # Event disclosures ride along. The morning run is the one that
+        # matters: last evening's filings are on record before today's close.
+        run_collector(DartDisclosureCollector(), session)
 
 
 def _daily_loop() -> None:
@@ -139,6 +143,7 @@ def _daily_loop() -> None:
         # only for a report that does not exist yet and still record SUCCESS
         # — which is what the fundamental freshness check reads.
         run_collector(DartFundamentalCollector(years_back=2), session)
+        run_collector(DartDisclosureCollector(), session)
         scored = scoring_service.score_all(session)
         logger.info("daily loop: scored %d", len(scored))
         logger.info(

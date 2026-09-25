@@ -59,6 +59,7 @@ class OverlayEventOut(BaseModel):
     event_type: str
     first_at: datetime
     articles: int
+    disclosures: int = 0
     sentiment: float
     intensity: float
     confidence: float
