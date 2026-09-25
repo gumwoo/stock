@@ -351,25 +351,46 @@ def _first_signals(session: Session, strategy_version: str) -> list[int]:
     return list(session.execute(first).scalars())
 
 
-def report(
+@dataclass(frozen=True, slots=True)
+class Record:
+    """One measured outcome of one judgement, with everything filed beside it."""
+
+    horizon: int
+    entry_at: datetime
+    decision_at: datetime
+    return_pct: float
+    excess: float
+    action: SignalAction
+    market: Market
+    overlay_points: float | None
+    overlay_detail: list[dict[str, object]] | None
+    regime: str | None
+    attention_status: str | None
+    surge: float | None
+
+
+def signal_records(
     session: Session,
     *,
     strategy_version: str = STRATEGY_VERSION,
     instrument_ids: Collection[int] | None = None,
-) -> ForwardReport:
-    """The record so far. `instrument_ids` narrows it — and with it the
-    cross-section that excess returns are measured against."""
-    out = ForwardReport()
+) -> tuple[list[Record], int]:
+    """Every measured outcome under one strategy, and how many judgements are on record.
+
+    Excess is against the same day's judged names in the same market, at the
+    same horizon: what an equal weight in every judged name would have done.
+    """
     ids = _first_signals(session, strategy_version)
-    out.signals_recorded = len(ids)
     rows = session.execute(
         select(
             SignalOutcome.horizon_sessions,
             SignalOutcome.return_pct,
             SignalOutcome.entry_at,
+            Signal.decision_at,
             Signal.action,
             Instrument.market,
             SignalOverlay.points,
+            SignalOverlay.detail,
             SignalRegime.label,
             SignalAttention.status,
             SignalAttention.surge,
@@ -402,29 +423,66 @@ def report(
         )
     ).all()
 
-    # The same day's cross-section, per market and horizon: what an equal
-    # weight in every judged name would have done.
     pool: dict[tuple[int, str, datetime], list[float]] = defaultdict(list)
-    for h, r, entry_at, _, market, *_ in rows:
-        pool[(h, market.value, entry_at)].append(r)
+    for row in rows:
+        pool[(row[0], row[5].value, row[2])].append(row[1])
+    base = {key: statistics.fmean(v) for key, v in pool.items()}
+    records = [
+        Record(
+            horizon=h,
+            entry_at=entry_at,
+            decision_at=decided,
+            return_pct=r,
+            excess=r - base[(h, market.value, entry_at)],
+            action=action,
+            market=market,
+            overlay_points=points,
+            overlay_detail=detail,
+            regime=regime,
+            attention_status=seen,
+            surge=surge,
+        )
+        for h, r, entry_at, decided, action, market, points, detail, regime, seen, surge in rows
+    ]
+    return records, len(ids)
+
+
+def overlay_bucket(points: float | None) -> str:
+    if points is None:
+        return "no overlay"
+    if points >= OVERLAY_BAND:
+        return "good news"
+    if points <= -OVERLAY_BAND:
+        return "bad news"
+    return "quiet"
+
+
+def report(
+    session: Session,
+    *,
+    strategy_version: str = STRATEGY_VERSION,
+    instrument_ids: Collection[int] | None = None,
+) -> ForwardReport:
+    """The record so far. `instrument_ids` narrows it — and with it the
+    cross-section that excess returns are measured against."""
+    out = ForwardReport()
+    records, out.signals_recorded = signal_records(
+        session, strategy_version=strategy_version, instrument_ids=instrument_ids
+    )
+    # The candidates' reference is the same day's judged Korean names.
+    pool: dict[tuple[int, str, datetime], list[float]] = defaultdict(list)
+    for rec in records:
+        pool[(rec.horizon, rec.market.value, rec.entry_at)].append(rec.return_pct)
     base = {key: statistics.fmean(v) for key, v in pool.items()}
 
-    def bucket(points: float | None) -> str:
-        if points is None:
-            return "no overlay"
-        if points >= OVERLAY_BAND:
-            return "good news"
-        if points <= -OVERLAY_BAND:
-            return "bad news"
-        return "quiet"
-
     groups: dict[tuple[str, int, str], list[tuple[float, float, datetime]]] = defaultdict(list)
-    for h, r, entry_at, action, market, points, regime, seen, surge in rows:
-        excess = r - base[(h, market.value, entry_at)]
-        groups[("action", h, action.value)].append((r, excess, entry_at))
-        groups[("overlay", h, bucket(points))].append((r, excess, entry_at))
-        groups[("regime", h, regime or "no regime")].append((r, excess, entry_at))
-        groups[("attention", h, attention_bucket(seen, surge))].append((r, excess, entry_at))
+    for rec in records:
+        item = (rec.return_pct, rec.excess, rec.entry_at)
+        h = rec.horizon
+        groups[("action", h, rec.action.value)].append(item)
+        groups[("overlay", h, overlay_bucket(rec.overlay_points))].append(item)
+        groups[("regime", h, rec.regime or "no regime")].append(item)
+        groups[("attention", h, attention_bucket(rec.attention_status, rec.surge))].append(item)
     tables = {
         "action": out.by_action,
         "overlay": out.by_overlay,

@@ -46,6 +46,7 @@ from app.core.types import Freshness
 from app.db import session_scope
 from app.models import Interval
 from app.repositories import candle_repo, instrument_repo, news_repo
+from app.scoring.review import DayStats
 from app.seed import seed_watchlist
 from app.services import (
     discovery_service,
@@ -54,6 +55,7 @@ from app.services import (
     overlay_service,
     promotion_service,
     regime_service,
+    review_service,
 )
 from app.services.discovery_service import Candidate, Discovery
 
@@ -457,6 +459,61 @@ def cmd_regime(asof: str | None, backfill: bool) -> int:
     return 0
 
 
+def _stat(d: DayStats) -> str:
+    t = d.t
+    return (
+        f"days={d.days:<3} mean {_fmt(d.mean, '+.2f'):>6}  t {'-' if t is None else f'{t:.2f}':>5}"
+    )
+
+
+def cmd_review() -> int:
+    """The forward record against its review gates, and the overlay decision rule. Reads only."""
+    with session_scope() as session:
+        rev = review_service.review(session)
+    print(
+        "Review gates (rules fixed in app/scoring/review.py before the record had data). "
+        "Excess returns in %, averaged within each entry day first."
+    )
+    print(f"first entry: {rev.first_entry or 'none yet'}")
+    for g in rev.gates:
+        when = (
+            "reached"
+            if g.reached
+            else f"earliest {g.earliest:%Y-%m-%d} if every session is recorded"
+        )
+        print(
+            f"  {g.gate.name:<13} {g.days:>3}/{g.gate.days} entry days at {g.gate.horizon}d — {when}"
+        )
+    if rev.spread is not None:
+        print()
+        print("overlay, 5-session excess")
+        print(f"  good news  {_stat(rev.spread.good)}")
+        print(f"  bad news   {_stat(rev.spread.bad)}")
+        t = rev.spread.t
+        print(
+            f"  difference {_fmt(rev.spread.difference, '+.2f')}  "
+            f"t {'-' if t is None else f'{t:.2f}'}"
+        )
+    if rev.verdict is not None:
+        print()
+        state = "passed" if rev.verdict.passed else ("failed" if rev.verdict.ready else "not ready")
+        print(f"may the overlay be proposed to change actions? {state}")
+        for reason in rev.verdict.reasons:
+            print(f"  - {reason}")
+        if rev.verdict.passed:
+            print(
+                "  next: a new strategy version; count its action distribution before "
+                "accepting any threshold; evaluate without touching the holdout"
+            )
+    print()
+    print("half-life check: excess in the event's direction, by event age (exploratory)")
+    if not rev.half_life:
+        print("  nothing measured yet")
+    for label, d in rev.half_life.items():
+        print(f"  {label:<12} {_stat(d)}")
+    return 0
+
+
 def cmd_forward_run() -> int:
     """Add what has become measurable, and take today's candidate list."""
     with session_scope() as session:
@@ -638,6 +695,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("forward", help="the forward-test record so far; reads only")
     sub.add_parser(
+        "review", help="the forward record against its review gates and decision rule; reads only"
+    )
+    sub.add_parser(
         "forward-run",
         help="add measurable outcomes and take today's candidate list; fetches candidate prices",
     )
@@ -678,6 +738,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_overlay(args.asof, args.symbol)
         case "regime":
             return cmd_regime(args.asof, args.backfill)
+        case "review":
+            return cmd_review()
         case "forward":
             return cmd_forward()
         case "forward-run":
