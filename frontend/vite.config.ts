@@ -10,6 +10,8 @@ export default defineConfig({
       // origin so there is no CORS dance in development.
       "/api": { target: "http://localhost:8000", changeOrigin: true },
       "/health": { target: "http://localhost:8000", changeOrigin: true },
+      // The live chart's trades arrive over a WebSocket from the same API.
+      "/ws": { target: "ws://localhost:8000", ws: true, changeOrigin: true },
     },
   },
 });

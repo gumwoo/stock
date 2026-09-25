@@ -149,3 +149,46 @@ export interface BacktestRunDetail extends BacktestRunSummary {
   holdout_end: string | null;
   window_rows: BacktestWindow[];
 }
+
+/** One name on today's morning list, as the live feed holds it. */
+export interface LiveMember {
+  instrument_id: number;
+  code: string;
+  name: string;
+  rank: number;
+  reasons: string[];
+  overlay_points: number | null;
+  attention_surge: number | null;
+  regime: string | null;
+  last: { price: number; change_pct: number; day_volume: number } | null;
+}
+
+export interface LiveState {
+  status: string;
+  source: string | null;
+  day: string | null;
+  members: LiveMember[];
+}
+
+/** A bar as lightweight-charts wants it: seconds since the epoch. */
+export interface LiveBar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export type LiveMessage =
+  | ({ type: "state" } & Partial<LiveState>)
+  | {
+      type: "trade";
+      code: string;
+      time: number;
+      price: number;
+      volume: number;
+      change_pct: number;
+      bar: LiveBar;
+    }
+  | { type: "seeded"; codes: string[] };

@@ -4,6 +4,8 @@ import type {
   Candle,
   Diagnostics,
   Instrument,
+  LiveBar,
+  LiveState,
   Signal,
 } from "./types";
 
@@ -33,4 +35,6 @@ export const api = {
   config: () => get<Diagnostics>("/health/config"),
   backtests: () => get<BacktestRunSummary[]>("/api/backtests"),
   backtest: (id: number) => get<BacktestRunDetail>(`/api/backtests/${id}`),
+  live: () => get<LiveState>("/api/live"),
+  liveBars: (code: string) => get<LiveBar[]>(`/api/live/${code}/bars`),
 };

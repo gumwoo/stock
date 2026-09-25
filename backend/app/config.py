@@ -96,6 +96,13 @@ class Settings(BaseSettings):
             "real limit is known, one call every two seconds"
         ),
     )
+    live_feed_enabled: bool = Field(
+        default=False,
+        description=(
+            "Open KIS's real-time feed from the API process during the session, "
+            "for the live chart. Off unless asked for: it holds a socket all day"
+        ),
+    )
     kis_rest_daily_limit: int = Field(
         default=20_000,
         gt=0,

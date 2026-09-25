@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
+    # The live chart's client to KIS's real-time feed; uvicorn[standard] brings it,
+    # but the feed depends on it directly.
+    "websockets>=13",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     # Below 2.1: 2.1 changed how `select(Model)` is typed, and the repositories

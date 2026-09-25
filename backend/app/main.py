@@ -11,6 +11,8 @@ advisory lock so that even two workers cannot double-fire.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -19,7 +21,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import backtests, health, signals
+from app.api import backtests, health, live, signals
 from app.config import get_settings
 from app.core import logging as logging_setup
 
@@ -43,7 +45,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             item["name"],
             ", ".join(item["set_to_enable"]),
         )
+    feed = None
+    if settings.live_feed_enabled and settings.kis_enabled:
+        # The live chart's feed. Holds KIS's socket only during the session and
+        # only in the one process that takes its lock; see app/realtime/gateway.py.
+        from app.realtime.gateway import Gateway
+
+        app.state.gateway = Gateway()
+        feed = asyncio.create_task(app.state.gateway.run())
+        logger.info("live feed: on")
     yield
+    if feed is not None:
+        feed.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await feed
     logger.info("api shutdown")
 
 
@@ -70,6 +85,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(signals.router)
     app.include_router(backtests.router)
+    app.include_router(live.router)
     return app
 
 

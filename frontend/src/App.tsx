@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Dashboard } from "./pages/Dashboard";
 import { InstrumentDetail } from "./pages/InstrumentDetail";
 import { Backtest } from "./pages/Backtest";
+import { Live } from "./pages/Live";
 import { api } from "./api/client";
 import type { Diagnostics } from "./api/types";
 import "./App.css";
@@ -17,7 +18,7 @@ import "./App.css";
 export function App() {
   const [config, setConfig] = useState<Diagnostics | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
-  const [tab, setTab] = useState<"signals" | "backtest">("signals");
+  const [tab, setTab] = useState<"signals" | "live" | "backtest">("signals");
 
   useEffect(() => {
     api.config().then(setConfig).catch(() => setConfig(null));
@@ -38,6 +39,15 @@ export function App() {
             Signals
           </button>
           <button
+            className={tab === "live" ? "shell__tab shell__tab--on" : "shell__tab"}
+            onClick={() => {
+              setTab("live");
+              setDetailId(null);
+            }}
+          >
+            Today
+          </button>
+          <button
             className={tab === "backtest" ? "shell__tab shell__tab--on" : "shell__tab"}
             onClick={() => {
               setTab("backtest");
@@ -55,6 +65,8 @@ export function App() {
       <main className="shell__main">
         {tab === "backtest" ? (
           <Backtest />
+        ) : tab === "live" ? (
+          <Live />
         ) : detailId === null ? (
           <Dashboard onOpenDetail={setDetailId} />
         ) : (
