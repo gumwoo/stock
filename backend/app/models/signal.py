@@ -252,3 +252,49 @@ class SignalOverlay(Base):
         JSON, nullable=False, default=list, doc="The clusters, largest contribution first."
     )
     created_at: Mapped[IngestedAt]
+
+
+class SignalRegime(Base):
+    """The market a signal was made in, recorded beside it.
+
+    Like the overlay, beside and not inside: the action is the base
+    strategy's, unchanged. What this is for is the forward record — whether
+    the strategy's judgements hold up in a rising market and fall apart in a
+    falling one is a question the record can only answer if each judgement
+    carries the market it was made in.
+
+    Everything it rests on is a daily index close available by `asof`, so a
+    row can be computed for a signal made before this table existed; the
+    parameters' version is kept with it.
+    """
+
+    __tablename__ = "signal_regime"
+
+    id: Mapped[BigIntPk]
+    signal_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("signal.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    asof: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    regime_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    index_code: Mapped[str] = mapped_column(String(16), nullable=False)
+    label: Mapped[str] = mapped_column(
+        String(12), nullable=False, doc="RISK_ON, NEUTRAL, RISK_OFF, or UNKNOWN without history."
+    )
+    index_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trend_gap: Mapped[float | None] = mapped_column(
+        Float, nullable=True, doc="Close over its long moving average, minus one."
+    )
+    return_20d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volatility_20d: Mapped[float | None] = mapped_column(
+        Float, nullable=True, doc="Annualised, from daily log returns."
+    )
+    volatility_rank: Mapped[float | None] = mapped_column(
+        Float, nullable=True, doc="Where that volatility stands in the past year, 0 to 1."
+    )
+    breadth: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+        doc="Share of the market's tracked names above their own 50-day average.",
+    )
+    breadth_names: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[IngestedAt]

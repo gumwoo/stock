@@ -31,6 +31,7 @@ from app.collectors.base import run_collector
 from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import MAX_YEARS_BACK, DartFundamentalCollector
 from app.collectors.krx_master import KrxMasterCollector
+from app.collectors.market_index import INDEXES, MarketIndexCollector
 from app.collectors.naver_news import RULE_VERSION as NEWS_RULE_VERSION
 from app.collectors.naver_news import NaverNewsCollector, rejudge_hits
 from app.collectors.quota import QuotaGuard
@@ -51,6 +52,7 @@ from app.services import (
     llm_service,
     overlay_service,
     promotion_service,
+    regime_service,
 )
 from app.services.discovery_service import Candidate, Discovery
 
@@ -64,6 +66,7 @@ COLLECTORS = {
     "disclosure": DartDisclosureCollector,
     "naver": NaverNewsCollector,
     "krx": KrxMasterCollector,
+    "index": MarketIndexCollector,
 }
 
 # How far back a collection reaches, in one vocabulary for every source that
@@ -430,6 +433,25 @@ def cmd_overlay(asof: str | None, symbol: str | None) -> int:
     return 0
 
 
+def cmd_regime(asof: str | None, backfill: bool) -> int:
+    """The market regime of each index at a moment; optionally file it for past signals."""
+    moment = datetime.fromisoformat(asof) if asof else utc_now()
+    with session_scope() as session:
+        for code in INDEXES:
+            r = regime_service.regime_at(session, code, moment)
+            print(
+                f"{code:<6} {r.label:<9} close {_fmt(r.close, ',.2f'):>10}  "
+                f"vs 200d {_fmt(r.trend_gap, '+.1%'):>7}  20d {_fmt(r.return_20d, '+.1%'):>7}  "
+                f"vol {_fmt(r.volatility, '.1%'):>6} (rank {_fmt(r.volatility_rank, '.0%')})"
+            )
+        for market in (Market.KR, Market.US):
+            share, names = regime_service.breadth_at(session, market, moment)
+            print(f"breadth {market.value}: {_fmt(share, '.0%')} of {names} tracked names")
+        if backfill:
+            print(f"filed a regime beside {regime_service.backfill(session)} signals")
+    return 0
+
+
 def cmd_forward_run() -> int:
     """Add what has become measurable, and take today's candidate list."""
     with session_scope() as session:
@@ -458,7 +480,9 @@ def cmd_forward() -> int:
     for title, table in (
         ("by action", rep.by_action),
         ("by news overlay", rep.by_overlay),
+        ("by market regime", rep.by_regime),
         ("candidates", rep.candidates),
+        ("candidates by market regime", rep.candidates_by_regime),
     ):
         print()
         print(title)
@@ -597,6 +621,14 @@ def main(argv: list[str] | None = None) -> int:
     overlay.add_argument("--asof", help="ISO time to ask about; default now")
     overlay.add_argument("--symbol")
 
+    regime = sub.add_parser(
+        "regime", help="market regime from the index closes; reads only unless --backfill"
+    )
+    regime.add_argument("--asof", help="ISO time to ask about; default now")
+    regime.add_argument(
+        "--backfill", action="store_true", help="file a regime beside every signal that has none"
+    )
+
     sub.add_parser("forward", help="the forward-test record so far; reads only")
     sub.add_parser(
         "forward-run",
@@ -637,6 +669,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_audit_rules(args.sample, args.report_only)
         case "overlay":
             return cmd_overlay(args.asof, args.symbol)
+        case "regime":
+            return cmd_regime(args.asof, args.backfill)
         case "forward":
             return cmd_forward()
         case "forward-run":

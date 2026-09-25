@@ -349,6 +349,12 @@ class TestBesideTheSignal:
         scored = SimpleNamespace(action=SignalAction.WATCH, total_score=55.0)
         monkeypatch.setattr(scoring_service, "score_instrument", lambda *a, **k: scored)
         monkeypatch.setattr(scoring_service, "persist_signal", lambda *a, **k: row)
+        # The regime reads the real index, whose newest bar depends on the day
+        # the test runs; only that it is asked for is pinned here.
+        regimes: list[int] = []
+        monkeypatch.setattr(
+            scoring_service.regime_service, "attach", lambda _s, r, *_: regimes.append(r.id)
+        )
 
         scoring_service.score_all(world.session)
 
@@ -356,3 +362,5 @@ class TestBesideTheSignal:
             select(SignalOverlay).where(SignalOverlay.signal_id == row.id)
         ).scalar_one()
         assert found.events == 1
+        # And the market regime beside it.
+        assert regimes == [row.id]

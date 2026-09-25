@@ -26,6 +26,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.collectors.base import CollectorError, run_collector
 from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import DartFundamentalCollector
+from app.collectors.market_index import MarketIndexCollector
 from app.collectors.naver_news import NaverNewsCollector
 from app.collectors.quota import QuotaGuard
 from app.collectors.sec_edgar import SecEdgarCollector
@@ -137,6 +138,8 @@ def _daily_loop() -> None:
         # A month of bars, not the default two years: the history is already
         # stored, and this only has to close the gap since the last run.
         run_collector(YFinanceHistoryCollector(period="1mo"), session)
+        # The indexes the regime beside each signal is read from.
+        run_collector(MarketIndexCollector(period="3mo"), session)
         # Two business years, not five: new filings are recent ones. Not one:
         # the collector counts back from the calendar year, and this year's
         # annual report is not filed until next March, so one year would ask
@@ -158,6 +161,7 @@ def _daily_loop() -> None:
 def _us_prices() -> None:
     with session_scope() as session:
         run_collector(YFinanceHistoryCollector(period="1mo"), session)
+        run_collector(MarketIndexCollector(period="3mo"), session)
 
 
 def _sec_weekly() -> None:

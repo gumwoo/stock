@@ -24,6 +24,7 @@ from app.models.market import (
     CorporateAction,
     CorporateActionType,
     FxRate,
+    MarketIndexBar,
 )
 from app.models.news import (
     Decider,
@@ -47,7 +48,13 @@ from app.models.portfolio import (
 )
 from app.models.promotion import InstrumentPromotion
 from app.models.quota import ApiCallBucket
-from app.models.signal import Signal, SignalFactor, SignalOverlay, StrategyConfig
+from app.models.signal import (
+    Signal,
+    SignalFactor,
+    SignalOverlay,
+    SignalRegime,
+    StrategyConfig,
+)
 
 __all__ = [
     "ApiCallBucket",
@@ -75,6 +82,7 @@ __all__ = [
     "Interval",
     "Listing",
     "LlmCall",
+    "MarketIndexBar",
     "MatchMethod",
     "NewsItem",
     "NewsMention",
@@ -91,6 +99,7 @@ __all__ = [
     "SignalFactor",
     "SignalOutcome",
     "SignalOverlay",
+    "SignalRegime",
     "StrategyConfig",
     "SymbolHistory",
     "Transaction",

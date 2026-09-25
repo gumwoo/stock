@@ -199,3 +199,42 @@ class CorporateAction(Base):
 
     def __repr__(self) -> str:
         return f"<CorporateAction {self.instrument_id} {self.action_type} ex={self.ex_date}>"
+
+
+class MarketIndexBar(Base):
+    """One daily bar of a market index, for telling what kind of market a signal was made in.
+
+    An index is not an instrument: it is not listed, has no news of its own and
+    nobody buys it, and a row in `instrument` would be swept for news by name
+    and counted in the master. So it has its own table, keyed by the ticker
+    yfinance knows it by.
+
+    Index levels are not restated the way a company's bars are adjusted for
+    splits, so one row per session is stored and a second fetch of the same
+    session is ignored. The same two times as a candle: `ts` is the session
+    open, `available_at` its close, when the bar became knowable.
+    """
+
+    __tablename__ = "market_index_bar"
+
+    id: Mapped[BigIntPk]
+    index_code: Mapped[str] = mapped_column(
+        String(16), nullable=False, doc="yfinance ticker: ^KS11, ^KQ11, ^GSPC."
+    )
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, doc="Session open, UTC."
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, doc="Session close: when the bar was complete."
+    )
+    open: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    high: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    low: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    close: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    source: Mapped[str] = mapped_column(String(24), nullable=False, default="YFINANCE")
+    ingested_at: Mapped[IngestedAt]
+
+    __table_args__ = (
+        UniqueConstraint("index_code", "ts", name="uq_market_index_bar_code_ts"),
+        Index("ix_market_index_bar_available", "index_code", "available_at"),
+    )

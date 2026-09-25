@@ -27,7 +27,7 @@ from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -44,12 +44,13 @@ from app.models import (
     Signal,
     SignalOutcome,
     SignalOverlay,
+    SignalRegime,
 )
 from app.models.collector import CollectorStatus
 from app.models.forward import HORIZONS
 from app.repositories import candle_repo
 from app.scoring.policy import STRATEGY_VERSION
-from app.services import discovery_service
+from app.services import discovery_service, regime_service
 
 # How far back evaluation looks for rows still missing an outcome. The longest
 # horizon is twenty sessions, about a month; twice that leaves room for gaps.
@@ -307,7 +308,9 @@ def _stats(returns: Sequence[float], excess: Sequence[float], days: int) -> Stat
 class ForwardReport:
     by_action: dict[int, dict[str, Stats]] = field(default_factory=dict)
     by_overlay: dict[int, dict[str, Stats]] = field(default_factory=dict)
+    by_regime: dict[int, dict[str, Stats]] = field(default_factory=dict)
     candidates: dict[int, dict[str, Stats]] = field(default_factory=dict)
+    candidates_by_regime: dict[int, dict[str, Stats]] = field(default_factory=dict)
     signals_recorded: int = 0
     snapshots_recorded: int = 0
 
@@ -350,10 +353,19 @@ def report(
             Signal.action,
             Instrument.market,
             SignalOverlay.points,
+            SignalRegime.label,
         )
         .join(Signal, Signal.id == SignalOutcome.signal_id)
         .join(Instrument, Instrument.instrument_id == Signal.instrument_id)
         .outerjoin(SignalOverlay, SignalOverlay.signal_id == Signal.id)
+        .outerjoin(
+            SignalRegime,
+            # One version's labels: a changed threshold is a different grouping.
+            and_(
+                SignalRegime.signal_id == Signal.id,
+                SignalRegime.regime_version == regime_service.PARAMS.version,
+            ),
+        )
         .where(
             Signal.id.in_(ids),
             *(
@@ -367,7 +379,7 @@ def report(
     # The same day's cross-section, per market and horizon: what an equal
     # weight in every judged name would have done.
     pool: dict[tuple[int, str, datetime], list[float]] = defaultdict(list)
-    for h, r, entry_at, _, market, _ in rows:
+    for h, r, entry_at, _, market, _, _ in rows:
         pool[(h, market.value, entry_at)].append(r)
     base = {key: statistics.fmean(v) for key, v in pool.items()}
 
@@ -381,12 +393,14 @@ def report(
         return "quiet"
 
     groups: dict[tuple[str, int, str], list[tuple[float, float, datetime]]] = defaultdict(list)
-    for h, r, entry_at, action, market, points in rows:
+    for h, r, entry_at, action, market, points, regime in rows:
         excess = r - base[(h, market.value, entry_at)]
         groups[("action", h, action.value)].append((r, excess, entry_at))
         groups[("overlay", h, bucket(points))].append((r, excess, entry_at))
+        groups[("regime", h, regime or "no regime")].append((r, excess, entry_at))
+    tables = {"action": out.by_action, "overlay": out.by_overlay, "regime": out.by_regime}
     for (kind, h, label), items in groups.items():
-        target = out.by_action if kind == "action" else out.by_overlay
+        target = tables[kind]
         target.setdefault(h, {})[label] = _stats(
             [i[0] for i in items], [i[1] for i in items], len({i[2] for i in items})
         )
@@ -404,8 +418,11 @@ def report(
             CandidateOutcome.return_pct,
             CandidateOutcome.entry_at,
             CandidateSnapshot.rank,
+            CandidateSnapshot.asof,
+            Instrument.listing,
         )
         .join(CandidateSnapshot, CandidateSnapshot.id == CandidateOutcome.snapshot_id)
+        .join(Instrument, Instrument.instrument_id == CandidateSnapshot.instrument_id)
         .where(
             CandidateOutcome.snapshot_id.in_(first_listing),
             *(
@@ -419,13 +436,21 @@ def report(
         session.execute(select(func.count()).select_from(CandidateSnapshot)).scalar_one()
     )
     kr = {key: value for key, value in base.items() if key[1] == Market.KR.value}
-    cand: dict[tuple[int, str], list[tuple[float, float | None, datetime]]] = defaultdict(list)
-    for h, r, entry_at, rank in snaps:
+    cand: dict[tuple[str, int, str], list[tuple[float, float | None, datetime]]] = defaultdict(list)
+    # A candidate list carries no stored regime; the index closes it would be
+    # read from are the same at any later reading, so it is read here.
+    regimes: dict[tuple[str, datetime], str] = {}
+    for h, r, entry_at, rank, asof, listing in snaps:
         reference = kr.get((h, Market.KR.value, entry_at))
-        label = "top 5" if rank <= 5 else "6-20"
-        cand[(h, label)].append((r, None if reference is None else r - reference, entry_at))
-    for (h, label), picks in cand.items():
-        out.candidates.setdefault(h, {})[label] = _stats(
+        pick = (r, None if reference is None else r - reference, entry_at)
+        cand[("rank", h, "top 5" if rank <= 5 else "6-20")].append(pick)
+        code = regime_service.index_for(Market.KR, listing)
+        if (code, asof) not in regimes:
+            regimes[(code, asof)] = regime_service.regime_at(session, code, asof).label
+        cand[("regime", h, regimes[(code, asof)])].append(pick)
+    for (kind, h, label), picks in cand.items():
+        target = out.candidates if kind == "rank" else out.candidates_by_regime
+        target.setdefault(h, {})[label] = _stats(
             [p[0] for p in picks],
             [p[1] for p in picks if p[1] is not None],
             len({p[2] for p in picks}),

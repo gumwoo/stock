@@ -28,11 +28,13 @@ from app.models import (
     Interval,
     Signal,
     SignalOutcome,
+    SignalRegime,
     SymbolHistory,
 )
 from app.models.collector import CollectorStatus
 from app.repositories import candle_repo
-from app.services import discovery_service, forward_service
+from app.scoring.regime import Label, Regime
+from app.services import discovery_service, forward_service, regime_service
 from app.services.discovery_service import Candidate, Discovery
 
 pytestmark = pytest.mark.integration
@@ -225,6 +227,38 @@ class TestTheReport:
         assert buy.mean_excess == pytest.approx(rising - (rising + flat) / 2)
         assert caution.mean_excess == pytest.approx(flat - (rising + flat) / 2)
         assert rep.by_overlay[5]["no overlay"].n == 2
+        assert rep.by_regime[5]["no regime"].n == 2
+
+    def test_each_judgement_is_counted_under_the_regime_filed_beside_it(self, world: World) -> None:
+        first = signal(world, world.ids[0], day=0, action=SignalAction.BUY_INTEREST)
+        second = signal(world, world.ids[1], day=0, action=SignalAction.CAUTION)
+        world.session.add(
+            SignalRegime(
+                signal_id=first.id,
+                asof=first.decision_at,
+                regime_version=regime_service.PARAMS.version,
+                index_code="^KS11",
+                label="RISK_OFF",
+            )
+        )
+        # Filed under other thresholds: a different grouping, not counted in this one.
+        world.session.add(
+            SignalRegime(
+                signal_id=second.id,
+                asof=second.decision_at,
+                regime_version=regime_service.PARAMS.version + 1,
+                index_code="^KS11",
+                label="RISK_ON",
+            )
+        )
+        world.session.commit()
+        forward_service.evaluate_signals(world.session, now=NOW)
+
+        rep = forward_service.report(world.session, strategy_version=VERSION)
+        assert rep.by_regime[5]["RISK_OFF"].n == 1
+        assert rep.by_regime[5]["RISK_OFF"].mean == pytest.approx((105 / 100.5 - 1) * 100)
+        assert rep.by_regime[5]["no regime"].n == 1
+        assert "RISK_ON" not in rep.by_regime[5]
 
     def test_a_rescore_of_the_same_judgement_counts_once(self, world: World) -> None:
         signal(world, world.ids[0], day=0, action=SignalAction.BUY_INTEREST)
@@ -304,6 +338,13 @@ class TestCandidates:
         self, world: World, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A hand-run list the same evening as the scheduled one is the same bet."""
+        asked: list[tuple[str, datetime]] = []
+
+        def regime_at(_: Session, code: str, asof: datetime) -> Regime:
+            asked.append((code, asof))
+            return Regime(Label.RISK_ON)
+
+        monkeypatch.setattr(regime_service, "regime_at", regime_at)
         first = KR.session_close(SESSIONS[0]) + timedelta(hours=1)
         for asof in (first, first + timedelta(minutes=20)):
             monkeypatch.setattr(
@@ -326,6 +367,10 @@ class TestCandidates:
         )
         assert len(ours) == 2
         assert (rep.candidates[5]["top 5"].n, rep.candidates[5]["top 5"].days) == (1, 1)
+        # Read at the listing's own moment, against the KOSPI for a name of no known board.
+        assert rep.candidates_by_regime[5]["RISK_ON"].n == 1
+        assert asked and all(code == "^KS11" for code, _ in asked)
+        assert {asof for _, asof in asked} <= {s.asof for s in ours}
 
 
 def listing(world: World, asof: datetime) -> Discovery:
