@@ -123,3 +123,25 @@ def test_a_day_that_opens_at_nine_oh_two_has_no_nine_oclock_entry() -> None:
         bar("0959", 105, 107, 104, 106),
     ]
     assert measure(bars) is None
+
+
+def test_the_sample_drops_a_day_that_opens_at_nine_oh_two() -> None:
+    # `measure`가 아니라 표본 단계에서도 빠지는지. 첫 봉의 라벨을 09:00으로 바꿔 넣으면
+    # 가장 크게 반응한 날이 조용히 되살아난다.
+    from app.scoring.disclosure_study import EventDay
+    from app.services.disclosure_study_service import first_hour_sample
+
+    event = EventDay(START, 7, "ORDER_CONTRACT", 0.5, 0.5, 0.2, 0.0, 0.0, 0.0)
+    minutes = {
+        "days": {
+            f"7:{START.isoformat()}": {
+                "bars": [
+                    ["0902", 120, 125, 118, 124],
+                    ["0903", 124, 126, 122, 125],
+                    ["0959", 125, 127, 121, 122],
+                ]
+            }
+        }
+    }
+    got, dropped = first_hour_sample([event], minutes)
+    assert got == [] and dropped == {"no 09:00 bar or nothing sellable": 1}

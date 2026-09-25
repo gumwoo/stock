@@ -26,7 +26,13 @@ pytestmark = pytest.mark.integration
 KR = MarketCalendar(Market.KR)
 FILED = date(2025, 6, 2)
 ENTRY = date(2025, 6, 4)
-CORPS = {"strong": "99999981", "halted": "99999982", "wild": "99999983"}
+CORPS = {
+    "strong": "99999981",
+    "halted": "99999982",
+    "wild": "99999983",
+    "limit_up": "99999984",
+    "intraday": "99999985",
+}
 
 
 @pytest.fixture(scope="module")
@@ -109,6 +115,12 @@ def world(engine: object) -> Iterator[World]:
                 _bar(ids["halted"], ENTRY, 50, 50, volume=0),
                 _bar(ids["wild"], FILED, 10, 10),
                 _bar(ids["wild"], ENTRY, 14, 14),
+                # 정확히 +30.0% 상한가 갭: 제한폭 안의 실제 거래다.
+                _bar(ids["limit_up"], FILED, 1480, 1490),
+                _bar(ids["limit_up"], ENTRY, 1937, 1937),
+                # 시가 -28%, 종가 +1%: 시가 대비로는 +40%지만 전날 종가 기준 제한폭 안이다.
+                _bar(ids["intraday"], FILED, 100, 100),
+                _bar(ids["intraday"], ENTRY, 72, 101),
             ]
         )
         s.commit()
@@ -143,6 +155,8 @@ def _raw() -> dict[str, object]:
             row(CORPS["strong"], 2, "현금ㆍ현물배당결정"),  # 같은 접수번호는 한 번만
             row(CORPS["halted"], 3, "주요사항보고서(자기주식취득결정)"),
             row(CORPS["wild"], 4, "주요사항보고서(자기주식취득결정)"),
+            row(CORPS["limit_up"], 7, "주요사항보고서(자기주식취득결정)"),
+            row(CORPS["intraday"], 8, "주요사항보고서(자기주식취득결정)"),
             row(CORPS["strong"], 5, "임원ㆍ주요주주특정증권등소유상황보고서"),
             row("00000000", 6, "주요사항보고서(자기주식취득결정)"),
         ],
@@ -152,16 +166,20 @@ def _raw() -> dict[str, object]:
 def test_the_next_session_is_measured_and_one_name_day_is_one_event(world: World) -> None:
     found, tally = study.candidates(world.session, _raw(), first_entry=ENTRY, last_entry=ENTRY)
     assert {c.entry for c in found} == {ENTRY}
-    assert tally["event"] == 4 and tally["not an event"] == 1 and tally["not in master"] == 1
+    assert tally["event"] == 6 and tally["not an event"] == 1 and tally["not in master"] == 1
 
     sample = study.build_sample(world.session, found, first_entry=ENTRY, last_entry=ENTRY)
-    assert [e.instrument_id for e in sample.events] == [world.ids["strong"]]
+    # 가격제한폭은 전날 종가 기준이다. 상한가 갭과 시가 대비 큰 장중 반등은 남고, 제한폭을
+    # 넘는 +40% 갭(원가격 데이터의 흔적)만 빠진다.
+    assert sorted(e.instrument_id for e in sample.events) == sorted(
+        [world.ids["strong"], world.ids["limit_up"], world.ids["intraday"]]
+    )
     assert sample.dropped == {
         "merged into the strongest filing": 1,
         "no trading": 1,
         "beyond the price limit": 1,
     }
-    event = sample.events[0]
+    event = next(e for e in sample.events if e.instrument_id == world.ids["strong"])
     # 같은 날 두 공시 중 강한 자사주 취득(0.6)이 남는다.
     assert (event.event_type, event.intensity) == ("SHAREHOLDER_RETURN", 0.6)
     assert event.gap == pytest.approx(105 / 100 - 1)
@@ -183,4 +201,4 @@ def test_a_filing_whose_entry_falls_outside_the_window_is_not_counted(world: Wor
     found, tally = study.candidates(
         world.session, _raw(), first_entry=date(2025, 6, 5), last_entry=date(2025, 6, 30)
     )
-    assert found == [] and tally["entry outside the window"] == 4
+    assert found == [] and tally["entry outside the window"] == 6
