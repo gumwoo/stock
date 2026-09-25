@@ -248,3 +248,129 @@ def build_sample(
             sample.dropped["merged into the strongest filing"] += len(members) - 1
         sample.events.append(strongest(members))
     return sample
+
+
+# --- v2: 9시~10시 1분봉 ------------------------------------------------------------
+#
+# 종목일마다 KIS 과거 분봉을 한 번 부른다. 10:00을 커서로 주면 그 시각부터 거꾸로 120개가 와서
+# 09:00~10:00이 한 번에 들어온다(그 앞은 전날 시간외 봉이라 날짜로 거른다). 받은 봉은 파일에만
+# 둔다. `minute_bar`에 한 시간만 넣으면 저녁 장중 분석이 그날을 반쪽 기록으로 읽을 수 있다.
+# 호출은 운영과 같은 한도 원장과 KIS 실행 잠금을 지난다. 속도 초과 거절이 오면 멈추고, 받은
+# 것까지 저장한다. 50회마다 저장하므로 끊겨도 이어서 받는다.
+
+FIRST_HOUR_CURSOR = "100000"
+SAVE_EVERY = 50
+
+
+def _key(instrument_id: int, day: date) -> str:
+    return f"{instrument_id}:{day.isoformat()}"
+
+
+def fetch_first_hours(
+    session: Session, events: Sequence[EventDay], path: Path, *, limit: int | None = None
+) -> dict[str, Any]:
+    """표본 종목일의 09:00~10:00 1분봉을 파일에 모은다. 이미 있는 종목일은 건너뛴다."""
+    import time
+
+    from app.collectors.base import RateLimitedError, SkipCollection, UpstreamUnavailableError
+    from app.collectors.kis import KisClient
+    from app.collectors.kis_minute import STOCK_PATH, STOCK_TR, kis_run_lock
+
+    data: dict[str, Any] = (
+        json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"days": {}}
+    )
+    done: dict[str, Any] = data["days"]
+    todo = [e for e in events if _key(e.instrument_id, e.day) not in done]
+    if limit is not None:
+        todo = todo[:limit]
+    codes = {
+        e.instrument_id: instrument_repo.current_symbol(session, e.instrument_id) for e in todo
+    }
+    calls = 0
+    try:
+        with KisClient() as client:
+            for e in todo:
+                key = _key(e.instrument_id, e.day)
+                code = codes.get(e.instrument_id)
+                if not code:
+                    done[key] = {"error": "no symbol"}
+                    continue
+                for _attempt in range(5):
+                    try:
+                        with kis_run_lock():
+                            body, _ = client.get(
+                                STOCK_PATH,
+                                tr_id=STOCK_TR,
+                                params={
+                                    "FID_COND_MRKT_DIV_CODE": "J",
+                                    "FID_INPUT_ISCD": code,
+                                    "FID_INPUT_HOUR_1": FIRST_HOUR_CURSOR,
+                                    "FID_INPUT_DATE_1": e.day.strftime("%Y%m%d"),
+                                    "FID_PW_DATA_INCU_YN": "Y",
+                                    "FID_FAKE_TICK_INCU_YN": "N",
+                                },
+                            )
+                        break
+                    except SkipCollection:
+                        # 다른 KIS 실행이 돌고 있다. 두 배 속도로 부르지 않고 기다린다.
+                        time.sleep(60)
+                else:
+                    raise SkipCollection("another KIS run kept the lock")
+                calls += 1
+                bars = []
+                for row in body.get("output2") or []:
+                    if not isinstance(row, dict):
+                        continue
+                    if str(row.get("stck_bsop_date")) != e.day.strftime("%Y%m%d"):
+                        continue
+                    label = str(row.get("stck_cntg_hour") or "")[:4]
+                    if "0900" <= label <= "1000":
+                        bars.append(
+                            [
+                                label,
+                                float(row["stck_oprc"]),
+                                float(row["stck_hgpr"]),
+                                float(row["stck_lwpr"]),
+                                float(row["stck_prpr"]),
+                            ]
+                        )
+                done[key] = {"bars": sorted(bars)}
+                if calls % SAVE_EVERY == 0:
+                    path.write_text(json.dumps(data), encoding="utf-8")
+                    logger.info("study first hours: %d/%d calls", calls, len(todo))
+    except RateLimitedError:
+        logger.error("study first hours: KIS refused the rate; stopping, progress kept")
+        raise
+    except UpstreamUnavailableError as exc:
+        logger.error("study first hours: KIS unavailable (%s); progress kept", exc)
+        raise
+    finally:
+        path.write_text(json.dumps(data), encoding="utf-8")
+    return data
+
+
+def first_hour_sample(
+    events: Sequence[EventDay], minutes: dict[str, Any]
+) -> tuple[list[Any], Counter[str]]:
+    """v1 표본의 종목일을 첫 1시간 값으로. 봉이 없거나 09:00 봉이 없는 날은 빼고 센다."""
+    from app.scoring.disclosure_first_hour import FirstHour, MinuteBar, measure
+
+    out: list[FirstHour] = []
+    dropped: Counter[str] = Counter()
+    for e in events:
+        got = minutes["days"].get(_key(e.instrument_id, e.day))
+        if got is None:
+            dropped["not fetched"] += 1
+            continue
+        if "error" in got:
+            dropped[f"fetch: {got['error']}"] += 1
+            continue
+        measured = measure([MinuteBar(*b) for b in got["bars"]])
+        if measured is None:
+            dropped["no 09:00 bar or nothing sellable"] += 1
+            continue
+        ret, mfe, mae = measured
+        out.append(
+            FirstHour(e.day, e.instrument_id, e.event_type, e.sentiment, e.intensity, ret, mfe, mae)
+        )
+    return out, dropped

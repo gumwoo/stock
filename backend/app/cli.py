@@ -664,6 +664,48 @@ def cmd_disclosure_study(data: str, first: str, last: str, fetch_prices: bool, p
     return 0
 
 
+def cmd_disclosure_first_hour(
+    data: str, minutes: str, first: str, last: str, fetch: bool, limit: int | None
+) -> int:
+    """공시 이벤트 분석 v2(9시~10시). `--fetch`면 KIS 1분봉을 받는다(종목일당 1회, 한도 원장 경유)."""
+    import json
+    from datetime import date
+    from pathlib import Path
+
+    from app.scoring import disclosure_first_hour as v2
+    from app.scoring.disclosure_study import split as split_days
+    from app.services import disclosure_study_service as study
+
+    first_entry, last_entry = date.fromisoformat(first), date.fromisoformat(last)
+    raw = json.loads(Path(data).read_text(encoding="utf-8"))
+    with session_scope() as session:
+        found, _ = study.candidates(session, raw, first_entry=first_entry, last_entry=last_entry)
+        sample = study.build_sample(session, found, first_entry=first_entry, last_entry=last_entry)
+        path = Path(minutes)
+        if fetch:
+            study.fetch_first_hours(session, sample.events, path, limit=limit)
+    got = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"days": {}}
+    events, dropped = study.first_hour_sample(sample.events, got)
+    days = sorted({e.day for e in events})
+    study_days, holdout = split_days(days)
+    print(
+        f"표본: 종목일 {len(events)}개 / v1 표본 {len(sample.events)}개, 진입일 {len(days)}일 "
+        f"(연구 {len(study_days)}일, 홀드아웃 {len(holdout)}일)"
+    )
+    print(f"  뺀 것: {dict(dropped)}")
+    print(f"질문 (v{v2.STUDY_VERSION}, 평균은 %p, 비용 전)")
+    for a in v2.evaluate(events):
+        halves = ", ".join(_fmt(h * 100 if h is not None else None, "+.3f") for h in a.halves)
+        print(
+            f"  {a.key} {a.state:<16} 연구 {a.days}일 평균 "
+            f"{_fmt(a.mean * 100 if a.mean is not None else None, '+.3f')} "
+            f"t {_fmt(a.t, '.2f')} 절반 [{halves}] | 홀드아웃 {a.holdout_days}일 평균 "
+            f"{_fmt(a.holdout_mean * 100 if a.holdout_mean is not None else None, '+.3f')}"
+            f"  {a.text}"
+        )
+    return 0
+
+
 def cmd_intraday(analyze: bool) -> int:
     """What the minute bars say: the usual day, and the morning lists against their questions."""
     with session_scope() as session:
@@ -902,6 +944,17 @@ def main(argv: list[str] | None = None) -> int:
     study.add_argument("--fetch-prices", action="store_true", help="fetch daily bars first")
     study.add_argument("--period", default="6mo")
 
+    fh = sub.add_parser(
+        "disclosure-first-hour",
+        help="event study v2, 09:00-10:00; reads only unless --fetch (KIS minute bars)",
+    )
+    fh.add_argument("--data", required=True, help="the disclosure file")
+    fh.add_argument("--minutes", required=True, help="the first-hour minute file, read or filled")
+    fh.add_argument("--first", required=True)
+    fh.add_argument("--last", required=True)
+    fh.add_argument("--fetch", action="store_true", help="fetch missing name-days from KIS")
+    fh.add_argument("--limit", type=int, default=None, help="at most this many calls")
+
     watch = sub.add_parser("watchlist", help="the newest morning watchlist; reads only")
     watch.add_argument("--take", action="store_true", help="freeze today's if none exists")
 
@@ -962,6 +1015,10 @@ def main(argv: list[str] | None = None) -> int:
         case "disclosure-study":
             return cmd_disclosure_study(
                 args.data, args.first, args.last, args.fetch_prices, args.period
+            )
+        case "disclosure-first-hour":
+            return cmd_disclosure_first_hour(
+                args.data, args.minutes, args.first, args.last, args.fetch, args.limit
             )
         case "preopen":
             return cmd_preopen(args.action, args.asof)

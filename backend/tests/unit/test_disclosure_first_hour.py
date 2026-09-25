@@ -86,3 +86,30 @@ def test_room_up_against_room_down() -> None:
     events = [_event(n, ret=0.0, mfe=0.03, mae=-0.01 - 0.001 * (n % 2)) for n in range(60)]
     f4 = next(a for a in evaluate(events) if a.key == "F4")
     assert f4.mean == pytest.approx(0.0195, abs=1e-3)
+
+
+def test_the_v1_sample_is_turned_into_first_hours_and_the_rest_counted() -> None:
+    from app.scoring.disclosure_study import EventDay
+    from app.services.disclosure_study_service import first_hour_sample
+
+    def ev(i: int) -> EventDay:
+        return EventDay(START, i, "ORDER_CONTRACT", 0.5, 0.5, 0.01, 0.0, 0.0, 0.0)
+
+    minutes = {
+        "days": {
+            f"1:{START.isoformat()}": {
+                "bars": [["0900", 100, 101, 99, 100], ["0901", 100, 103, 98, 102]]
+            },
+            f"2:{START.isoformat()}": {"error": "no symbol"},
+            f"3:{START.isoformat()}": {"bars": [["0901", 100, 101, 99, 100]]},
+        }
+    }
+    got, dropped = first_hour_sample([ev(1), ev(2), ev(3), ev(4)], minutes)
+    assert [(e.instrument_id, e.ret, e.mfe, e.mae) for e in got] == [
+        (1, pytest.approx(0.02), pytest.approx(0.03), pytest.approx(-0.02))
+    ]
+    assert dropped == {
+        "fetch: no symbol": 1,
+        "no 09:00 bar or nothing sellable": 1,
+        "not fetched": 1,
+    }
