@@ -394,6 +394,7 @@ def _open_hits(
     limit: int,
     instrument_ids: Collection[int] | None,
     extra: Any = None,
+    after_hit_id: int | None = None,
 ) -> list[OpenHit]:
     latest = _latest()
     stmt = (
@@ -420,7 +421,17 @@ def _open_hits(
         stmt = stmt.where(extra(latest))
     if instrument_ids is not None:
         stmt = stmt.where(NewsQueryHit.instrument_id.in_(list(instrument_ids)))
+    if after_hit_id is not None:
+        # 이 id 뒤에 처음 본 종목-기사 쌍만. 아침 보충 스윕이 새로 가져온 것만
+        # 읽게 하는 조건이다. 최신순만으로는 그걸 보장하지 못하고, `created_at`은
+        # 트랜잭션 시작 시각이라 스윕 전에 열린 트랜잭션이면 경계가 어긋난다.
+        stmt = stmt.where(NewsQueryHit.id > after_hit_id)
     return [OpenHit(*row) for row in session.execute(stmt).all()]
+
+
+def last_hit_id(session: Session) -> int:
+    """지금까지 기록된 가장 큰 종목-기사 쌍 id. 없으면 0."""
+    return int(session.execute(select(func.max(NewsQueryHit.id))).scalar() or 0)
 
 
 def pending_for_model(
@@ -429,6 +440,7 @@ def pending_for_model(
     limit: int,
     prompt_version: int,
     instrument_ids: Collection[int] | None = None,
+    after_hit_id: int | None = None,
 ) -> list[OpenHit]:
     """Hits for the model to judge under `prompt_version`, newest article first.
 
@@ -444,6 +456,7 @@ def pending_for_model(
         decision=None,
         limit=limit,
         instrument_ids=instrument_ids,
+        after_hit_id=after_hit_id,
         extra=lambda latest: or_(
             and_(
                 latest.c.decided_by == Decider.RULE,
@@ -530,6 +543,7 @@ def confirmed_unread(
     prompt_version: int,
     limit: int,
     instrument_ids: Collection[int] | None = None,
+    after_hit_id: int | None = None,
 ) -> list[OpenHit]:
     """CONFIRMED hits no reading exists for under this model and prompt, newest first."""
 
@@ -551,6 +565,7 @@ def confirmed_unread(
         limit=limit,
         instrument_ids=instrument_ids,
         extra=unread,
+        after_hit_id=after_hit_id,
     )
 
 

@@ -10,12 +10,14 @@ connection of its own for as long as the socket is open.
 Korean trading days; outside that the gateway waits.
 
 **What it subscribes to** is the morning's list — up to forty names, KIS's
-sample caps a connection at forty — or, on a day without one, the tracked
-Korean names up to the same number, and says which.
+sample caps a connection at forty — or, only on a day with no list at all,
+the tracked Korean names up to the same number, and says which. A list with
+no names is an answer, not a missing list.
 
 **The earlier part of the day** is filled once per name from KIS's minute
 bars, through the same reserved, paced client and the same one-KIS-run lock
-as the evening's collection, so a chart opened at 11:00 starts at 09:00.
+as the evening's collection, so a chart opened at 11:00 starts at 09:00. A
+socket opened before the 09:00 open fills nothing: there is nothing earlier.
 
 Nothing here is stored. The record is the REST minute bars fetched after the
 close.
@@ -44,7 +46,7 @@ from app.db import _lock_key, get_engine, session_scope
 from app.models import Instrument, WatchlistMember, WatchlistSnapshot
 from app.realtime.kis_feed import LiveBook, parse_control, parse_trades, subscribe_message
 from app.repositories import instrument_repo
-from app.scoring.watchlist import MAX_MEMBERS
+from app.scoring.watchlist import MAX_MEMBERS, STRATEGY_VERSION_V2
 
 logger = logging.getLogger(__name__)
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -64,13 +66,30 @@ class LiveMember:
     overlay_points: float | None
     attention_surge: float | None
     regime: str | None
+    total_score: float | None = None
+    prefetch_status: str | None = None
+    abstained_reason: str | None = None
+
+
+# 게이트웨이가 알리는 목록 출처. 화면이 이 코드로 문구를 고른다.
+MORNING_LIST = "morning list"
+MORNING_LIST_EMPTY = "morning list (no names met the conditions)"
+TRACKED_FALLBACK = "tracked names (no morning list today)"
 
 
 def load_members(day: date) -> tuple[str, list[LiveMember]]:
-    """Today's morning list, or the tracked Korean names when there is none."""
+    """오늘 아침 목록. 목록 자체가 없을 때만 추적 종목을 참고용으로 돌려준다.
+
+    같은 날 V1과 V2 목록이 함께 있을 수 있어 V2를 먼저 고른다. 날짜로만 찾으면
+    두 행이 나와 예외가 난다. V2 목록이 0개인 날은 0개가 답이다. "오늘 이유가
+    있는 종목이 없다"를 추적 종목으로 덮으면 V1로 되돌아간다.
+    """
     with session_scope() as session:
         snap = session.execute(
-            select(WatchlistSnapshot).where(WatchlistSnapshot.session_date == day)
+            select(WatchlistSnapshot)
+            .where(WatchlistSnapshot.session_date == day)
+            .order_by((WatchlistSnapshot.strategy_version == STRATEGY_VERSION_V2).desc())
+            .limit(1)
         ).scalar_one_or_none()
         found: list[LiveMember] = []
         if snap is not None:
@@ -93,9 +112,12 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
                             m.overlay_points,
                             m.attention_surge,
                             m.regime,
+                            m.total_score,
+                            m.prefetch_status,
+                            m.abstained_reason,
                         )
                     )
-            return "morning list", found
+            return (MORNING_LIST if rows else MORNING_LIST_EMPTY), found
         tracked = instrument_repo.list_active(session, asof=day, market=Market.KR, tracked=True)
         for n, inst in enumerate(tracked[:MAX_MEMBERS], 1):
             code = instrument_repo.current_symbol(session, inst.instrument_id)
@@ -105,7 +127,7 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
                         inst.instrument_id, code, inst.name, n, ("TRACKED",), None, None, None
                     )
                 )
-        return "tracked names (no morning list today)", found
+        return TRACKED_FALLBACK, found
 
 
 def seed_minutes(
@@ -305,11 +327,18 @@ class Gateway:
                 self.status = "live"
                 self.refused = set()
                 self._connected_at = self._clock()
-                seeding = asyncio.create_task(self._fill(day))
+                # 개장 전에 연결했으면 채울 과거 분봉이 없다. 그때 채우면 종목마다
+                # 오늘 몫이 빈 REST 호출만 나간다. 장중에 늦게 연결했을 때만 채운다.
+                seeding = (
+                    asyncio.create_task(self._fill(day))
+                    if self._clock() >= MarketCalendar(Market.KR).session_open(day)
+                    else None
+                )
                 try:
                     await self._relay(socket, until)
                 finally:
-                    seeding.cancel()
+                    if seeding is not None:
+                        seeding.cancel()
             self.status = "closed for the day"
             return True
         finally:
@@ -388,6 +417,9 @@ class Gateway:
                     "overlay_points": m.overlay_points,
                     "attention_surge": m.attention_surge,
                     "regime": m.regime,
+                    "total_score": m.total_score,
+                    "prefetch_status": m.prefetch_status,
+                    "abstained_reason": m.abstained_reason,
                     "last": (
                         {
                             "price": t.price,

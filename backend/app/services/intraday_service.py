@@ -34,8 +34,8 @@ from app.repositories import market_index_repo, minute_repo
 from app.repositories.minute_repo import COMPLETE
 from app.scoring.intraday import ANALYSIS_VERSION, Bar, DaySummary, bucket_of, index_day, summarize
 from app.scoring.intraday_review import MemberDay, Result, evaluate
-from app.scoring.watchlist import SELECTION_VERSION as WATCHLIST_SELECTION
-from app.scoring.watchlist import STRATEGY_VERSION as WATCHLIST_STRATEGY
+from app.scoring.watchlist import SELECTION_VERSION_V2 as WATCHLIST_SELECTION
+from app.scoring.watchlist import STRATEGY_VERSION_V2 as WATCHLIST_STRATEGY
 from app.services import llm_service, regime_service, watchlist_service
 
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -317,6 +317,9 @@ def report(session: Session) -> IntradayReport:
     )
 
     summary = {(r.instrument_id, r.session_date): r for r in rows}
+    # V2 목록만 센다. 첫 실전 목록(9/28)부터 V2이고, H1~H5의 20일·60일도 V2
+    # 기록으로 센다. 추적 종목을 무조건 넣던 V1과 섞으면 "오늘 이유가 있는
+    # 종목"에 대한 질문이 흐려진다. 질문은 이유 코드와 순위만 보므로 그대로다.
     listed = session.execute(
         select(WatchlistMember, WatchlistSnapshot.session_date)
         .join(WatchlistSnapshot, WatchlistSnapshot.id == WatchlistMember.snapshot_id)

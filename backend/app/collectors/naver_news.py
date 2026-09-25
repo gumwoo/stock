@@ -1024,6 +1024,22 @@ class NaverNewsCollector(BaseCollector):
 
     # --- collection -------------------------------------------------------
 
+    def targets(self, universe: list[Instrument]) -> list[Instrument]:
+        """이번 실행이 물을 종목. 전체 스윕은 마스터 전체다."""
+        if self.only is not None:
+            return [i for i in universe if i.name in self.only]
+        if self.max_instruments is not None and self.max_instruments < len(universe):
+            return universe[: self.max_instruments]
+        return universe
+
+    def expected(self, universe: list[Instrument], targets: list[Instrument]) -> list[Instrument]:
+        """이 실행이 끝났다고 말하려면 물어야 했던 종목.
+
+        전체 스윕은 `--limit`이나 `only`로 좁혀도 마스터 전체를 기준으로 센다.
+        그래야 좁힌 실행이 PARTIAL로 남아 워터마크를 움직이지 않는다.
+        """
+        return universe
+
     def watermark(self, session: Session, *, now: datetime) -> datetime:
         """How far back this run reads.
 
@@ -1058,11 +1074,7 @@ class NaverNewsCollector(BaseCollector):
             [i.name for i in universe] + [a for v in ALIASES.values() for a in v]
         )
 
-        instruments = universe
-        if self.only is not None:
-            instruments = [i for i in universe if i.name in self.only]
-        elif self.max_instruments is not None and self.max_instruments < len(universe):
-            instruments = universe[: self.max_instruments]
+        instruments = self.targets(universe)
 
         since = self.watermark(session, now=now)
         read = saved = mentions = rejected = pending = unusable = 0
@@ -1159,7 +1171,7 @@ class NaverNewsCollector(BaseCollector):
         # Everything not asked, for whatever reason: a `--limit` or a budget
         # that ran out partway. The header used to count the companies the run
         # meant to ask, so a sweep stopped after twenty-five said sixty.
-        unasked = len(universe) - asked
+        unasked = len(self.expected(universe, instruments)) - asked
 
         if stopped_early:
             warnings.append(stopped_early)
@@ -1186,7 +1198,7 @@ class NaverNewsCollector(BaseCollector):
             warnings.append(f"{len(capped)} instruments hit the {self.max_pages}-page cap")
 
         detail = (
-            f"{asked} of {len(universe)} instruments since "
+            f"{asked} of {len(self.expected(universe, instruments))} instruments since "
             f"{since:%Y-%m-%d %H:%M}Z, {mentions} mentions, "
             f"{rejected} rejected (name absent from title and summary), "
             f"{pending} pending (name present, company not evident)"

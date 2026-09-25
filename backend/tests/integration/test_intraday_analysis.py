@@ -215,8 +215,8 @@ def test_the_report_reads_the_morning_list_against_whole_days(world: World) -> N
     snap = WatchlistSnapshot(
         session_date=DAY,
         asof=at("0850"),
-        strategy_version="PREOPEN_V1",
-        selection_version=1,
+        strategy_version="PREOPEN_V2",
+        selection_version=2,
         versions={},
         inputs={},
         pool=2,

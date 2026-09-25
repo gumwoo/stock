@@ -41,7 +41,7 @@ from app.collectors.sec_edgar import SecEdgarCollector
 from app.collectors.yfinance_history import FxRateCollector, YFinanceHistoryCollector
 from app.config import get_settings
 from app.core import logging as logging_setup
-from app.core.calendar import Market
+from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.core.types import Freshness
 from app.db import session_scope
@@ -55,10 +55,10 @@ from app.services import (
     intraday_service,
     llm_service,
     overlay_service,
+    preopen_service,
     promotion_service,
     regime_service,
     review_service,
-    watchlist_service,
 )
 from app.services.discovery_service import Candidate, Discovery
 
@@ -545,7 +545,7 @@ def cmd_watchlist(take: bool) -> int:
 
     with session_scope() as session:
         if take:
-            made = watchlist_service.take_snapshot(session)
+            made = preopen_service.take_snapshot(session)
             print(
                 "took today's snapshot"
                 if made
@@ -573,6 +573,44 @@ def cmd_watchlist(take: bool) -> int:
                 f"  {m.rank:>2}. {name:<16} overlay {_fmt(m.overlay_points, '+.1f'):>5}  "
                 f"search {_fmt(m.attention_surge, '.2f'):>5}  {', '.join(m.reasons)}"
             )
+    return 0
+
+
+def cmd_preopen(action: str, asof: str | None) -> int:
+    """장전 후보 풀. `status`와 `dry-run`은 읽기만 한다. 나머지는 그 단계를 지금 돌린다."""
+    from datetime import datetime
+
+    with session_scope() as session:
+        if action == "dry-run":
+            moment = datetime.fromisoformat(asof) if asof else utc_now()
+            result = preopen_service.dry_run(session, asof=moment)
+            print("참고용 재계산 — 그때는 07:00 사전 수집·LLM과 08:30 보충이 없었다")
+            for key, value in result.items():
+                if key != "names":
+                    print(f"  {key}: {value}")
+            for rank, name, reasons in result["names"]:  # type: ignore[attr-defined]
+                print(f"  {rank:>2}. {name:<16} {', '.join(reasons)}")
+            session.rollback()
+            return 0
+        if action == "morning":
+            preopen_service.run_morning(session)
+        elif action == "supplement":
+            preopen_service.run_supplement(session)
+        elif action == "scores":
+            preopen_service.run_scores(session)
+        day = MarketCalendar(Market.KR).local_today(utc_now())
+        pool = preopen_service.pool_for(session, day)
+        if pool is None:
+            print(f"no pool for {day}")
+            return 0
+        print(f"{pool.session_date} {pool.status}: {pool.pool_count} names, frozen {pool.asof}")
+        for stage, entry in pool.stages.items():
+            print(f"  {stage:<15} {entry}")
+        counts: dict[str, int] = {}
+        for m in preopen_service.members_of(session, pool):
+            key = m.prefetch_status or "NONE"
+            counts[key] = counts.get(key, 0) + 1
+        print(f"  prefetch: {counts}")
     return 0
 
 
@@ -797,6 +835,13 @@ def main(argv: list[str] | None = None) -> int:
     minutes.add_argument("--backfill", type=int, default=0, help="past sessions to fill")
     minutes.add_argument("--max-calls", type=int, default=200)
 
+    pre = sub.add_parser(
+        "preopen",
+        help="the morning pool (PREOPEN_V2); status and dry-run read only, the rest run that stage",
+    )
+    pre.add_argument("action", choices=["status", "morning", "supplement", "scores", "dry-run"])
+    pre.add_argument("--asof", help="dry-run moment, ISO with offset (default: now)")
+
     watch = sub.add_parser("watchlist", help="the newest morning watchlist; reads only")
     watch.add_argument("--take", action="store_true", help="freeze today's if none exists")
 
@@ -854,6 +899,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_minutes(args.backfill, args.max_calls)
         case "watchlist":
             return cmd_watchlist(args.take)
+        case "preopen":
+            return cmd_preopen(args.action, args.asof)
         case "intraday":
             return cmd_intraday(args.analyze)
         case "forward":

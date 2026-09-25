@@ -27,6 +27,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -63,6 +64,12 @@ class WatchlistSnapshot(Base):
         doc="What the morning's inputs were in: news coverage, the model's run, search trends.",
     )
     pool: Mapped[int] = mapped_column(Integer, nullable=False, doc="Names considered.")
+    pool_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("preopen_pool.id", ondelete="SET NULL"),
+        nullable=True,
+        doc="V2: 이 목록이 나온 장전 후보 풀. V1 목록에는 없다.",
+    )
     left_out: Mapped[int] = mapped_column(
         Integer, nullable=False, doc="Names with a reason that did not fit."
     )
@@ -111,6 +118,25 @@ class WatchlistMember(Base):
         nullable=True,
         doc="The newest sweep of this name's news recorded by the moment.",
     )
+
+    # V2부터: 위 점수 칸이 어디서 왔는지와 그 점수의 시점들. V1 행은 비어 있고
+    # 점수는 전날 16:40 신호(`signal_decision_at`)에서 왔다. V2 행은 08:40에
+    # 계산한 그날 관찰용 점수(`PREOPEN`)이고, 기술·재무·평가 시점을 따로 남긴다.
+    score_source: Mapped[str | None] = mapped_column(
+        String(8), nullable=True, doc="PREOPEN (V2). V1 행은 비어 있다."
+    )
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    price_data_asof: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fundamental_data_asof: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    fundamental_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    peer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    peer_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prefetch_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    abstained_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("snapshot_id", "instrument_id", name="uq_watchlist_member_name"),

@@ -15,6 +15,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -74,6 +75,15 @@ _CURRENCY: dict[Market, str] = {Market.US: "USD", Market.KR: "KRW"}
 # universe: the lookup returns None, every ratio falls back to its fixed scale,
 # and each metric says so.
 PeerLookup = Callable[[Market, datetime], PeerRatios | None]
+
+
+class _FromSourceRuns:
+    """재무 확인 시각을 수집 기록에서 읽으라는 기본값 표시."""
+
+
+# `score_instrument`의 `fundamental_checked_at` 기본값. 명시한 None("확인한 적
+# 없음")과 구별해야 해서 None 대신 쓴다.
+FROM_SOURCE_RUNS: Any = _FromSourceRuns()
 
 
 def peer_ratios(
@@ -148,6 +158,7 @@ def score_instrument(
     now: datetime | None = None,
     params: TechnicalParams | None = None,
     peers: PeerLookup | None,
+    fundamental_checked_at: datetime | None = FROM_SOURCE_RUNS,
 ) -> ScoredSignal | None:
     """Score one instrument from its stored history.
 
@@ -162,6 +173,12 @@ def score_instrument(
     Returns None when there are no bars at all — distinct from abstaining,
     which is a judgement about a known-empty factor rather than an absence of
     any data to judge.
+
+    `fundamental_checked_at`을 넘기면 재무 신선도를 수집기 전체의 마지막
+    성공이 아니라 그 시각으로 판단한다. 장전 관찰용 점수가 추적하지 않는
+    종목을 사전 수집해 채점할 때 쓴다. 그 종목은 전체 DART 실행에 들어 있지
+    않으므로, 전체 실행이 최근에 성공했다는 사실이 그 종목에 대해선 아무것도
+    말해 주지 않는다.
     """
     now = now or utc_now()
     calendar = MarketCalendar(instrument.market)
@@ -212,6 +229,7 @@ def score_instrument(
         price=float(bars[-1].close),
         now=now,
         peers=peers,
+        checked_at=fundamental_checked_at,
     )
 
     policy = POLICY
@@ -266,6 +284,7 @@ def _score_fundamental(
     price: float,
     now: datetime,
     peers: PeerLookup | None,
+    checked_at: datetime | None = FROM_SOURCE_RUNS,
 ) -> tuple[Factor, tuple[SignalReason, ...]]:
     """Score reported financials as of the same instant as the price data.
 
@@ -275,7 +294,8 @@ def _score_fundamental(
     months at a time. What matters is whether we would have noticed a new
     filing.
     """
-    checked_at = CollectorStatusLookup(session).last_success(_SOURCE_FOR[instrument.market])
+    if checked_at is FROM_SOURCE_RUNS:
+        checked_at = CollectorStatusLookup(session).last_success(_SOURCE_FOR[instrument.market])
     newest_filing = fundamental_repo.latest_filing_date(session, instrument.instrument_id)
 
     provenance = evaluate_freshness(

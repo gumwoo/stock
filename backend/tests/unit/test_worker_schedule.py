@@ -1,10 +1,9 @@
-"""The unattended reading job exists only when the owner turned it on."""
+"""워커 시간표: 장전 아침 흐름과 장 마감 뒤 작업이 제 시각에, 제 순서로 있는가."""
 
 from __future__ import annotations
 
 import pytest
 
-from app.config import get_settings
 from app.worker import build_scheduler
 
 
@@ -12,17 +11,23 @@ def job_ids() -> set[str]:
     return {job.id for job in build_scheduler().get_jobs()}
 
 
-def test_reading_news_is_not_scheduled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """It spends the owner's Claude usage with nobody at the keyboard."""
-    monkeypatch.setattr(get_settings(), "llm_schedule_enabled", False)
-    assert "news_reading_before_open" not in job_ids()
+def test_the_jobs_are_there() -> None:
     assert {
-        "naver_news_pre_open",
+        "preopen_morning",
+        "preopen_supplement",
+        "preopen_scores",
+        "watchlist_before_open",
         "naver_news_after_close",
         "daily_loop_after_kr_close",
         "us_prices_after_close",
         "sec_weekly",
     } <= job_ids()
+
+
+def test_the_old_morning_jobs_are_gone() -> None:
+    # 08:00 스윕과 08:30 해석은 07:00 체인과 08:30 보충으로 옮겼다. 남아 있으면
+    # 같은 아침에 같은 일을 두 번 한다.
+    assert not {"naver_news_pre_open", "news_reading_before_open"} & job_ids()
 
 
 def test_the_daily_loop_runs_after_the_korean_close_and_the_news_sweep() -> None:
@@ -31,13 +36,26 @@ def test_the_daily_loop_runs_after_the_korean_close_and_the_news_sweep() -> None
     assert (fields["hour"], fields["minute"], fields["day_of_week"]) == ("16", "40", "mon-fri")
 
 
-def test_reading_news_runs_before_the_open_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(get_settings(), "llm_schedule_enabled", True)
-    job = build_scheduler().get_job("news_reading_before_open")
-    assert job is not None
-    fields = {f.name: str(f) for f in job.trigger.fields}
-    assert (fields["hour"], fields["minute"]) == ("8", "30")
-    assert str(job.trigger.timezone) == "Asia/Seoul"
+def test_the_morning_runs_in_seoul_time_in_order_before_the_open() -> None:
+    scheduler = build_scheduler()
+    at = {}
+    for job_id in (
+        "preopen_morning",
+        "preopen_supplement",
+        "preopen_scores",
+        "watchlist_before_open",
+    ):
+        job = scheduler.get_job(job_id)
+        assert str(job.trigger.timezone) == "Asia/Seoul"
+        fields = {f.name: str(f) for f in job.trigger.fields}
+        assert fields["day_of_week"] == "mon-fri"
+        at[job_id] = (int(fields["hour"]), int(fields["minute"]))
+    assert at == {
+        "preopen_morning": (7, 0),
+        "preopen_supplement": (8, 30),
+        "preopen_scores": (8, 40),
+        "watchlist_before_open": (8, 50),
+    }
 
 
 class _Calendar:
@@ -110,7 +128,7 @@ def test_the_daily_loop_skips_a_holiday(monkeypatch: pytest.MonkeyPatch) -> None
     assert _loop(monkeypatch, session=False) == []
 
 
-def _sweep(monkeypatch: pytest.MonkeyPatch, *, require_close: bool) -> list[str]:
+def _sweep(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     from contextlib import contextmanager
 
     import app.worker as worker
@@ -132,23 +150,13 @@ def _sweep(monkeypatch: pytest.MonkeyPatch, *, require_close: bool) -> list[str]
     monkeypatch.setattr(worker, "run_collector", fake_run)
     monkeypatch.setattr(worker, "QuotaGuard", lambda: type("G", (), {"prune": lambda s: 0})())
     monkeypatch.setattr(worker, "NaverNewsCollector", lambda: type("NaverNewsCollector", (), {})())
-    monkeypatch.setattr(worker.llm_service, "focus_ids", lambda s: [7, 3])
-    worker._collect_korean_news(require_close=require_close)
+    worker._collect_korean_news()
     return steps
 
 
-def test_search_trends_are_fetched_in_the_morning_for_the_names_in_focus(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    assert _sweep(monkeypatch, require_close=False) == [
-        "NaverNewsCollector",
-        "DartDisclosureCollector",
-        "NaverDataLabCollector:[3, 7]",
-    ]
-
-
 def test_the_evening_sweep_does_not_fetch_search_trends(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert _sweep(monkeypatch, require_close=True) == [
+    # 검색 추세는 07:00 체인이 풀 종목에 대해 받는다.
+    assert _sweep(monkeypatch) == [
         "NaverNewsCollector",
         "DartDisclosureCollector",
     ]
@@ -161,16 +169,3 @@ def test_minute_bars_have_jobs_of_their_own() -> None:
     job = build_scheduler().get_job("kis_minutes_after_close")
     fields = {f.name: str(f) for f in job.trigger.fields}
     assert (fields["hour"], fields["minute"]) == ("16", "20")
-
-
-def test_the_morning_watchlist_is_frozen_after_the_reading_and_before_the_open(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(get_settings(), "llm_schedule_enabled", True)
-    scheduler = build_scheduler()
-    at = {}
-    for job_id in ("naver_news_pre_open", "news_reading_before_open", "watchlist_before_open"):
-        fields = {f.name: str(f) for f in scheduler.get_job(job_id).trigger.fields}
-        at[job_id] = (int(fields["hour"]), int(fields["minute"]))
-    assert at["naver_news_pre_open"] < at["news_reading_before_open"] < at["watchlist_before_open"]
-    assert at["watchlist_before_open"] < (9, 0)

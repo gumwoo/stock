@@ -163,3 +163,19 @@
     max-height: 220px;
   }
 }
+
+.live__disclaimer {
+  margin: 4px 0 0;
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+}
+
+.live__fact--warn {
+  color: var(--c-warn);
+}
+
+.live__abstain {
+  margin: 6px 0 0;
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}

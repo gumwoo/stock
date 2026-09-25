@@ -47,9 +47,17 @@ function statusLabel(status: string): string {
 function sourceLabel(source: string | null): string {
   if (!source) return "";
   if (source === "morning list") return "오늘 아침 목록";
-  if (source.startsWith("tracked names")) return "추적 종목 (오늘 아침 목록 없음)";
+  if (source.startsWith("morning list (no names")) return "오늘 조건에 맞는 종목 없음";
+  if (source.startsWith("tracked names")) return "오늘 목록 없음(생성 실패) · 추적 종목을 참고용으로 표시";
   return source;
 }
+
+/** 사전 수집 상태 중 화면에 알릴 것만. 받았거나 이미 최신이면 표시하지 않는다. */
+const PREFETCH: Record<string, string> = {
+  SKIPPED_CAP: "데이터 미수집 (하루 상한 초과)",
+  FAILED: "데이터 수집 실패",
+  NO_DATA: "가격 데이터 없음",
+};
 
 type Interval = "1m" | "1s";
 
@@ -203,6 +211,10 @@ export function Live() {
       <header className="live__head">
         <div>
           <h1 className="live__title">오늘의 관찰</h1>
+          <p className="live__disclaimer">
+            관찰 목록 — 매수 추천이 아닙니다. 오늘 뉴스·공시·검색 급증이 있어 확인할 가치가 있는
+            종목입니다.
+          </p>
           <p className="live__status">
             {state
               ? `${statusLabel(state.status)}${state.source ? ` · ${sourceLabel(state.source)}` : ""}`
@@ -247,7 +259,13 @@ export function Live() {
               </button>
             </li>
           ))}
-          {state && state.members.length === 0 && <li className="live__empty">볼 종목이 없습니다.</li>}
+          {state && state.members.length === 0 && (
+            <li className="live__empty">
+              {state.source?.startsWith("morning list (no names")
+                ? "오늘 조건에 맞는 종목이 없습니다."
+                : "볼 종목이 없습니다."}
+            </li>
+          )}
         </ol>
 
         <div className="live__main">
@@ -272,7 +290,14 @@ export function Live() {
                   검색량 {member.attention_surge == null ? "–" : `${member.attention_surge.toFixed(2)}배`}
                 </span>
                 {member.regime && <span className="live__fact">{REGIMES[member.regime] ?? member.regime}</span>}
+                <span className="live__fact">
+                  관찰용 점수 {member.total_score == null ? "–" : member.total_score.toFixed(1)}
+                </span>
+                {member.prefetch_status && PREFETCH[member.prefetch_status] && (
+                  <span className="live__fact live__fact--warn">{PREFETCH[member.prefetch_status]}</span>
+                )}
               </div>
+              {member.abstained_reason && <p className="live__abstain">점수 보류: {member.abstained_reason}</p>}
             </div>
           )}
           <div ref={container} className="live__chart" />

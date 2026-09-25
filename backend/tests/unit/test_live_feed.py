@@ -254,3 +254,35 @@ def test_a_holiday_has_no_session() -> None:
     clock = [datetime(2026, 9, 25, 1, 0, tzinfo=UTC)]  # Chuseok, 10:00 in Seoul
     g = gateway(Socket([], clock), Lock(), clock, [])
     assert g.window(clock[0]) is None
+
+
+def _count_fills(g: Gateway) -> list[date]:
+    """`_fill`을 부른 날짜를 모은다. 부르는 순간 기록하므로 태스크 실행 순서와 무관하다."""
+    calls: list[date] = []
+
+    async def nothing() -> None:
+        return None
+
+    def fill(day: date) -> Any:
+        calls.append(day)
+        return nothing()
+
+    g._fill = fill  # type: ignore[method-assign]
+    return calls
+
+
+def test_a_socket_opened_before_the_open_fills_no_earlier_minutes() -> None:
+    # 08:55에 연결하면 오늘 채울 분봉이 없다. 채우면 종목마다 빈 REST 호출만 나간다.
+    clock = [datetime(2026, 9, 22, 23, 55, tzinfo=UTC)]  # 08:55 in Seoul
+    g = gateway(Socket([], clock), Lock(), clock, [])
+    calls = _count_fills(g)
+    assert asyncio.run(g.session_once()) is True
+    assert calls == []
+
+
+def test_a_socket_opened_during_the_session_fills_the_earlier_minutes() -> None:
+    clock = [datetime(2026, 9, 23, 1, 0, tzinfo=UTC)]  # 10:00 in Seoul
+    g = gateway(Socket([], clock), Lock(), clock, [])
+    calls = _count_fills(g)
+    assert asyncio.run(g.session_once()) is True
+    assert calls == [date(2026, 9, 23)]

@@ -49,6 +49,7 @@ from app.models.portfolio import (
     Transaction,
     TransactionSide,
 )
+from app.models.preopen import PreopenPool, PreopenPoolMember
 from app.models.promotion import InstrumentPromotion
 from app.models.quota import ApiCallBucket
 from app.models.signal import (
@@ -101,6 +102,8 @@ __all__ = [
     "NewsSource",
     "NewsSweepCoverage",
     "PortfolioSnapshot",
+    "PreopenPool",
+    "PreopenPoolMember",
     "RuleAudit",
     "SampleType",
     "SearchTrend",

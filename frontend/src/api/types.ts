@@ -160,6 +160,10 @@ export interface LiveMember {
   overlay_points: number | null;
   attention_surge: number | null;
   regime: string | null;
+  /** 08:40에 계산한 그날 관찰용 점수. 참고용이고 선정 기준이 아니다. */
+  total_score: number | null;
+  prefetch_status: string | null;
+  abstained_reason: string | null;
   last: { price: number; change_pct: number; day_volume: number } | null;
 }
 

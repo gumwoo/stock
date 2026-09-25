@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Collection
 from datetime import datetime, time, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
@@ -138,6 +139,21 @@ def _inputs(
     }
 
 
+def versions_used(overlays: dict[int, Any]) -> dict[str, object]:
+    """목록을 고를 때 쓰인 규칙과 모델의 버전. V1과 V2가 같은 키로 남긴다."""
+    return {
+        "overlay": overlay_service.PARAMS.version,
+        "reading_model": next(iter(overlays.values())).model if overlays else None,
+        "relevance_rule": RELEVANCE_RULE_VERSION,
+        "relevance_prompt": RELEVANCE_PROMPT_VERSION,
+        "sentiment_prompt": SENTIMENT_PROMPT_VERSION,
+        "attention": attention_service.PARAMS.version,
+        "regime": regime_service.PARAMS.version,
+        "disclosure_rule": disclosure_events.RULE_VERSION,
+        "signal_strategy": SIGNAL_STRATEGY,
+    }
+
+
 def take_snapshot(
     session: Session,
     *,
@@ -217,17 +233,7 @@ def take_snapshot(
         asof=asof,
         strategy_version=STRATEGY_VERSION,
         selection_version=SELECTION_VERSION,
-        versions={
-            "overlay": overlay_service.PARAMS.version,
-            "reading_model": next(iter(overlays.values())).model if overlays else None,
-            "relevance_rule": RELEVANCE_RULE_VERSION,
-            "relevance_prompt": RELEVANCE_PROMPT_VERSION,
-            "sentiment_prompt": SENTIMENT_PROMPT_VERSION,
-            "attention": attention_service.PARAMS.version,
-            "regime": regime_service.PARAMS.version,
-            "disclosure_rule": disclosure_events.RULE_VERSION,
-            "signal_strategy": SIGNAL_STRATEGY,
-        },
+        versions=versions_used(overlays),
         inputs=_inputs(session, asof, morning, swept, [p.instrument_id for p in chosen.picks]),
         pool=len(pool_ids),
         left_out=chosen.left_out,

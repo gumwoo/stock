@@ -17,7 +17,6 @@ import logging
 import signal
 import sys
 from collections.abc import Callable
-from functools import partial
 from types import FrameType
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -32,7 +31,6 @@ from app.collectors.kis_minute import (
     KisMinuteCollector,
 )
 from app.collectors.market_index import MarketIndexCollector
-from app.collectors.naver_datalab import NaverDataLabCollector
 from app.collectors.naver_news import NaverNewsCollector
 from app.collectors.quota import QuotaGuard
 from app.collectors.sec_edgar import SecEdgarCollector
@@ -45,10 +43,9 @@ from app.db import advisory_lock, session_scope
 from app.services import (
     forward_service,
     intraday_service,
-    llm_service,
+    preopen_service,
     regime_service,
     scoring_service,
-    watchlist_service,
 )
 
 # Today's names at about four calls each, and the rest as backfill: a tenth of
@@ -87,11 +84,10 @@ def guarded(job_name: str, fn: Callable[[], None]) -> Callable[[], None]:
     return run
 
 
-# Twice a day: an hour before the opening bell, and after the close. Written
-# in the market's own timezone rather than UTC, which is what keeps NYSE from
-# drifting an hour twice a year — it closes at 21:00 UTC in winter and 20:00 in
-# summer. The times are margin, not precision; `has_closed` does the deciding.
-_KR_PRE_OPEN = CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone="Asia/Seoul")
+# After the close. Written in the market's own timezone rather than UTC, which
+# is what keeps NYSE from drifting an hour twice a year — it closes at 21:00
+# UTC in winter and 20:00 in summer. The time is margin, not precision;
+# `has_closed` does the deciding. 아침 스윕은 07:00 장전 체인 안으로 옮겼다.
 _KR_AFTER_CLOSE = CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone="Asia/Seoul")
 # The daily loop the forward test lives on (Phase 4-8). Prices for the Korean
 # session once it has closed and the 16:00 news sweep has had its ten
@@ -111,21 +107,24 @@ _KR_INDEX_MINUTES = (
     CronTrigger(day_of_week="mon-fri", hour="10-15", minute=0, timezone="Asia/Seoul"),
     CronTrigger(day_of_week="mon-fri", hour=15, minute=40, timezone="Asia/Seoul"),
 )
-# After the morning sweep (08:00, about ten minutes) and before the open. The
-# morning watchlist at 08:50 is chosen on what the model has read by then, and
-# a signal at the close sees it too; reading after the open would leave the
-# morning's news out of the morning's choice.
-_KR_READ_BEFORE_OPEN = CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone="Asia/Seoul")
-# The morning watchlist, frozen ten minutes before the open.
+# PREOPEN_V2 아침 흐름 (`preopen_service`). 07:00 체인은 전체 스윕 → 풀 확정 →
+# 검색 추세 → 사전 수집 → LLM을 한 작업 안에서 순서대로 돈다. 08:30 보충과
+# 08:40 점수는 시각에 시작하지만, 앞 단계가 끝났는지는 풀의 단계 상태로
+# 확인하고 기다린다. 08:50 목록은 개장 10분 전에 얼린다.
+_KR_PREOPEN_MORNING = CronTrigger(day_of_week="mon-fri", hour=7, minute=0, timezone="Asia/Seoul")
+_KR_PREOPEN_SUPPLEMENT = CronTrigger(
+    day_of_week="mon-fri", hour=8, minute=30, timezone="Asia/Seoul"
+)
+_KR_PREOPEN_SCORES = CronTrigger(day_of_week="mon-fri", hour=8, minute=40, timezone="Asia/Seoul")
 _KR_WATCHLIST = CronTrigger(day_of_week="mon-fri", hour=8, minute=50, timezone="Asia/Seoul")
 
 
-def _collect_korean_news(*, require_close: bool) -> None:
-    """Sweep Korean news, if today is a day worth sweeping.
+def _collect_korean_news() -> None:
+    """Sweep Korean news after the close, if today had a session that has ended.
 
-    The pre-open run wants a session today; the post-close run wants that
-    session to be over. A holiday fails both, which saves the calls and keeps
-    `collector_run` from filling with rows that look like ordinary weekdays.
+    A holiday fails the check, which saves the calls and keeps `collector_run`
+    from filling with rows that look like ordinary weekdays. 아침 스윕과 검색
+    추세는 07:00 장전 체인(`preopen_service.run_morning`)이 한다.
     """
     calendar = MarketCalendar(Market.KR)
     now = utc_now()
@@ -134,7 +133,7 @@ def _collect_korean_news(*, require_close: bool) -> None:
     if not calendar.is_session(today):
         logger.info("naver_news: KRX is closed on %s", today)
         return
-    if require_close and not calendar.has_closed(now):
+    if not calendar.has_closed(now):
         logger.info("naver_news: KRX session on %s has not finished", today)
         return
 
@@ -147,14 +146,9 @@ def _collect_korean_news(*, require_close: bool) -> None:
 
     with session_scope() as session:
         run_collector(NaverNewsCollector(), session)
-        # Event disclosures ride along. The morning run is the one that
+        # Event disclosures ride along. The morning chain's run is the one that
         # matters: last evening's filings are on record before today's close.
         run_collector(DartDisclosureCollector(), session)
-        if not require_close:
-            # Search trends for the names in focus, ending yesterday: stored
-            # before the close, so today's signals read them.
-            focus = llm_service.focus_ids(session)
-            run_collector(NaverDataLabCollector(instrument_ids=focus), session)
 
 
 def _daily_loop() -> None:
@@ -224,9 +218,24 @@ def _kr_index_minutes() -> None:
         run_collector(KisIndexMinuteCollector(), session)
 
 
+def _preopen_morning() -> None:
+    with session_scope() as session:
+        preopen_service.run_morning(session)
+
+
+def _preopen_supplement() -> None:
+    with session_scope() as session:
+        preopen_service.run_supplement(session)
+
+
+def _preopen_scores() -> None:
+    with session_scope() as session:
+        preopen_service.run_scores(session)
+
+
 def _watchlist() -> None:
     with session_scope() as session:
-        watchlist_service.take_snapshot(session)
+        preopen_service.take_snapshot(session)
 
 
 def _us_prices() -> None:
@@ -238,26 +247,6 @@ def _us_prices() -> None:
 def _sec_weekly() -> None:
     with session_scope() as session:
         run_collector(SecEdgarCollector(), session)
-
-
-def _read_korean_news() -> None:
-    """Judge undecided hits and read confirmed articles for tracked names.
-
-    Tracked names and recent candidates only, and a bounded number of each, within the
-    subscription's limits: this is the owner's Claude usage, spent unattended.
-    """
-    calendar = MarketCalendar(Market.KR)
-    if not calendar.is_session(calendar.local_today(utc_now())):
-        return
-    limit = get_settings().llm_scheduled_limit
-    with session_scope() as session:
-        focus = llm_service.focus_ids(session)
-        judged = llm_service.judge_pending(session, limit=limit, instrument_ids=focus)
-        logger.info("judge-news: %s", judged)
-        if judged.stopped:
-            return
-        read = llm_service.read_confirmed(session, limit=limit, instrument_ids=focus)
-        logger.info("read-news: %s", read)
 
 
 def build_scheduler() -> BlockingScheduler:
@@ -274,20 +263,10 @@ def build_scheduler() -> BlockingScheduler:
     # three times in a row, which is precisely the runaway the quota ledger
     # exists to prevent. The ledger would still hold, but two defences are
     # right for the one requirement that has no acceptable failure.
-    for job_id, trigger, require_close in (
-        ("naver_news_pre_open", _KR_PRE_OPEN, False),
-        ("naver_news_after_close", _KR_AFTER_CLOSE, True),
-    ):
-        scheduler.add_job(
-            guarded(job_id, partial(_collect_korean_news, require_close=require_close)),
-            trigger,
-            id=job_id,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=3600,
-        )
-
     for job_id, trigger, fn in (
+        ("naver_news_after_close", _KR_AFTER_CLOSE, _collect_korean_news),
+        # 개장 뒤에 늦게 깨어나면 체인이 스스로 하지 않는다(`run_morning`).
+        ("preopen_morning", _KR_PREOPEN_MORNING, _preopen_morning),
         ("daily_loop_after_kr_close", _KR_DAILY_LOOP, _daily_loop),
         ("us_prices_after_close", _US_PRICES, _us_prices),
         ("sec_weekly", _SEC_WEEKLY, _sec_weekly),
@@ -301,6 +280,19 @@ def build_scheduler() -> BlockingScheduler:
             misfire_grace_time=3600,
         )
 
+    for job_id, trigger, fn in (
+        ("preopen_supplement", _KR_PREOPEN_SUPPLEMENT, _preopen_supplement),
+        ("preopen_scores", _KR_PREOPEN_SCORES, _preopen_scores),
+    ):
+        scheduler.add_job(
+            guarded(job_id, fn),
+            trigger,
+            id=job_id,
+            max_instances=1,
+            coalesce=True,
+            # 08:45가 기다림의 한계라, 그보다 늦은 발화는 의미가 없다.
+            misfire_grace_time=600,
+        )
     scheduler.add_job(
         guarded("watchlist_before_open", _watchlist),
         _KR_WATCHLIST,
@@ -329,15 +321,8 @@ def build_scheduler() -> BlockingScheduler:
             misfire_grace_time=600,
         )
 
-    if get_settings().llm_schedule_enabled:
-        scheduler.add_job(
-            guarded("news_reading_before_open", _read_korean_news),
-            _KR_READ_BEFORE_OPEN,
-            id="news_reading_before_open",
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=3600,
-        )
+    # 장전 LLM 해석(07:00 체인과 08:30 보충)은 `LLM_SCHEDULE_ENABLED`가 켜져 있을
+    # 때만 돈다. 꺼져 있으면 그 단계는 SKIPPED로 남고 나머지 아침은 그대로 간다.
 
     # Market.US waits for Threads and Reddit, whose caps are small enough that
     # reach has to follow the tracked set rather than the listing master.

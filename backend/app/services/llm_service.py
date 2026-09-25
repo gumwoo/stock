@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -37,7 +37,9 @@ from sqlalchemy.orm import Session
 from app.collectors.naver_news import RULE_VERSION as NEWS_RULE_VERSION
 from app.collectors.quota import QuotaExhausted, QuotaGuard
 from app.config import get_settings
-from app.core.clock import utc_now
+from app.core.calendar import Market, MarketCalendar
+from app.core.clock import ensure_utc, utc_now
+from app.db import advisory_lock, session_scope
 from app.llm.provider import (
     ClaudeAgentSdkProvider,
     LlmProvider,
@@ -48,7 +50,7 @@ from app.llm.provider import (
 from app.models import Instrument
 from app.models.forward import CandidateSnapshot
 from app.models.news import Decider, HitDecision, NewsQueryHit, RuleAudit, SentimentEvent
-from app.repositories import instrument_repo, llm_repo, news_repo
+from app.repositories import instrument_repo, llm_repo, news_repo, promotion_repo
 from app.repositories.llm_repo import LlmCallRow, SentimentRow
 from app.repositories.news_repo import OpenHit, QueryHitRow
 
@@ -203,7 +205,33 @@ def _prompt(session: Session, hits: Sequence[OpenHit], header: str) -> str:
     return "\n".join(lines)
 
 
-def _run(
+# 모든 LLM 실행이 함께 잡는 잠금. 아침 07:00 해석과 08:30 보충 해석, 사람이
+# CLI로 돌린 해석이 같은 구독을 동시에 쓰지 않게 한다. 한도는 호출마다 따로
+# 예약되므로 겹쳐도 넘지는 않는다. 막는 것은 두 실행이 같은 대기 기사를 함께
+# 집어 판정을 두 번 쓰는 일과, 시작할 때 한 번 보는 사용률 확인이 서로의
+# 사용분을 못 보는 일이다.
+LLM_RUN_LOCK = "llm_run"
+
+
+def _run(session: Session, **kwargs: Any) -> LlmRunReport:
+    """모델 호출 한 묶음을, 다른 LLM 실행이 없을 때만.
+
+    판정·해석·감사가 모두 이 함수를 지나므로, 잠금을 여기서 잡으면 워커의
+    아침 작업이든 사람이 CLI로 돌린 실행이든 같은 규칙을 따른다. 잠금은
+    커밋하지 않는 별도 연결에 걸어, 결과를 쓰며 커밋해도 풀리지 않게 한다.
+    다른 실행이 잡고 있으면 기다리지 않고 멈췄다고 보고한다.
+    """
+    report = LlmRunReport(purpose=kwargs["purpose"])
+    if not kwargs["hits"]:
+        return report
+    with session_scope() as lock_session, advisory_lock(lock_session, LLM_RUN_LOCK) as held:
+        if not held:
+            report.stopped = "another LLM run is in progress"
+            return report
+        return _run_unlocked(session, **kwargs)
+
+
+def _run_unlocked(
     session: Session,
     *,
     purpose: str,
@@ -382,6 +410,7 @@ def judge_pending(
     instrument_ids: Sequence[int] | None = None,
     provider: LlmProvider | None = None,
     guard: Any = None,
+    after_hit_id: int | None = None,
 ) -> LlmRunReport:
     """Ask the model about PENDING hits, newest first, and append its verdicts."""
     settings = get_settings()
@@ -391,6 +420,7 @@ def judge_pending(
         limit=limit,
         prompt_version=RELEVANCE_PROMPT_VERSION,
         instrument_ids=instrument_ids,
+        after_hit_id=after_hit_id,
     )
 
     def apply(batch: Sequence[OpenHit], result: LlmResult, report: LlmRunReport) -> int:
@@ -450,6 +480,7 @@ def read_confirmed(
     instrument_ids: Sequence[int] | None = None,
     provider: LlmProvider | None = None,
     guard: Any = None,
+    after_hit_id: int | None = None,
 ) -> LlmRunReport:
     """Read CONFIRMED hits not yet read under this model and prompt, newest first."""
     settings = get_settings()
@@ -460,6 +491,7 @@ def read_confirmed(
         prompt_version=SENTIMENT_PROMPT_VERSION,
         limit=limit,
         instrument_ids=instrument_ids,
+        after_hit_id=after_hit_id,
     )
 
     def apply(batch: Sequence[OpenHit], result: LlmResult, report: LlmRunReport) -> int:
@@ -521,6 +553,67 @@ def read_confirmed(
     )
 
 
+@dataclass(slots=True)
+class BudgetedRun:
+    """판정과 해석을 한 예산 안에서 돌린 결과."""
+
+    budget: int
+    judged: LlmRunReport | None = None
+    read: LlmRunReport | None = None
+    stopped: str | None = None
+
+    @property
+    def items(self) -> int:
+        """모델에 보낸 기사 수 합계. 예산과 비교하는 값이 이것이다."""
+        return sum(r.asked for r in (self.judged, self.read) if r is not None)
+
+
+def run_within_budget(
+    session: Session,
+    *,
+    budget: int,
+    instrument_ids: Sequence[int] | None,
+    after_hit_id: int | None = None,
+    provider: LlmProvider | None = None,
+    guard: Any = None,
+) -> BudgetedRun:
+    """판정 뒤 해석을, 둘을 합쳐 `budget`건 안에서. 다른 LLM 실행이 돌면 하지 않는다.
+
+    예전 아침 작업은 판정 `limit`건과 해석 `limit`건을 따로 세서, 상한이
+    100이라도 200건을 보낼 수 있었다. 여기서는 판정이 쓴 만큼 해석의 몫이
+    줄어든다. 판정이 새로 확정한 기사를 같은 실행 안에서 바로 해석할 수 있게
+    순서는 판정이 먼저다. 잠금은 각 호출 묶음(`_run`)이 잡는다.
+    """
+    out = BudgetedRun(budget=budget)
+    if budget <= 0:
+        out.stopped = "no budget"
+        return out
+    out.judged = judge_pending(
+        session,
+        limit=budget,
+        instrument_ids=instrument_ids,
+        provider=provider,
+        guard=guard,
+        after_hit_id=after_hit_id,
+    )
+    if out.judged.stopped:
+        out.stopped = out.judged.stopped
+        return out
+    left = budget - out.judged.asked
+    if left <= 0:
+        return out
+    out.read = read_confirmed(
+        session,
+        limit=left,
+        instrument_ids=instrument_ids,
+        provider=provider,
+        guard=guard,
+        after_hit_id=after_hit_id,
+    )
+    out.stopped = out.read.stopped
+    return out
+
+
 def tracked_ids(session: Session) -> list[int]:
     return [
         i.instrument_id
@@ -545,6 +638,33 @@ def focus_ids(session: Session) -> list[int]:
         )
     ).scalars()
     return sorted(set(tracked_ids(session)) | set(recent))
+
+
+def focus_ids_asof(session: Session, asof: datetime) -> list[int]:
+    """`asof` 시점의 관심 종목: 그때 추적 중이던 종목과 그 전 3일의 후보.
+
+    `focus_ids`는 지금 시각으로 읽는다. 과거 아침을 다시 계산하는 데 그것을
+    쓰면 그 뒤에 추적된 종목과 그 뒤에 나온 후보가 섞인다. 여기서는 그때
+    기록돼 있던 것만 본다: 후보는 `asof` 전 3일 안에 찍혔고 그때까지 저장된
+    것, 추적은 `asof` 뒤의 승격을 뺀 것.
+    """
+    asof = ensure_utc(asof, field="asof")
+    later = promotion_repo.promoted_after(session, asof)
+    # 상장 여부는 서울 날짜로 본다. 07:00 KST는 UTC로 전날이다.
+    day = MarketCalendar(Market.KR).local_today(asof)
+    tracked = {
+        i.instrument_id
+        for i in instrument_repo.list_active(session, asof=day, market=Market.KR, tracked=True)
+        if i.instrument_id not in later
+    }
+    recent = session.execute(
+        select(CandidateSnapshot.instrument_id).where(
+            CandidateSnapshot.asof > asof - timedelta(days=FOCUS_CANDIDATE_DAYS),
+            CandidateSnapshot.asof <= asof,
+            CandidateSnapshot.taken_at <= asof,
+        )
+    ).scalars()
+    return sorted(tracked | set(recent))
 
 
 def audit_rules(

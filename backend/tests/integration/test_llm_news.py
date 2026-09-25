@@ -564,3 +564,97 @@ class TestScope:
         s.flush()
         assert world.instrument_id in llm_service.focus_ids(s)
         assert set(llm_service.tracked_ids(s)) <= set(llm_service.focus_ids(s))
+
+    def test_focus_as_of_a_moment_reads_only_what_was_there(self, world: World) -> None:
+        # 과거 아침을 다시 계산할 때 그 뒤에 나온 후보가 섞이면 안 된다.
+        s = world.session
+        now = datetime.now(UTC)  # noqa: TID251 - fixture timestamps only
+        s.add(
+            CandidateSnapshot(
+                asof=now - timedelta(hours=1),
+                taken_at=now - timedelta(hours=1),
+                rank=1,
+                instrument_id=world.instrument_id,
+                recent_mentions=3,
+                baseline_mentions=0,
+                recent_days=1.0,
+                baseline_days=7.0,
+                score=4.0,
+                news_freshness="FRESH",
+            )
+        )
+        s.flush()
+        assert world.instrument_id in llm_service.focus_ids_asof(s, now)
+        assert world.instrument_id not in llm_service.focus_ids_asof(s, now - timedelta(hours=2))
+        assert world.instrument_id not in llm_service.focus_ids_asof(s, now + timedelta(days=4))
+
+
+def _hit_ids(world: World) -> list[int]:
+    world.session.expire_all()
+    return list(
+        world.session.execute(
+            select(NewsQueryHit.id)
+            .where(NewsQueryHit.instrument_id == world.instrument_id)
+            .order_by(NewsQueryHit.id)
+        ).scalars()
+    )
+
+
+class TestMorningBudget:
+    """장전 LLM: 보충이 새로 가져온 기사만, 판정·해석 합계 예산 안에서, 한 번에 한 실행만."""
+
+    def test_only_pairs_seen_after_the_mark_are_asked(self, world: World) -> None:
+        ids = _hit_ids(world)
+        mark = ids[1]  # 앞의 두 쌍(기사 0, 1)은 보충 전에 이미 있던 것
+        pending = news_repo.pending_for_model(
+            world.session,
+            limit=100,
+            prompt_version=llm_service.RELEVANCE_PROMPT_VERSION,
+            instrument_ids=[world.instrument_id],
+            after_hit_id=mark,
+        )
+        assert {h.news_item_id for h in pending} == {world.items[2], world.items[3]}
+        assert news_repo.last_hit_id(world.session) >= ids[-1]
+
+    def test_judging_and_reading_share_one_budget(self, world: World) -> None:
+        # 대기 4건, 확정 2건. 예산 3이면 판정이 3건을 쓰고 해석에는 남는 몫이 없다.
+        provider = Script(verdicts((1, "UNSURE"), (2, "UNSURE"), (3, "UNSURE")))
+        run = llm_service.run_within_budget(
+            world.session,
+            budget=3,
+            instrument_ids=[world.instrument_id],
+            provider=provider,
+            guard=Guard(),
+        )
+        assert run.judged is not None and run.judged.asked == 3
+        assert run.read is None
+        assert run.items == 3 and run.stopped is None
+
+    def test_what_judging_leaves_goes_to_reading(self, world: World) -> None:
+        provider = Script(
+            verdicts((1, "UNSURE"), (2, "UNSURE"), (3, "UNSURE"), (4, "UNSURE")),
+            readings((1, 0.5)),
+        )
+        run = llm_service.run_within_budget(
+            world.session,
+            budget=5,
+            instrument_ids=[world.instrument_id],
+            provider=provider,
+            guard=Guard(),
+        )
+        assert run.judged is not None and run.judged.asked == 4
+        assert run.read is not None and run.read.asked == 1
+        assert run.items == 5
+
+    def test_another_run_holding_the_lock_stops_this_one_before_any_call(
+        self, world: World, engine: object
+    ) -> None:
+        from app.db import advisory_lock
+
+        factory = sessionmaker(bind=engine, future=True)  # type: ignore[arg-type]
+        with factory() as other, advisory_lock(other, llm_service.LLM_RUN_LOCK) as held:
+            assert held
+            provider = Script()
+            report = judge(world, provider)
+        assert report.stopped == "another LLM run is in progress"
+        assert provider.prompts == [] and calls(world) == []
