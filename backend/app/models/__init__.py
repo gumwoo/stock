@@ -6,6 +6,7 @@ invisible to migrations.
 """
 
 from app.core.types import Interval, SampleType
+from app.models.attention import SearchTrend, SignalAttention
 from app.models.backtest import BacktestRun, BacktestWindow
 from app.models.base import Base
 from app.models.collector import CollectorRun, CollectorStatus
@@ -94,8 +95,10 @@ __all__ = [
     "PortfolioSnapshot",
     "RuleAudit",
     "SampleType",
+    "SearchTrend",
     "SentimentEvent",
     "Signal",
+    "SignalAttention",
     "SignalFactor",
     "SignalOutcome",
     "SignalOverlay",

@@ -46,11 +46,12 @@ from app.models import (
     SignalOverlay,
     SignalRegime,
 )
+from app.models.attention import SignalAttention
 from app.models.collector import CollectorStatus
 from app.models.forward import HORIZONS
 from app.repositories import candle_repo
 from app.scoring.policy import STRATEGY_VERSION
-from app.services import discovery_service, regime_service
+from app.services import attention_service, discovery_service, regime_service
 
 # How far back evaluation looks for rows still missing an outcome. The longest
 # horizon is twenty sessions, about a month; twice that leaves room for gaps.
@@ -309,10 +310,26 @@ class ForwardReport:
     by_action: dict[int, dict[str, Stats]] = field(default_factory=dict)
     by_overlay: dict[int, dict[str, Stats]] = field(default_factory=dict)
     by_regime: dict[int, dict[str, Stats]] = field(default_factory=dict)
+    by_attention: dict[int, dict[str, Stats]] = field(default_factory=dict)
     candidates: dict[int, dict[str, Stats]] = field(default_factory=dict)
     candidates_by_regime: dict[int, dict[str, Stats]] = field(default_factory=dict)
+    candidates_by_attention: dict[int, dict[str, Stats]] = field(default_factory=dict)
     signals_recorded: int = 0
     snapshots_recorded: int = 0
+
+
+# Searches at least this many times their earlier level count as a surge.
+ATTENTION_SURGE = 2.0
+
+
+def attention_bucket(status: str | None, surge: float | None) -> str:
+    if status is None or status == "NO_FETCH":
+        return "no search data"
+    if status == "STALE":
+        return "stale search data"
+    if surge is None:
+        return "too few searches"
+    return "search surge" if surge >= ATTENTION_SURGE else "ordinary search"
 
 
 def _first_signals(session: Session, strategy_version: str) -> list[int]:
@@ -354,6 +371,8 @@ def report(
             Instrument.market,
             SignalOverlay.points,
             SignalRegime.label,
+            SignalAttention.status,
+            SignalAttention.surge,
         )
         .join(Signal, Signal.id == SignalOutcome.signal_id)
         .join(Instrument, Instrument.instrument_id == Signal.instrument_id)
@@ -364,6 +383,13 @@ def report(
             and_(
                 SignalRegime.signal_id == Signal.id,
                 SignalRegime.regime_version == regime_service.PARAMS.version,
+            ),
+        )
+        .outerjoin(
+            SignalAttention,
+            and_(
+                SignalAttention.signal_id == Signal.id,
+                SignalAttention.attention_version == attention_service.PARAMS.version,
             ),
         )
         .where(
@@ -379,7 +405,7 @@ def report(
     # The same day's cross-section, per market and horizon: what an equal
     # weight in every judged name would have done.
     pool: dict[tuple[int, str, datetime], list[float]] = defaultdict(list)
-    for h, r, entry_at, _, market, _, _ in rows:
+    for h, r, entry_at, _, market, *_ in rows:
         pool[(h, market.value, entry_at)].append(r)
     base = {key: statistics.fmean(v) for key, v in pool.items()}
 
@@ -393,12 +419,18 @@ def report(
         return "quiet"
 
     groups: dict[tuple[str, int, str], list[tuple[float, float, datetime]]] = defaultdict(list)
-    for h, r, entry_at, action, market, points, regime in rows:
+    for h, r, entry_at, action, market, points, regime, seen, surge in rows:
         excess = r - base[(h, market.value, entry_at)]
         groups[("action", h, action.value)].append((r, excess, entry_at))
         groups[("overlay", h, bucket(points))].append((r, excess, entry_at))
         groups[("regime", h, regime or "no regime")].append((r, excess, entry_at))
-    tables = {"action": out.by_action, "overlay": out.by_overlay, "regime": out.by_regime}
+        groups[("attention", h, attention_bucket(seen, surge))].append((r, excess, entry_at))
+    tables = {
+        "action": out.by_action,
+        "overlay": out.by_overlay,
+        "regime": out.by_regime,
+        "attention": out.by_attention,
+    }
     for (kind, h, label), items in groups.items():
         target = tables[kind]
         target.setdefault(h, {})[label] = _stats(
@@ -420,6 +452,7 @@ def report(
             CandidateSnapshot.rank,
             CandidateSnapshot.asof,
             Instrument.listing,
+            CandidateSnapshot.instrument_id,
         )
         .join(CandidateSnapshot, CandidateSnapshot.id == CandidateOutcome.snapshot_id)
         .join(Instrument, Instrument.instrument_id == CandidateSnapshot.instrument_id)
@@ -440,7 +473,7 @@ def report(
     # A candidate list carries no stored regime; the index closes it would be
     # read from are the same at any later reading, so it is read here.
     regimes: dict[tuple[str, datetime], str] = {}
-    for h, r, entry_at, rank, asof, listing in snaps:
+    for h, r, entry_at, rank, asof, listing, instrument_id in snaps:
         reference = kr.get((h, Market.KR.value, entry_at))
         pick = (r, None if reference is None else r - reference, entry_at)
         cand[("rank", h, "top 5" if rank <= 5 else "6-20")].append(pick)
@@ -448,8 +481,15 @@ def report(
         if (code, asof) not in regimes:
             regimes[(code, asof)] = regime_service.regime_at(session, code, asof).label
         cand[("regime", h, regimes[(code, asof)])].append(pick)
+        found, _ = attention_service.attention_at(session, instrument_id, asof)
+        cand[("attention", h, attention_bucket(found.status, found.surge))].append(pick)
+    cand_tables = {
+        "rank": out.candidates,
+        "regime": out.candidates_by_regime,
+        "attention": out.candidates_by_attention,
+    }
     for (kind, h, label), picks in cand.items():
-        target = out.candidates if kind == "rank" else out.candidates_by_regime
+        target = cand_tables[kind]
         target.setdefault(h, {})[label] = _stats(
             [p[0] for p in picks],
             [p[1] for p in picks if p[1] is not None],

@@ -48,7 +48,7 @@ from app.scoring.policy import (
     WEIGHTS,
     apply_freshness,
 )
-from app.services import fundamental_service, overlay_service, regime_service
+from app.services import attention_service, fundamental_service, overlay_service, regime_service
 
 logger = logging.getLogger(__name__)
 
@@ -394,6 +394,7 @@ def score_all(session: Session, *, now: datetime | None = None) -> list[Signal]:
         # Beside the signal, never inside it: see app/services/overlay_service.py.
         overlay_service.attach(session, row)
         regime_service.attach(session, row, regimes)
+        attention_service.attach(session, row)
         logger.info(
             "scored %s: %s %.1f",
             instrument.name,

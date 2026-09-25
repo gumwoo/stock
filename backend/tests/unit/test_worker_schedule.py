@@ -104,3 +104,47 @@ def test_the_daily_loop_runs_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_the_daily_loop_skips_a_holiday(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _loop(monkeypatch, session=False) == []
+
+
+def _sweep(monkeypatch: pytest.MonkeyPatch, *, require_close: bool) -> list[str]:
+    from contextlib import contextmanager
+
+    import app.worker as worker
+
+    steps: list[str] = []
+
+    @contextmanager
+    def fake_scope():  # type: ignore[no-untyped-def]
+        yield None
+
+    def fake_run(collector: object, _session: object) -> None:
+        name = type(collector).__name__
+        if name == "NaverDataLabCollector":
+            name += f":{sorted(collector.instrument_ids)}"  # type: ignore[attr-defined]
+        steps.append(name)
+
+    monkeypatch.setattr(worker, "MarketCalendar", _Calendar(session=True))
+    monkeypatch.setattr(worker, "session_scope", fake_scope)
+    monkeypatch.setattr(worker, "run_collector", fake_run)
+    monkeypatch.setattr(worker, "QuotaGuard", lambda: type("G", (), {"prune": lambda s: 0})())
+    monkeypatch.setattr(worker, "NaverNewsCollector", lambda: type("NaverNewsCollector", (), {})())
+    monkeypatch.setattr(worker.llm_service, "focus_ids", lambda s: [7, 3])
+    worker._collect_korean_news(require_close=require_close)
+    return steps
+
+
+def test_search_trends_are_fetched_in_the_morning_for_the_names_in_focus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _sweep(monkeypatch, require_close=False) == [
+        "NaverNewsCollector",
+        "DartDisclosureCollector",
+        "NaverDataLabCollector:[3, 7]",
+    ]
+
+
+def test_the_evening_sweep_does_not_fetch_search_trends(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _sweep(monkeypatch, require_close=True) == [
+        "NaverNewsCollector",
+        "DartDisclosureCollector",
+    ]

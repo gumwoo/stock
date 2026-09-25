@@ -32,6 +32,7 @@ from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import MAX_YEARS_BACK, DartFundamentalCollector
 from app.collectors.krx_master import KrxMasterCollector
 from app.collectors.market_index import INDEXES, MarketIndexCollector
+from app.collectors.naver_datalab import NaverDataLabCollector
 from app.collectors.naver_news import RULE_VERSION as NEWS_RULE_VERSION
 from app.collectors.naver_news import NaverNewsCollector, rejudge_hits
 from app.collectors.quota import QuotaGuard
@@ -67,6 +68,7 @@ COLLECTORS = {
     "naver": NaverNewsCollector,
     "krx": KrxMasterCollector,
     "index": MarketIndexCollector,
+    "datalab": NaverDataLabCollector,
 }
 
 # How far back a collection reaches, in one vocabulary for every source that
@@ -84,7 +86,7 @@ PERIODS: dict[str, int] = {"2y": 2, "5y": 5, "10y": 10, "max": MAX_YEARS_BACK}
 # Sources whose range is decided by the source, not by us. SEC's companyfacts
 # is the filer's entire XBRL history in a single document; there is no shorter
 # request to make, so a period given here would be silently discarded.
-FIXED_RANGE = frozenset({"sec", "naver", "disclosure"})
+FIXED_RANGE = frozenset({"sec", "naver", "disclosure", "datalab"})
 
 
 def cmd_config() -> int:
@@ -180,6 +182,9 @@ def cmd_collect(
         kwargs = {"only": names, "max_pages": 1}
 
     with session_scope() as session:
+        if source == "datalab":
+            # The names in focus, as the morning job asks for them.
+            kwargs = {"instrument_ids": llm_service.focus_ids(session)}
         run = run_collector(factory(**kwargs), session)
         print(f"{run.source}: {run.status} read={run.items_read} saved={run.items_saved}")
         if run.detail:
@@ -481,8 +486,10 @@ def cmd_forward() -> int:
         ("by action", rep.by_action),
         ("by news overlay", rep.by_overlay),
         ("by market regime", rep.by_regime),
+        ("by search attention", rep.by_attention),
         ("candidates", rep.candidates),
         ("candidates by market regime", rep.candidates_by_regime),
+        ("candidates by search attention", rep.candidates_by_attention),
     ):
         print()
         print(title)

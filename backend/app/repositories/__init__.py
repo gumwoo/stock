@@ -7,6 +7,7 @@ here and a query that goes around it reintroduces look-ahead bias invisibly.
 """
 
 from app.repositories import (
+    attention_repo,
     candle_repo,
     disclosure_repo,
     filing_repo,
@@ -20,6 +21,7 @@ from app.repositories import (
 )
 
 __all__ = [
+    "attention_repo",
     "candle_repo",
     "disclosure_repo",
     "filing_repo",

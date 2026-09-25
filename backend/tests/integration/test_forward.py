@@ -31,10 +31,11 @@ from app.models import (
     SignalRegime,
     SymbolHistory,
 )
+from app.models.attention import SignalAttention
 from app.models.collector import CollectorStatus
 from app.repositories import candle_repo
 from app.scoring.regime import Label, Regime
-from app.services import discovery_service, forward_service, regime_service
+from app.services import attention_service, discovery_service, forward_service, regime_service
 from app.services.discovery_service import Candidate, Discovery
 
 pytestmark = pytest.mark.integration
@@ -260,6 +261,39 @@ class TestTheReport:
         assert rep.by_regime[5]["no regime"].n == 1
         assert "RISK_ON" not in rep.by_regime[5]
 
+    def test_each_judgement_is_counted_under_the_search_attention_beside_it(
+        self, world: World
+    ) -> None:
+        first = signal(world, world.ids[0], day=0, action=SignalAction.BUY_INTEREST)
+        second = signal(world, world.ids[1], day=0, action=SignalAction.CAUTION)
+        version = attention_service.PARAMS.version
+        world.session.add_all(
+            [
+                SignalAttention(
+                    signal_id=first.id,
+                    asof=first.decision_at,
+                    attention_version=version,
+                    surge=3.0,
+                    status="MEASURED",
+                ),
+                # Another version's measure: not this grouping.
+                SignalAttention(
+                    signal_id=second.id,
+                    asof=second.decision_at,
+                    attention_version=version + 1,
+                    surge=0.5,
+                    status="MEASURED",
+                ),
+            ]
+        )
+        world.session.commit()
+        forward_service.evaluate_signals(world.session, now=NOW)
+
+        rep = forward_service.report(world.session, strategy_version=VERSION)
+        assert rep.by_attention[5]["search surge"].n == 1
+        assert rep.by_attention[5]["no search data"].n == 1
+        assert "ordinary search" not in rep.by_attention[5]
+
     def test_a_rescore_of_the_same_judgement_counts_once(self, world: World) -> None:
         signal(world, world.ids[0], day=0, action=SignalAction.BUY_INTEREST)
         signal(world, world.ids[0], day=0, action=SignalAction.BUY_INTEREST)
@@ -370,6 +404,8 @@ class TestCandidates:
         # Read at the listing's own moment, against the KOSPI for a name of no known board.
         assert rep.candidates_by_regime[5]["RISK_ON"].n == 1
         assert asked and all(code == "^KS11" for code, _ in asked)
+        # No trend was fetched for the name: counted, and said to have no data.
+        assert rep.candidates_by_attention[5]["no search data"].n == 1
         assert {asof for _, asof in asked} <= {s.asof for s in ours}
 
 

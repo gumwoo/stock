@@ -27,6 +27,7 @@ from app.collectors.base import CollectorError, run_collector
 from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import DartFundamentalCollector
 from app.collectors.market_index import MarketIndexCollector
+from app.collectors.naver_datalab import NaverDataLabCollector
 from app.collectors.naver_news import NaverNewsCollector
 from app.collectors.quota import QuotaGuard
 from app.collectors.sec_edgar import SecEdgarCollector
@@ -120,6 +121,11 @@ def _collect_korean_news(*, require_close: bool) -> None:
         # Event disclosures ride along. The morning run is the one that
         # matters: last evening's filings are on record before today's close.
         run_collector(DartDisclosureCollector(), session)
+        if not require_close:
+            # Search trends for the names in focus, ending yesterday: stored
+            # before the close, so today's signals read them.
+            focus = llm_service.focus_ids(session)
+            run_collector(NaverDataLabCollector(instrument_ids=focus), session)
 
 
 def _daily_loop() -> None:
