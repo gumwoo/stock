@@ -84,3 +84,30 @@ class TestGates:
     def test_a_reversal_within_the_sixty_is_not_established(self) -> None:
         members = days_of(30, 2.0, 0.0) + days_of(30, -1.0, 0.0, start=30)
         assert result(members, "H1").state == "not established"
+
+
+class TestFirstHourForTheOwnersTrade:
+    """H6·H7: 9시 시가에 사서 10시 전에 파는 시간대. 첫 목록 전에 더했다."""
+
+    def test_disclosure_names_are_measured_against_zero(self) -> None:
+        members = [
+            member(0, 1, ("DISCLOSURE_EVENT",), 5.0, first_hour=0.8),
+            member(0, 2, ("DISCLOSURE_EVENT", "SEARCH_SURGE"), 5.0, first_hour=-0.2),
+            member(0, 3, ("POSITIVE_NEWS_OVERLAY",), 5.0, first_hour=3.0),
+        ]
+        # 공시 종목 둘의 평균(0.3)이다. 목록의 나머지와 비교하지 않는다.
+        assert result(members, "H6").mean == pytest.approx(0.3)
+
+    def test_the_whole_list_is_measured_against_zero(self) -> None:
+        members = [
+            member(0, 1, ("DISCLOSURE_EVENT",), 5.0, first_hour=0.8),
+            member(0, 2, ("SEARCH_SURGE",), 5.0, first_hour=-0.2),
+        ]
+        assert result(members, "H7").mean == pytest.approx(0.3)
+
+    def test_a_name_without_a_first_hour_is_left_out(self) -> None:
+        members = [
+            member(0, 1, ("DISCLOSURE_EVENT",), 5.0, first_hour=None),
+            member(0, 2, ("DISCLOSURE_EVENT",), 5.0, first_hour=1.0),
+        ]
+        assert result(members, "H6").mean == pytest.approx(1.0)

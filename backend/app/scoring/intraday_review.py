@@ -10,6 +10,12 @@ the minute bars:
 - H4 ranks 1-10 beat ranks 11-40
 - H5 the list as a whole beats its market, name by name against its own index
 
+H6·H7은 2026-09-26, 첫 목록(9/28 08:50)이 나오기 전에 더했다. 소유자의 단타는 9시 시가에 사서
+늦어도 10시 전에 판다. 그 시간대로 묻는다(첫 1시간 수익률, 비용 전).
+- H6 공시 이유로 들어간 종목을 9시 시가에 사서 10시 전에 팔면 평균이 0보다 크다
+- H7 목록 전체를 같은 방식으로 사고팔면 평균이 0보다 크다
+과거 3개월로 같은 질문을 잰 공시 이벤트 분석 v2(`disclosure_first_hour`)와 함께 읽는다.
+
 **Paired by day.** On each day with both groups present, the difference of the
 two groups' means is one observation; the statistic is over those days. A day
 where one group is absent says nothing about the difference and is left out.
@@ -60,6 +66,8 @@ class Hypothesis:
     against: Select | None
     """None: against the whole list that day."""
     measure: Measure
+    vs_zero: bool = False
+    """그룹 평균 자체를 0과 비교한다. 측정값이 이미 차이(H5)이거나 수익 그 자체(H6·H7)일 때."""
 
 
 def _open_close(m: MemberDay) -> float | None:
@@ -109,6 +117,23 @@ HYPOTHESES: tuple[Hypothesis, ...] = (
         lambda m: True,
         None,
         _vs_market,
+        vs_zero=True,
+    ),
+    Hypothesis(
+        "H6",
+        "공시 이유 종목, 9시 시가에 사서 10시 전에 팔면 평균이 0보다 크다",
+        lambda m: "DISCLOSURE_EVENT" in m.reasons,
+        None,
+        _first_hour,
+        vs_zero=True,
+    ),
+    Hypothesis(
+        "H7",
+        "목록 전체, 9시 시가에 사서 10시 전에 팔면 평균이 0보다 크다",
+        lambda m: True,
+        None,
+        _first_hour,
+        vs_zero=True,
     ),
 )
 
@@ -132,8 +157,8 @@ def _daily(members: Sequence[MemberDay], hyp: Hypothesis) -> dict[date, float]:
     out: dict[date, float] = {}
     for day, names in by_day.items():
         mine = [v for m in names if hyp.group(m) and (v := hyp.measure(m)) is not None]
-        if hyp.key == "H5":
-            # Against zero: the measure is already each name's excess over its index.
+        if hyp.vs_zero:
+            # Against zero: the measure is already an excess (H5) or the return itself (H6, H7).
             if mine:
                 out[day] = statistics.fmean(mine)
             continue
