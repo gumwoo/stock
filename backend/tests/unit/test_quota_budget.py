@@ -66,6 +66,8 @@ class TestBudgets:
             "dart_daily": 10_000,
             "claude_subscription_5h": 30,
             "claude_subscription_daily": 120,
+            "kis_rest_daily": 10_000,
+            "kis_token_daily": 10,
         }
         actual = {q.key: budget(q) for q in DEFAULT_PLAN.quotas}
 
@@ -154,10 +156,17 @@ class TestQuotaPlan:
 
         # Every figure comes from a provider except the Claude subscription's,
         # for which Anthropic publishes no per-call limit at all — only usage
-        # windows the provider reads back. Those two are ours, and marked so.
+        # windows the provider reads back. Those two are ours, and marked so,
+        # as are the two KIS ceilings: KIS publishes a per-second rate and a
+        # token-issuing rule, no daily figure.
         # `dart_daily` is the one the provider itself hedges on.
         internal = {q.key for q in DEFAULT_PLAN.quotas if q.limit_source is LimitSource.INTERNAL}
-        assert internal == {"claude_subscription_5h", "claude_subscription_daily"}
+        assert internal == {
+            "claude_subscription_5h",
+            "claude_subscription_daily",
+            "kis_rest_daily",
+            "kis_token_daily",
+        }
         typical = {q.key for q in DEFAULT_PLAN.quotas if q.limit_source is LimitSource.TYPICAL}
         assert typical == {"dart_daily"}
 

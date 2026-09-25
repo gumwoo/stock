@@ -71,6 +71,7 @@ def plan_from_settings() -> QuotaPlan:
         "naver_search_monthly": settings.naver_search_internal_31d_limit,
         "naver_datalab_monthly": settings.naver_datalab_monthly_limit,
         "dart_daily": settings.dart_daily_limit,
+        "kis_rest_daily": settings.kis_rest_daily_limit,
     }
     return QuotaPlan(
         tuple(

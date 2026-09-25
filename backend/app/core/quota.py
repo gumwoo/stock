@@ -215,6 +215,32 @@ DEFAULT_PLAN = QuotaPlan(
                 "configuration. Treated as typical rather than promised."
             ),
         ),
+        # KIS publishes a per-second limit (its EGW00201 refusal) and an
+        # issuance limit on tokens, but no daily figure we found. Both of these
+        # are ours: a floor under a runaway loop, not the provider's promise.
+        Quota(
+            key="kis_rest_daily",
+            group="kis_rest",
+            official_limit=20_000,
+            window=timedelta(hours=24),
+            limit_source=LimitSource.INTERNAL,
+            note=(
+                "Our own ceiling on KIS REST calls. KIS documents refusing calls "
+                "past a per-second rate; no daily cap was found in its material."
+            ),
+        ),
+        Quota(
+            key="kis_token_daily",
+            group="kis_token",
+            official_limit=20,
+            window=timedelta(hours=24),
+            limit_source=LimitSource.INTERNAL,
+            note=(
+                "Our own ceiling on issuing tokens and WebSocket approval keys. "
+                "KIS allows one token a minute and asks that a day's token be "
+                "reused; more than a handful a day would be a bug."
+            ),
+        ),
         # Calls to Claude through the owner's subscription. Anthropic publishes
         # no per-call limit for it, only five-hour and seven-day usage windows
         # shared with the owner's own use of Claude, which the provider reads

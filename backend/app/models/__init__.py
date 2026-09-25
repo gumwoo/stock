@@ -19,6 +19,7 @@ from app.models.fundamental import (
     FundamentalSource,
 )
 from app.models.instrument import Instrument, Listing, SymbolHistory
+from app.models.kis import KisCredential
 from app.models.llm import LlmCall
 from app.models.market import (
     Candle,
@@ -81,6 +82,7 @@ __all__ = [
     "Instrument",
     "InstrumentPromotion",
     "Interval",
+    "KisCredential",
     "Listing",
     "LlmCall",
     "MarketIndexBar",

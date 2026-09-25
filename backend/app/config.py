@@ -79,6 +79,26 @@ class Settings(BaseSettings):
     toss_api_base: str = "https://openapi.tossinvest.com"
     toss_ws_url: str = "wss://openapi-ws.tossinvest.com/ws/v1"
 
+    # --- Korea Investment & Securities (KIS) Open API ---------------------
+    # Quotes only. No account number is read and nothing here can place an
+    # order: the minute bars and the live chart need neither.
+    kis_app_key: str = ""
+    kis_app_secret: str = ""
+    kis_env: str = Field(default="real", pattern="^(real|mock)$")
+    kis_rate: float = Field(
+        default=10.0,
+        gt=0,
+        description=(
+            "KIS REST calls per second from this process. The official sample "
+            "paces a real account at 20/s (0.05 s apart); this is half of that"
+        ),
+    )
+    kis_rest_daily_limit: int = Field(
+        default=20_000,
+        gt=0,
+        description="Our own 24-hour ceiling on KIS REST calls; KIS publishes none we found",
+    )
+
     # --- fundamentals -----------------------------------------------------
     sec_user_agent: str = ""
     dart_api_key: str = ""
@@ -193,6 +213,10 @@ class Settings(BaseSettings):
         return bool(self.toss_client_id and self.toss_client_secret)
 
     @property
+    def kis_enabled(self) -> bool:
+        return bool(self.kis_app_key and self.kis_app_secret)
+
+    @property
     def sec_enabled(self) -> bool:
         # SEC needs no key, only an identifying User-Agent carrying a contact.
         return bool(self.sec_user_agent.strip())
@@ -250,6 +274,13 @@ class Settings(BaseSettings):
                 "No live account sync or realtime quotes. Market data falls back "
                 "to yfinance so the dashboard still renders. Note that Toss also "
                 "requires the calling IP to be registered, or it returns HTTP 403.",
+            ),
+            cap(
+                "kis_quotes",
+                self.kis_enabled,
+                ("KIS_APP_KEY", "KIS_APP_SECRET"),
+                "No minute bars and no live chart for the morning watchlist. "
+                "Everything else is unaffected.",
             ),
             cap(
                 "sec_fundamentals",
