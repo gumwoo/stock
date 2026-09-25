@@ -706,6 +706,76 @@ def cmd_disclosure_first_hour(
     return 0
 
 
+def cmd_overnight_study(folder: str, kis_minutes: str | None, fetch: bool) -> int:
+    """밤사이 미국 업종 연구. `--fetch`면 yfinance로 받는다(파일에만). DB에는 쓰지 않는다."""
+    from pathlib import Path
+
+    from app.scoring import overnight_study as study
+    from app.services import overnight_study_service as svc
+
+    path = Path(folder)
+    path.mkdir(parents=True, exist_ok=True)
+    with session_scope() as session:
+        if fetch:
+            svc.fetch_us(path)
+            svc.fetch_kr(path, sorted(svc.universe(session)))
+        res = svc.run(session, path, Path(kis_minutes) if kis_minutes else None)
+    g = res.gate
+    print(f"유니버스 {res.universe}종목, 유동성 통과 {res.liquid}, 수집 실패 {res.failures}")
+    if g is not None:
+        print(
+            f"품질 게이트 {'통과' if g.passed else '실패'}: KIS 대조 {g.compared}종목일 "
+            f"시가 {g.open_ok:.1%} 종가 {g.close_ok:.1%}, 내부 일치 {g.internal_compared} {g.internal_ok:.1%}"
+        )
+        if not g.passed:
+            return 1
+    print("베타: " + ", ".join(f"{k} {v:.2f}" for k, v in res.betas.items()))
+    for q in res.quality:
+        print(
+            f"품질 {q.indicator:5} 앞 절반 {q.front_list:>2}종목 뒤 절반 rho "
+            f"{_fmt(q.back_rho, '.3f')} t {_fmt(q.back_t, '.2f')} {'통과' if q.passed else '탈락'}"
+        )
+    for ind, names in res.lists.items():
+        print(f"연동 {ind:5} {len(names)}종목: " + ", ".join(f"{n}({r:.2f})" for n, r in names))
+    print(f"목록 겹침: {res.overlaps or '없음'}")
+    print(f"판정 단위 신호일(미국 데이터만): {res.signal_days}")
+    print(f"관측 {len(res.observations)}일")
+    for v in res.verdicts:
+        halves = ", ".join(_fmt(h * 100 if h is not None else None, "+.3f") for h in v.halves)
+        print(
+            f"  {v.key} {v.state:<16} 연구 {v.days}일 평균 "
+            f"{_fmt(v.mean * 100 if v.mean is not None else None, '+.3f')}% t {_fmt(v.t, '.2f')} "
+            f"절반 [{halves}] | 홀드아웃 {v.holdout_days}일 "
+            f"{_fmt(v.holdout_mean * 100 if v.holdout_mean is not None else None, '+.3f')}%  {v.text}"
+        )
+    print(f"연구 구간 앞·뒤 절반 지표 구성: {dict(res.halves[0])} / {dict(res.halves[1])}")
+    for ind, vs in res.leave_one_out.items():
+        print(
+            f"  {ind:5} 빼면: "
+            + ", ".join(
+                f"{v.key} {v.days}일 {_fmt(v.mean * 100 if v.mean is not None else None, '+.3f')}"
+                f"(t {_fmt(v.t, '.2f')})"
+                for v in vs
+            )
+        )
+    for ind, per in res.per_indicator.items():
+        print(
+            f"  지표별 {ind:5} "
+            + ", ".join(
+                f"{k} {n}일 {_fmt(m * 100 if m is not None else None, '+.3f')}"
+                for k, (n, m) in per.items()
+            )
+        )
+    for cost, (m, t) in res.o3_costs.items():
+        print(
+            f"  비용 {cost:.1%}일 때 O3 연구 평균 {_fmt(m * 100 if m is not None else None, '+.3f')}% t {_fmt(t, '.2f')}"
+        )
+    print(
+        f"V3를 만든다: {'예' if res.build_v3 else '아니오'} (O3와 O4가 모두 성립해야 한다, v{study.STUDY_VERSION})"
+    )
+    return 0
+
+
 def cmd_intraday(analyze: bool) -> int:
     """What the minute bars say: the usual day, and the morning lists against their questions."""
     with session_scope() as session:
@@ -955,6 +1025,14 @@ def main(argv: list[str] | None = None) -> int:
     fh.add_argument("--fetch", action="store_true", help="fetch missing name-days from KIS")
     fh.add_argument("--limit", type=int, default=None, help="at most this many calls")
 
+    on = sub.add_parser(
+        "overnight-study",
+        help="US sector overnight moves vs next-day KR first hour; files only, no DB writes",
+    )
+    on.add_argument("--dir", default="data/overnight_study")
+    on.add_argument("--kis-minutes", default=None, help="KIS first-hour file for the quality gate")
+    on.add_argument("--fetch", action="store_true", help="fetch from yfinance first")
+
     watch = sub.add_parser("watchlist", help="the newest morning watchlist; reads only")
     watch.add_argument("--take", action="store_true", help="freeze today's if none exists")
 
@@ -1020,6 +1098,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_disclosure_first_hour(
                 args.data, args.minutes, args.first, args.last, args.fetch, args.limit
             )
+        case "overnight-study":
+            return cmd_overnight_study(args.dir, args.kis_minutes, args.fetch)
         case "preopen":
             return cmd_preopen(args.action, args.asof)
         case "intraday":
