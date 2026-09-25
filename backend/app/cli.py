@@ -614,6 +614,56 @@ def cmd_preopen(action: str, asof: str | None) -> int:
     return 0
 
 
+def cmd_disclosure_study(data: str, first: str, last: str, fetch_prices: bool, period: str) -> int:
+    """공시 이벤트 분석. `--fetch-prices`가 없으면 읽기만 한다. 공시 파일은 따로 받아 둔다."""
+    import json
+    from datetime import date
+    from pathlib import Path
+
+    from app.scoring import disclosure_study
+    from app.services import disclosure_study_service as study
+
+    first_entry, last_entry = date.fromisoformat(first), date.fromisoformat(last)
+    raw = json.loads(Path(data).read_text(encoding="utf-8"))
+    with session_scope() as session:
+        found, tally = study.candidates(
+            session, raw, first_entry=first_entry, last_entry=last_entry
+        )
+        print(f"공시 {len(raw['rows'])}건 ({raw['start']}..{raw['end']}, 호출 {raw['calls']}회)")
+        print(f"  분류: {dict(tally)}")
+        if fetch_prices:
+            failures = study.fetch_prices(session, [c.instrument_id for c in found], period=period)
+            print(f"  가격 실패 묶음: {failures or '없음'}")
+        sample = study.build_sample(session, found, first_entry=first_entry, last_entry=last_entry)
+    events = sample.events
+    days = sorted({e.day for e in events})
+    study_days, holdout = disclosure_study.split(days)
+    print(
+        f"표본: 종목일 {len(events)}개, 진입일 {len(days)}일 "
+        f"(연구 {len(study_days)}일, 홀드아웃 {len(holdout)}일: "
+        f"{holdout[0] if holdout else '-'}~{holdout[-1] if holdout else '-'})"
+    )
+    print(f"  뺀 것: {dict(sample.dropped)}")
+    print(f"질문 (v{disclosure_study.STUDY_VERSION}, 평균은 %p)")
+    for a in disclosure_study.evaluate(events):
+        halves = ", ".join(_fmt(h * 100 if h is not None else None, "+.3f") for h in a.halves)
+        print(
+            f"  {a.key} {a.state:<16} 연구 {a.days}일 평균 "
+            f"{_fmt(a.mean * 100 if a.mean is not None else None, '+.3f')} "
+            f"t {_fmt(a.t, '.2f')} 절반 [{halves}] | 홀드아웃 {a.holdout_days}일 평균 "
+            f"{_fmt(a.holdout_mean * 100 if a.holdout_mean is not None else None, '+.3f')}"
+            f"  {a.text}"
+        )
+    print("공시 종류별 (탐색용, 판정 없음, 전체 기간)")
+    for r in disclosure_study.by_type(events):
+        print(
+            f"  {r.event_type:<20} 종목일 {r.events:>5} 진입일 {r.days:>3} "
+            f"지수 대비 평균 {_fmt(r.mean_excess * 100 if r.mean_excess is not None else None, '+.3f')}%p "
+            f"t {_fmt(r.t, '.2f')} 지수를 이긴 비율 {_fmt(r.up_share, '.0%')}"
+        )
+    return 0
+
+
 def cmd_intraday(analyze: bool) -> int:
     """What the minute bars say: the usual day, and the morning lists against their questions."""
     with session_scope() as session:
@@ -842,6 +892,16 @@ def main(argv: list[str] | None = None) -> int:
     pre.add_argument("action", choices=["status", "morning", "supplement", "scores", "dry-run"])
     pre.add_argument("--asof", help="dry-run moment, ISO with offset (default: now)")
 
+    study = sub.add_parser(
+        "disclosure-study",
+        help="event study of disclosures on the next session; reads only unless --fetch-prices",
+    )
+    study.add_argument("--data", required=True, help="the disclosure file fetch_disclosures wrote")
+    study.add_argument("--first", required=True, help="first entry session, YYYY-MM-DD")
+    study.add_argument("--last", required=True, help="last entry session, YYYY-MM-DD")
+    study.add_argument("--fetch-prices", action="store_true", help="fetch daily bars first")
+    study.add_argument("--period", default="6mo")
+
     watch = sub.add_parser("watchlist", help="the newest morning watchlist; reads only")
     watch.add_argument("--take", action="store_true", help="freeze today's if none exists")
 
@@ -899,6 +959,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_minutes(args.backfill, args.max_calls)
         case "watchlist":
             return cmd_watchlist(args.take)
+        case "disclosure-study":
+            return cmd_disclosure_study(
+                args.data, args.first, args.last, args.fetch_prices, args.period
+            )
         case "preopen":
             return cmd_preopen(args.action, args.asof)
         case "intraday":
