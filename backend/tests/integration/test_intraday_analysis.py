@@ -2,8 +2,9 @@
 
 Bars and fetches hang off instruments this module creates, on 2025-06-02 —
 before any real minute bar or index minute was collected — and index minutes
-stored here for that day are removed by date afterwards. The daily KOSPI bar
-for that day is the real one, read only.
+stored here for that day are removed by date afterwards. The daily KOSPI and
+KOSDAQ bars for that day are added only where none exists (a database with
+the real ones keeps them untouched), and only what was added is removed.
 """
 
 from __future__ import annotations
@@ -15,11 +16,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
-from app.core.calendar import Market
-from app.models import Base, Instrument
+from app.core.calendar import Market, MarketCalendar
+from app.models import Base, Instrument, MarketIndexBar
 from app.models.instrument import Listing
 from app.models.intraday import IntradaySummary
 from app.repositories import minute_repo
@@ -29,6 +31,7 @@ from app.services import intraday_service
 pytestmark = pytest.mark.integration
 
 SEOUL = ZoneInfo("Asia/Seoul")
+KR = MarketCalendar(Market.KR)
 DAY = date(2025, 6, 2)
 
 
@@ -55,6 +58,28 @@ class World:
 def world(engine: object) -> Iterator[World]:
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)  # type: ignore[arg-type]
     with factory() as s:
+        # Only the rows this inserts, by the ids the insert returns.
+        added_ids = list(
+            s.execute(
+                pg_insert(MarketIndexBar)
+                .values(
+                    [
+                        {
+                            "index_code": code,
+                            "ts": KR.session_open(DAY),
+                            "available_at": KR.session_close(DAY),
+                            "open": Decimal(base),
+                            "high": Decimal(base + 20),
+                            "low": Decimal(base),
+                            "close": Decimal(base + 20),
+                        }
+                        for code, base in (("^KS11", 2700), ("^KQ11", 750))
+                    ]
+                )
+                .on_conflict_do_nothing(index_elements=["index_code", "ts"])
+                .returning(MarketIndexBar.id)
+            ).scalars()
+        )
         ids = []
         for name, listing in (("쀓분석가", Listing.KOSPI), ("쀓분석나", Listing.KOSDAQ)):
             inst = Instrument(market=Market.KR, name=name, tracked=False, listing=listing)
@@ -69,6 +94,8 @@ def world(engine: object) -> Iterator[World]:
             for i in ids:
                 s.execute(text("DELETE FROM instrument WHERE instrument_id = :i"), {"i": i})
             s.execute(text("DELETE FROM index_minute_bar WHERE session_date = :d"), {"d": DAY})
+            for i in added_ids:
+                s.execute(text("DELETE FROM market_index_bar WHERE id = :i"), {"i": i})
             s.commit()
 
 
