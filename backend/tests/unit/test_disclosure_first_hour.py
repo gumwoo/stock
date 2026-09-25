@@ -113,3 +113,13 @@ def test_the_v1_sample_is_turned_into_first_hours_and_the_rest_counted() -> None
         "no 09:00 bar or nothing sellable": 1,
         "not fetched": 1,
     }
+
+
+def test_a_day_that_opens_at_nine_oh_two_has_no_nine_oclock_entry() -> None:
+    # 시가 단일가가 길어져 첫 봉이 09:02인 날. 팔 수 있는 봉이 있어도 09:00 진입가가 없다.
+    bars = [
+        bar("0902", 100, 105, 99, 104),
+        bar("0903", 104, 106, 103, 105),
+        bar("0959", 105, 107, 104, 106),
+    ]
+    assert measure(bars) is None

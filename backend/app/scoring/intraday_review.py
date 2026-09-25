@@ -14,7 +14,8 @@ H6·H7은 2026-09-26, 첫 목록(9/28 08:50)이 나오기 전에 더했다. 소�
 늦어도 10시 전에 판다. 그 시간대로 묻는다(첫 1시간 수익률, 비용 전).
 - H6 공시 이유로 들어간 종목을 9시 시가에 사서 10시 전에 팔면 평균이 0보다 크다
 - H7 목록 전체를 같은 방식으로 사고팔면 평균이 0보다 크다
-과거 3개월로 같은 질문을 잰 공시 이벤트 분석 v2(`disclosure_first_hour`)와 함께 읽는다.
+과거 3개월로 비슷한 질문을 잰 공시 이벤트 분석 v2(`disclosure_first_hour`)와 함께 읽는다. 다만
+여기 첫 1시간은 그날 첫 봉의 시가에서 재므로(첫 봉이 09:02인 날도 들어간다) v2와 모집단이 다르다.
 
 **Paired by day.** On each day with both groups present, the difference of the
 two groups' means is one observation; the statistic is over those days. A day

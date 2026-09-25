@@ -317,7 +317,7 @@ def report(session: Session) -> IntradayReport:
     )
 
     summary = {(r.instrument_id, r.session_date): r for r in rows}
-    # V2 목록만 센다. 첫 실전 목록(9/28)부터 V2이고, H1~H5의 20일·60일도 V2
+    # V2 목록만 센다. 첫 실전 목록(9/28)부터 V2이고, H1~H7의 20일·60일도 V2
     # 기록으로 센다. 추적 종목을 무조건 넣던 V1과 섞으면 "오늘 이유가 있는
     # 종목"에 대한 질문이 흐려진다. 질문은 이유 코드와 순위만 보므로 그대로다.
     listed = session.execute(
