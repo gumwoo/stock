@@ -26,6 +26,11 @@ from apscheduler.triggers.cron import CronTrigger
 from app.collectors.base import CollectorError, run_collector
 from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import DartFundamentalCollector
+from app.collectors.kis_minute import (
+    DEFAULT_BACKFILL_SESSIONS,
+    KisIndexMinuteCollector,
+    KisMinuteCollector,
+)
 from app.collectors.market_index import MarketIndexCollector
 from app.collectors.naver_datalab import NaverDataLabCollector
 from app.collectors.naver_news import NaverNewsCollector
@@ -37,7 +42,19 @@ from app.core import logging as logging_setup
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import advisory_lock, session_scope
-from app.services import forward_service, llm_service, regime_service, scoring_service
+from app.services import (
+    forward_service,
+    intraday_service,
+    llm_service,
+    regime_service,
+    scoring_service,
+    watchlist_service,
+)
+
+# Today's names at about four calls each, and the rest as backfill: a tenth of
+# the day's KIS budget, and at one call every two seconds about half an hour,
+# so the backfill fills the past over a week of evenings.
+MINUTE_CALLS_PER_DAY = 1_000
 
 logger = logging.getLogger("app.worker")
 
@@ -85,10 +102,22 @@ _KR_DAILY_LOOP = CronTrigger(day_of_week="mon-fri", hour=16, minute=40, timezone
 _US_PRICES = CronTrigger(day_of_week="tue-sat", hour=7, minute=0, timezone="Asia/Seoul")
 _SEC_WEEKLY = CronTrigger(day_of_week="sat", hour=8, minute=0, timezone="Asia/Seoul")
 
-# After the morning sweep has landed and well before the 15:30 close. A signal
-# is judged at the close and sees only news read by then; reading the morning's
-# articles after the close would put them in tomorrow's signal instead.
-_KR_READ_BEFORE_CLOSE = CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone="Asia/Seoul")
+# The day's minute bars, after the close and before the daily loop. A job of
+# its own: a failure here must not take the proven daily loop down with it.
+_KR_MINUTES = CronTrigger(day_of_week="mon-fri", hour=16, minute=20, timezone="Asia/Seoul")
+# The index minute call returns only the last hundred or so minutes and no
+# past day, so it is asked hourly through the session, and once after it.
+_KR_INDEX_MINUTES = (
+    CronTrigger(day_of_week="mon-fri", hour="10-15", minute=0, timezone="Asia/Seoul"),
+    CronTrigger(day_of_week="mon-fri", hour=15, minute=40, timezone="Asia/Seoul"),
+)
+# After the morning sweep (08:00, about ten minutes) and before the open. The
+# morning watchlist at 08:50 is chosen on what the model has read by then, and
+# a signal at the close sees it too; reading after the open would leave the
+# morning's news out of the morning's choice.
+_KR_READ_BEFORE_OPEN = CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone="Asia/Seoul")
+# The morning watchlist, frozen ten minutes before the open.
+_KR_WATCHLIST = CronTrigger(day_of_week="mon-fri", hour=8, minute=50, timezone="Asia/Seoul")
 
 
 def _collect_korean_news(*, require_close: bool) -> None:
@@ -167,6 +196,39 @@ def _daily_loop() -> None:
         )
 
 
+def _kr_minutes() -> None:
+    """Today's minute bars for the names in focus, then a bounded piece of their recent past."""
+    calendar = MarketCalendar(Market.KR)
+    now = utc_now()
+    if not calendar.is_session(calendar.local_today(now)) or not calendar.has_closed(now):
+        logger.info("kis minutes: no finished Korean session today")
+        return
+    with session_scope() as session:
+        run_collector(
+            KisMinuteCollector(
+                instrument_ids=intraday_service.minute_targets(session),
+                backfill_sessions=DEFAULT_BACKFILL_SESSIONS,
+                max_calls=MINUTE_CALLS_PER_DAY,
+            ),
+            session,
+        )
+        # Only what came in whole is measured; the rest is recorded as such.
+        logger.info("intraday analysis: %s", intraday_service.analyze(session))
+
+
+def _kr_index_minutes() -> None:
+    calendar = MarketCalendar(Market.KR)
+    if not calendar.is_session(calendar.local_today(utc_now())):
+        return
+    with session_scope() as session:
+        run_collector(KisIndexMinuteCollector(), session)
+
+
+def _watchlist() -> None:
+    with session_scope() as session:
+        watchlist_service.take_snapshot(session)
+
+
 def _us_prices() -> None:
     with session_scope() as session:
         run_collector(YFinanceHistoryCollector(period="1mo"), session)
@@ -239,11 +301,39 @@ def build_scheduler() -> BlockingScheduler:
             misfire_grace_time=3600,
         )
 
+    scheduler.add_job(
+        guarded("watchlist_before_open", _watchlist),
+        _KR_WATCHLIST,
+        id="watchlist_before_open",
+        max_instances=1,
+        coalesce=True,
+        # A list taken after the open is not a morning list: late is not at all.
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        guarded("kis_minutes_after_close", _kr_minutes),
+        _KR_MINUTES,
+        id="kis_minutes_after_close",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    for n, trigger in enumerate(_KR_INDEX_MINUTES):
+        scheduler.add_job(
+            guarded("kis_index_minutes", _kr_index_minutes),
+            trigger,
+            id=f"kis_index_minutes_{n}",
+            max_instances=1,
+            coalesce=True,
+            # An hour late is the next run's job; a stale fire would only repeat it.
+            misfire_grace_time=600,
+        )
+
     if get_settings().llm_schedule_enabled:
         scheduler.add_job(
-            guarded("news_reading_before_close", _read_korean_news),
-            _KR_READ_BEFORE_CLOSE,
-            id="news_reading_before_close",
+            guarded("news_reading_before_open", _read_korean_news),
+            _KR_READ_BEFORE_OPEN,
+            id="news_reading_before_open",
             max_instances=1,
             coalesce=True,
             misfire_grace_time=3600,

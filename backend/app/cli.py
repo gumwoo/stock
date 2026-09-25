@@ -30,6 +30,7 @@ from app import cli_backtest
 from app.collectors.base import run_collector
 from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import MAX_YEARS_BACK, DartFundamentalCollector
+from app.collectors.kis_minute import KisIndexMinuteCollector, KisMinuteCollector
 from app.collectors.krx_master import KrxMasterCollector
 from app.collectors.market_index import INDEXES, MarketIndexCollector
 from app.collectors.naver_datalab import NaverDataLabCollector
@@ -51,11 +52,13 @@ from app.seed import seed_watchlist
 from app.services import (
     discovery_service,
     forward_service,
+    intraday_service,
     llm_service,
     overlay_service,
     promotion_service,
     regime_service,
     review_service,
+    watchlist_service,
 )
 from app.services.discovery_service import Candidate, Discovery
 
@@ -71,6 +74,7 @@ COLLECTORS = {
     "krx": KrxMasterCollector,
     "index": MarketIndexCollector,
     "datalab": NaverDataLabCollector,
+    "index_minute": KisIndexMinuteCollector,
 }
 
 # How far back a collection reaches, in one vocabulary for every source that
@@ -88,7 +92,7 @@ PERIODS: dict[str, int] = {"2y": 2, "5y": 5, "10y": 10, "max": MAX_YEARS_BACK}
 # Sources whose range is decided by the source, not by us. SEC's companyfacts
 # is the filer's entire XBRL history in a single document; there is no shorter
 # request to make, so a period given here would be silently discarded.
-FIXED_RANGE = frozenset({"sec", "naver", "disclosure", "datalab"})
+FIXED_RANGE = frozenset({"sec", "naver", "disclosure", "datalab", "index_minute"})
 
 
 def cmd_config() -> int:
@@ -514,6 +518,100 @@ def cmd_review() -> int:
     return 0
 
 
+def cmd_minutes(backfill: int, max_calls: int) -> int:
+    """Minute bars for the names in focus: today if closed, and `backfill` sessions before."""
+    with session_scope() as session:
+        run = run_collector(
+            KisMinuteCollector(
+                instrument_ids=intraday_service.minute_targets(session),
+                backfill_sessions=backfill,
+                max_calls=max_calls,
+            ),
+            session,
+        )
+        print(f"{run.source}: {run.status} calls={run.items_read} bars={run.items_saved}")
+        if run.detail:
+            print(f"  detail: {run.detail}")
+        if run.error:
+            print(f"  error:  {run.error}")
+    return 0 if run.status.value in {"SUCCESS", "PARTIAL", "SKIPPED"} else 1
+
+
+def cmd_watchlist(take: bool) -> int:
+    """The newest morning watchlist; `--take` freezes today's if none exists. Reads otherwise."""
+    from sqlalchemy import select
+
+    from app.models import Instrument, WatchlistMember, WatchlistSnapshot
+
+    with session_scope() as session:
+        if take:
+            made = watchlist_service.take_snapshot(session)
+            print(
+                "took today's snapshot"
+                if made
+                else "no snapshot taken (not a session, or one exists)"
+            )
+        snap = session.execute(
+            select(WatchlistSnapshot).order_by(WatchlistSnapshot.created_at.desc()).limit(1)
+        ).scalar_one_or_none()
+        if snap is None:
+            print("no watchlist yet")
+            return 0
+        print(
+            f"{snap.session_date} {snap.strategy_version} as of {snap.asof:%Y-%m-%d %H:%M}Z: "
+            f"{snap.pool} considered, {snap.left_out} left out"
+        )
+        print(f"  inputs: {snap.inputs}")
+        rows = session.execute(
+            select(WatchlistMember, Instrument.name)
+            .join(Instrument, Instrument.instrument_id == WatchlistMember.instrument_id)
+            .where(WatchlistMember.snapshot_id == snap.id)
+            .order_by(WatchlistMember.rank)
+        ).all()
+        for m, name in rows:
+            print(
+                f"  {m.rank:>2}. {name:<16} overlay {_fmt(m.overlay_points, '+.1f'):>5}  "
+                f"search {_fmt(m.attention_surge, '.2f'):>5}  {', '.join(m.reasons)}"
+            )
+    return 0
+
+
+def cmd_intraday(analyze: bool) -> int:
+    """What the minute bars say: the usual day, and the morning lists against their questions."""
+    with session_scope() as session:
+        if analyze:
+            print(f"analysed: {intraday_service.analyze(session)}")
+        rep = intraday_service.report(session)
+    b = rep.baseline
+    print(
+        f"Baseline — every whole day on record, chosen or not: {b.name_days} name-days over {b.days} days."
+    )
+    print(
+        "It describes these names, not our choices. MFE/MAE are hindsight, not returns anyone took."
+    )
+    print(f"  median MFE {_fmt(b.median_mfe, '+.2f')}%  median MAE {_fmt(b.median_mae, '+.2f')}%")
+    print("  half-hour   volume share   mean |return|   share of days' highs")
+    for start in b.volume_share:
+        print(
+            f"  {start}      {_fmt(b.volume_share.get(start), '.1%'):>8}       "
+            f"{_fmt(b.abs_return.get(start), '.2f'):>6}%        "
+            f"{_fmt(b.high_bucket_share.get(start, 0.0), '.0%'):>5}"
+        )
+    print("  (09:00 holds the opening auction's volume, 15:00 the closing auction's)")
+    print()
+    print(
+        f"Morning lists: {rep.watchlist_days} days, {rep.members} name-days measured, "
+        f"{rep.missing} not yet whole. Questions fixed in app/scoring/intraday_review.py; "
+        "20 days to read, the first 60 to decide."
+    )
+    for r in rep.results:
+        t = "-" if r.t is None else f"{r.t:.2f}"
+        print(
+            f"  {r.key} {r.text:<44} days={r.days:<3} mean {_fmt(r.mean, '+.2f'):>6}  t {t:>5}  {r.state}"
+        )
+    return 0
+
+
 def cmd_forward_run() -> int:
     """Add what has become measurable, and take today's candidate list."""
     with session_scope() as session:
@@ -693,6 +791,18 @@ def main(argv: list[str] | None = None) -> int:
         "--backfill", action="store_true", help="file a regime beside every signal that has none"
     )
 
+    minutes = sub.add_parser(
+        "minutes", help="KIS one-minute bars for the names in focus; calls KIS within its quota"
+    )
+    minutes.add_argument("--backfill", type=int, default=0, help="past sessions to fill")
+    minutes.add_argument("--max-calls", type=int, default=200)
+
+    watch = sub.add_parser("watchlist", help="the newest morning watchlist; reads only")
+    watch.add_argument("--take", action="store_true", help="freeze today's if none exists")
+
+    intra = sub.add_parser("intraday", help="what the minute bars say; reads only unless --analyze")
+    intra.add_argument("--analyze", action="store_true", help="summarise days not yet summarised")
+
     sub.add_parser("forward", help="the forward-test record so far; reads only")
     sub.add_parser(
         "review", help="the forward record against its review gates and decision rule; reads only"
@@ -740,6 +850,12 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_regime(args.asof, args.backfill)
         case "review":
             return cmd_review()
+        case "minutes":
+            return cmd_minutes(args.backfill, args.max_calls)
+        case "watchlist":
+            return cmd_watchlist(args.take)
+        case "intraday":
+            return cmd_intraday(args.analyze)
         case "forward":
             return cmd_forward()
         case "forward-run":

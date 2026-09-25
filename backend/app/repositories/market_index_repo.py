@@ -55,3 +55,14 @@ def closes_asof(session: Session, index_code: str, *, asof: datetime, limit: int
         .limit(limit)
     )
     return [float(c) for c in reversed(session.execute(stmt).scalars().all())]
+
+
+def day_open_close(session: Session, index_code: str, ts: datetime) -> tuple[float, float] | None:
+    """The daily bar that opened at `ts`: its open and close."""
+    b = MarketIndexBar
+    row = session.execute(
+        select(b.open, b.close).where(
+            b.index_code == index_code, b.ts == ensure_utc(ts, field="ts")
+        )
+    ).first()
+    return None if row is None else (float(row[0]), float(row[1]))

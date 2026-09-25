@@ -151,6 +151,11 @@ def overlays_at(
     }
 
 
+def detail(result: OverlayAt, limit: int = 10) -> list[dict[str, object]]:
+    """The clusters of an overlay as plain data, largest contribution first."""
+    return _detail(result, limit)
+
+
 def _detail(result: OverlayAt, limit: int = 10) -> list[dict[str, object]]:
     return [
         {

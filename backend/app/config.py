@@ -86,11 +86,14 @@ class Settings(BaseSettings):
     kis_app_secret: str = ""
     kis_env: str = Field(default="real", pattern="^(real|mock)$")
     kis_rate: float = Field(
-        default=10.0,
+        default=0.5,
         gt=0,
         description=(
-            "KIS REST calls per second from this process. The official sample "
-            "paces a real account at 20/s (0.05 s apart); this is half of that"
+            "KIS REST calls per second from this process. KIS is said to allow "
+            "20/s on a real account, but on 2026-09-25 this key was refused "
+            "(EGW00201) at two calls a tenth of a second apart, and again, now "
+            "and then, at one a second held steady for minutes. Until the key's "
+            "real limit is known, one call every two seconds"
         ),
     )
     kis_rest_daily_limit: int = Field(

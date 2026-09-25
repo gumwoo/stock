@@ -59,3 +59,28 @@ def disclosures_asof(
         d.ingested_at <= asof,
     )
     return [DisclosureAsOf(*row) for row in session.execute(stmt).all()]
+
+
+def filed_between(
+    session: Session,
+    *,
+    first: date,
+    before: date,
+    stored_by: datetime,
+    instrument_ids: Collection[int],
+) -> list[DisclosureAsOf]:
+    """Disclosures filed on a day in [first, before) and stored by `stored_by`.
+
+    For a reader before the open: a filing dated an earlier calendar day was
+    public by midnight of that day, so it is known that morning even though its
+    `available_at` — the next session's open, because the receipt carries no
+    time — is still a few minutes away. The overlay keeps its own, stricter rule.
+    """
+    d = Disclosure
+    stmt = select(d.id, d.instrument_id, d.report_nm, d.available_at).where(
+        d.instrument_id.in_(list(instrument_ids)),
+        d.filed_on >= first,
+        d.filed_on < before,
+        d.ingested_at <= ensure_utc(stored_by, field="stored_by"),
+    )
+    return [DisclosureAsOf(*row) for row in session.execute(stmt).all()]

@@ -15,7 +15,7 @@ def job_ids() -> set[str]:
 def test_reading_news_is_not_scheduled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """It spends the owner's Claude usage with nobody at the keyboard."""
     monkeypatch.setattr(get_settings(), "llm_schedule_enabled", False)
-    assert "news_reading_before_close" not in job_ids()
+    assert "news_reading_before_open" not in job_ids()
     assert {
         "naver_news_pre_open",
         "naver_news_after_close",
@@ -31,12 +31,12 @@ def test_the_daily_loop_runs_after_the_korean_close_and_the_news_sweep() -> None
     assert (fields["hour"], fields["minute"], fields["day_of_week"]) == ("16", "40", "mon-fri")
 
 
-def test_reading_news_runs_before_the_close_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reading_news_runs_before_the_open_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(get_settings(), "llm_schedule_enabled", True)
-    job = build_scheduler().get_job("news_reading_before_close")
+    job = build_scheduler().get_job("news_reading_before_open")
     assert job is not None
     fields = {f.name: str(f) for f in job.trigger.fields}
-    assert (fields["hour"], fields["minute"]) == ("9", "30")
+    assert (fields["hour"], fields["minute"]) == ("8", "30")
     assert str(job.trigger.timezone) == "Asia/Seoul"
 
 
@@ -152,3 +152,25 @@ def test_the_evening_sweep_does_not_fetch_search_trends(monkeypatch: pytest.Monk
         "NaverNewsCollector",
         "DartDisclosureCollector",
     ]
+
+
+def test_minute_bars_have_jobs_of_their_own() -> None:
+    """Apart from the daily loop, so a failure in one cannot stop the other."""
+    ids = job_ids()
+    assert {"kis_minutes_after_close", "kis_index_minutes_0", "kis_index_minutes_1"} <= ids
+    job = build_scheduler().get_job("kis_minutes_after_close")
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert (fields["hour"], fields["minute"]) == ("16", "20")
+
+
+def test_the_morning_watchlist_is_frozen_after_the_reading_and_before_the_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "llm_schedule_enabled", True)
+    scheduler = build_scheduler()
+    at = {}
+    for job_id in ("naver_news_pre_open", "news_reading_before_open", "watchlist_before_open"):
+        fields = {f.name: str(f) for f in scheduler.get_job(job_id).trigger.fields}
+        at[job_id] = (int(fields["hour"]), int(fields["minute"]))
+    assert at["naver_news_pre_open"] < at["news_reading_before_open"] < at["watchlist_before_open"]
+    assert at["watchlist_before_open"] < (9, 0)

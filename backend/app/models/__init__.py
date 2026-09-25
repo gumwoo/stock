@@ -19,6 +19,7 @@ from app.models.fundamental import (
     FundamentalSource,
 )
 from app.models.instrument import Instrument, Listing, SymbolHistory
+from app.models.intraday import IndexMinuteBar, IntradaySummary, MinuteBar, MinuteFetch
 from app.models.kis import KisCredential
 from app.models.llm import LlmCall
 from app.models.market import (
@@ -57,6 +58,7 @@ from app.models.signal import (
     SignalRegime,
     StrategyConfig,
 )
+from app.models.watchlist import WatchlistMember, WatchlistSnapshot
 
 __all__ = [
     "ApiCallBucket",
@@ -79,14 +81,18 @@ __all__ = [
     "FxRate",
     "HitDecision",
     "Holding",
+    "IndexMinuteBar",
     "Instrument",
     "InstrumentPromotion",
     "Interval",
+    "IntradaySummary",
     "KisCredential",
     "Listing",
     "LlmCall",
     "MarketIndexBar",
     "MatchMethod",
+    "MinuteBar",
+    "MinuteFetch",
     "NewsItem",
     "NewsMention",
     "NewsQueryHit",
@@ -109,4 +115,6 @@ __all__ = [
     "SymbolHistory",
     "Transaction",
     "TransactionSide",
+    "WatchlistMember",
+    "WatchlistSnapshot",
 ]
