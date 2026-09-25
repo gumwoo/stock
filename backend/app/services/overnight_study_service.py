@@ -346,7 +346,7 @@ def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
         res.lost[d] = (
             f"전날({prev_of[d]}) 일봉 종가 {have}/{len(liquid)}종목뿐"
             if have < len(liquid) // 2
-            else "쓸 수 있는 목록 종목 없음"
+            else "목록 종목 모두 09:00 봉이나 전날 종가가 없거나 상한가 시가"
         )
 
     res.verdicts = study.judge(res.observations, evald)
