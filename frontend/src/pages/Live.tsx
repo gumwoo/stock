@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
+import { ThemeNews } from "../components/ThemeNews";
 import type { LiveBar, LiveMember, LiveMessage, LiveState } from "../api/types";
 import { useLiveChart } from "../hooks/useLiveChart";
 import "./Live.css";
@@ -234,6 +235,8 @@ export function Live() {
           ))}
         </div>
       </header>
+
+      <ThemeNews />
 
       <div className="live__body">
         <ol className="live__list">

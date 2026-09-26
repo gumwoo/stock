@@ -345,6 +345,8 @@ class NaverNewsCollector(BaseCollector):
     """Sweeps every listed Korean company's name through the news search."""
 
     name = "NAVER_NEWS"
+    # 원장의 진단용 칸. 같은 검색 쿼터 그룹을 쓰는 다른 소비자(테마어 스윕)가 행을 따로 남기게 한다.
+    endpoint = ENDPOINT
 
     def __init__(
         self,
@@ -980,7 +982,7 @@ class NaverNewsCollector(BaseCollector):
         lose the count. A refused reservation raises `QuotaExhausted`, which is
         a `SkipCollection` and therefore not a failure — we decided to stop.
         """
-        self._guard.reserve(QUOTA_GROUP, ENDPOINT)
+        self._guard.reserve(QUOTA_GROUP, self.endpoint)
         self._bucket.acquire()
 
         try:

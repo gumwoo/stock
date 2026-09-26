@@ -38,6 +38,7 @@ from app.collectors.naver_news import RULE_VERSION as NEWS_RULE_VERSION
 from app.collectors.naver_news import NaverNewsCollector, rejudge_hits
 from app.collectors.quota import QuotaGuard
 from app.collectors.sec_edgar import SecEdgarCollector
+from app.collectors.theme_news import ThemeNewsCollector
 from app.collectors.yfinance_history import FxRateCollector, YFinanceHistoryCollector
 from app.config import get_settings
 from app.core import logging as logging_setup
@@ -75,6 +76,7 @@ COLLECTORS = {
     "index": MarketIndexCollector,
     "datalab": NaverDataLabCollector,
     "index_minute": KisIndexMinuteCollector,
+    "theme": ThemeNewsCollector,
 }
 
 # How far back a collection reaches, in one vocabulary for every source that
@@ -92,7 +94,7 @@ PERIODS: dict[str, int] = {"2y": 2, "5y": 5, "10y": 10, "max": MAX_YEARS_BACK}
 # Sources whose range is decided by the source, not by us. SEC's companyfacts
 # is the filer's entire XBRL history in a single document; there is no shorter
 # request to make, so a period given here would be silently discarded.
-FIXED_RANGE = frozenset({"sec", "naver", "disclosure", "datalab", "index_minute"})
+FIXED_RANGE = frozenset({"sec", "naver", "disclosure", "datalab", "index_minute", "theme"})
 
 
 def cmd_config() -> int:

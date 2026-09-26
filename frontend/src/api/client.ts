@@ -7,6 +7,7 @@ import type {
   LiveBar,
   LiveState,
   Signal,
+  ThemeNewsDay,
 } from "./types";
 
 async function get<T>(path: string): Promise<T> {
@@ -37,4 +38,5 @@ export const api = {
   backtest: (id: number) => get<BacktestRunDetail>(`/api/backtests/${id}`),
   live: () => get<LiveState>("/api/live"),
   liveBars: (code: string) => get<LiveBar[]>(`/api/live/${code}/bars`),
+  themes: () => get<ThemeNewsDay>("/api/themes/today"),
 };

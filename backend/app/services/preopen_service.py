@@ -60,6 +60,7 @@ from app.collectors.naver_datalab import NaverDataLabCollector
 from app.collectors.naver_news import NaverNewsCollector
 from app.collectors.preopen_news import PreopenNewsSupplement
 from app.collectors.quota import QuotaGuard
+from app.collectors.theme_news import ThemeNewsCollector
 from app.collectors.yfinance_history import YFinanceHistoryCollector
 from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
@@ -128,6 +129,9 @@ PREFETCH = "prefetch"
 LLM = "llm"
 SUPPLEMENT = "supplement"
 SUPPLEMENT_LLM = "supplement_llm"
+# 테마어 뉴스(표시 전용). 뒤 단계가 기다리지 않는다.
+THEME_NEWS = "theme_news"
+THEME_REFRESH = "theme_refresh"
 SCORE = "score"
 SNAPSHOT = "snapshot"
 
@@ -252,6 +256,12 @@ def _run_status(run: CollectorRun) -> str:
         CollectorStatus.PARTIAL: PARTIAL,
         CollectorStatus.SKIPPED: SKIPPED,
     }.get(run.status, FAILED)
+
+
+def _themes(session: Session) -> tuple[str, str]:
+    """테마어 뉴스 스윕(표시 전용). 점수·풀·목록에는 쓰지 않으므로 실패해도 체인은 그대로 간다."""
+    run = run_collector(ThemeNewsCollector(), session)
+    return _run_status(run), run.detail or run.status.value
 
 
 def _before_open(now: datetime) -> Any | None:
@@ -650,11 +660,11 @@ def run_morning(session: Session, *, clock: Callable[[], datetime] = utc_now) ->
         ), f"news {news.status.value}, disclosures {disclosures.status.value}"
 
     _step(session, pool, SWEEP, sweep)
-    if _stop(session, pool, day, clock, (POOL, SEARCH_TRENDS, PREFETCH, LLM)):
+    if _stop(session, pool, day, clock, (POOL, SEARCH_TRENDS, PREFETCH, LLM, THEME_NEWS)):
         return pool
     _step(session, pool, POOL, lambda: freeze(session, pool, asof=clock()))
     if pool.asof is None:
-        for name in (SEARCH_TRENDS, PREFETCH, LLM):
+        for name in (SEARCH_TRENDS, PREFETCH, LLM, THEME_NEWS):
             _mark(session, pool, name, SKIPPED, detail="pool was not frozen")
         return pool
     ids = [m.instrument_id for m in members_of(session, pool)]
@@ -663,15 +673,18 @@ def run_morning(session: Session, *, clock: Callable[[], datetime] = utc_now) ->
         run = run_collector(NaverDataLabCollector(instrument_ids=ids), session)
         return _run_status(run), f"{len(ids)} names, {run.status.value}"
 
-    if _stop(session, pool, day, clock, (SEARCH_TRENDS, PREFETCH, LLM)):
+    if _stop(session, pool, day, clock, (SEARCH_TRENDS, PREFETCH, LLM, THEME_NEWS)):
         return pool
     _step(session, pool, SEARCH_TRENDS, trends)
-    if _stop(session, pool, day, clock, (PREFETCH, LLM)):
+    if _stop(session, pool, day, clock, (PREFETCH, LLM, THEME_NEWS)):
         return pool
     _step(session, pool, PREFETCH, lambda: prefetch(session, pool, now=clock()))
-    if _stop(session, pool, day, clock, (LLM,)):
+    if _stop(session, pool, day, clock, (LLM, THEME_NEWS)):
         return pool
     _step(session, pool, LLM, lambda: _read(session, ids, LLM_MORNING_BUDGET, after_hit_id=None))
+    if _stop(session, pool, day, clock, (THEME_NEWS,)):
+        return pool
+    _step(session, pool, THEME_NEWS, lambda: _themes(session))
     return pool
 
 
@@ -760,7 +773,7 @@ def run_supplement(
         logger.warning("preopen supplement: no pool for %s", day)
         return None
     if why is not None:
-        for name in (SUPPLEMENT, SUPPLEMENT_LLM):
+        for name in (SUPPLEMENT, SUPPLEMENT_LLM, THEME_REFRESH):
             _mark(session, pool, name, SKIPPED, detail=why)
         return pool
     ids = [m.instrument_id for m in members_of(session, pool)]
@@ -781,6 +794,7 @@ def run_supplement(
         SUPPLEMENT_LLM,
         lambda: _read(session, ids, LLM_SUPPLEMENT_BUDGET, after_hit_id=mark),
     )
+    _step(session, pool, THEME_REFRESH, lambda: _themes(session))
     return pool
 
 

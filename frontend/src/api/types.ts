@@ -196,3 +196,21 @@ export type LiveMessage =
       bar: LiveBar;
     }
   | { type: "seeded"; codes: string[] };
+
+/** 테마어 뉴스(표시 전용): 전날 장 마감 뒤 그 테마어로 찾은 기사 수와, 기사에 이름이 나온 종목. */
+export interface ThemeNews {
+  theme: string;
+  query: string;
+  since: string;
+  asked_at: string;
+  articles: number;
+  /** 검색 API 상한(1,000건)에 걸려 실제 기사는 더 많을 수 있다. */
+  capped: boolean;
+  headlines: { title: string; url: string; published_at: string; host: string | null }[];
+  mentions: { instrument_id: number; name: string; articles: number }[];
+}
+
+export interface ThemeNewsDay {
+  day: string | null;
+  themes: ThemeNews[];
+}

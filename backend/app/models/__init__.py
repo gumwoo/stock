@@ -59,6 +59,7 @@ from app.models.signal import (
     SignalRegime,
     StrategyConfig,
 )
+from app.models.theme import ThemeNewsDay
 from app.models.watchlist import WatchlistMember, WatchlistSnapshot
 
 __all__ = [
@@ -116,6 +117,7 @@ __all__ = [
     "SignalRegime",
     "StrategyConfig",
     "SymbolHistory",
+    "ThemeNewsDay",
     "Transaction",
     "TransactionSide",
     "WatchlistMember",
