@@ -92,6 +92,7 @@ export function Live() {
   const [interval, setInterval_] = useState<Interval>("1m");
   const [error, setError] = useState<string | null>(null);
   const [preopen, setPreopen] = useState<PreopenToday | null>(null);
+  const [preopenError, setPreopenError] = useState(false);
   const [stepsOpen, setStepsOpen] = useState(false);
   const { container, reset, push } = useLiveChart(440);
   const seconds = useRef<Map<number, LiveBar>>(new Map());
@@ -135,9 +136,13 @@ export function Live() {
       api
         .preopenToday()
         .then((p) => {
-          if (alive) setPreopen(p);
+          if (!alive) return;
+          setPreopen(p);
+          setPreopenError(false);
         })
-        .catch(() => undefined);
+        .catch(() => {
+          if (alive) setPreopenError(true);
+        });
     load();
     const timer = window.setInterval(load, 60_000);
     return () => {
@@ -264,6 +269,7 @@ export function Live() {
   const snapshot = preopen?.stages.find((s) => s.name === "snapshot")?.status ?? null;
 
   const cardTitle = (): string => {
+    if (!preopen && preopenError) return "아침 상태를 불러오지 못했습니다. API 서버가 켜져 있는지 확인해 주세요.";
     if (!preopen || !state) return "아침 상태를 불러오는 중…";
     if (state.day === preopen.day && state.source?.startsWith("morning list (no names")) {
       return "오늘은 조건에 맞는 종목이 없습니다.";

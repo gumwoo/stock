@@ -17,6 +17,7 @@
 
 .morning__steps {
   list-style: none;
+  padding: 0;
   margin-top: var(--s-4);
   display: grid;
   gap: var(--s-2);

@@ -53,3 +53,27 @@ def test_notes_only_for_failures_and_are_cut() -> None:
     assert by["prefetch"] is not None and len(by["prefetch"]) == NOTE_CHARS
     assert by["sweep"] is None
     assert by["score"] == "prerequisite not finished by 08:45: llm"
+
+
+def test_unreadable_or_naive_start_times_do_not_break_the_rows() -> None:
+    rows = stage_rows(
+        {
+            "llm": {"status": "RUNNING", "started_at": "not a time"},
+            "sweep": {"status": "RUNNING", "started_at": "2026-09-27T20:00:00"},
+        },
+        now=NOW,
+        opened=False,
+    )
+    by = {r["name"]: r["status"] for r in rows}
+    assert by["llm"] == "RUNNING" and by["sweep"] == "RUNNING"
+
+
+def test_the_list_time_matches_the_worker_cron() -> None:
+    from datetime import time
+
+    from app import worker
+    from app.services import preopen_service
+
+    assert time(8, 50) == preopen_service.LIST_AT
+    fields = {f.name: str(f) for f in worker._KR_WATCHLIST.fields}
+    assert (fields["hour"], fields["minute"]) == ("8", "50")

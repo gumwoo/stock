@@ -118,7 +118,7 @@ export function ThemeNews({
                 {t.capped ? "+" : ""}
               </span>
               {hits > 0 && (
-                <span className="themes__badge" aria-label={`오늘 목록 종목 ${hits}개`}>
+                <span className="themes__badge" title={`오늘 목록 종목 ${hits}개가 이 테마 기사에 나옴`}>
                   목록 {hits}
                 </span>
               )}

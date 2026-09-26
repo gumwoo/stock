@@ -42,6 +42,15 @@ NOTE_CHARS = 120
 NOTED = frozenset({preopen_service.FAILED, preopen_service.SKIPPED, preopen_service.PARTIAL})
 
 
+def _parse(value: object) -> datetime | None:
+    """단계 기록의 시각. 읽을 수 없거나 시간대가 없으면 None(화면 하나 때문에 API 전체가 실패하지 않게)."""
+    try:
+        at = datetime.fromisoformat(str(value)) if value else None
+    except ValueError:
+        return None
+    return at if at is not None and at.tzinfo is not None else None
+
+
 def stage_rows(
     stages: Mapping[str, Any] | None, *, now: datetime, opened: bool
 ) -> list[dict[str, Any]]:
@@ -61,8 +70,8 @@ def stage_rows(
         if isinstance(entry, dict) and status in NOTED and entry.get("detail"):
             note = str(entry["detail"])[:NOTE_CHARS]
         if status == preopen_service.RUNNING and isinstance(entry, dict):
-            started = entry.get("started_at")
-            if started and now - datetime.fromisoformat(str(started)) > SLOW_AFTER:
+            started = _parse(entry.get("started_at"))
+            if started is not None and now - started > SLOW_AFTER:
                 status = "SLOW"
         if status is None and name == preopen_service.SNAPSHOT and opened:
             status = "MISSING"

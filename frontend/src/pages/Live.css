@@ -61,6 +61,8 @@
 
 .live__list {
   list-style: none;
+  margin: 0;
+  padding: 0;
   max-height: 640px;
   overflow-y: auto;
 }
