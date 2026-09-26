@@ -88,12 +88,16 @@ def mentions(
 ) -> Counter[str]:
     """기사마다 이름이 확인된 종목을 한 번씩 센다. `registry`는 `NaverNewsCollector.registry`의 (이름, 공백 없는 소문자)."""
     counts: Counter[str] = Counter()
+    # 이름마다 한 번만 센다. 기사와 이름 쌍마다 레지스트리 전체를 훑으면 시간 대부분이 여기서 나간다.
+    conflicts_of: dict[str, tuple[str, ...]] = {}
     for title, summary in articles:
         squeezed = "".join(f"{title} {summary}".split()).casefold()
         for name, key in registry:
             if not key or key not in squeezed or name in GENERIC_NAMES:
                 continue
-            conflicts = NaverNewsCollector.conflicts_for((name,), registry)
+            if name not in conflicts_of:
+                conflicts_of[name] = NaverNewsCollector.conflicts_for((name,), registry)
+            conflicts = conflicts_of[name]
             verdict = NaverNewsCollector.judge(title, summary, name=name, conflicts=conflicts)
             # 약한 단서(주가·증시 같은 시장 어휘)만으로 확인된 이름은 세지 않는다. 회사 이름 검색과 달리 테마
             # 기사는 검색 자체가 그 회사를 가리키지 않아, "대상"·"디바이스" 같은 보통 명사 이름이 시장 기사마다 잡힌다.
@@ -157,8 +161,10 @@ class ThemeNewsCollector(NaverNewsCollector):
                             "published_at": r.published_at.isoformat(),
                             "host": r.publisher_host,
                         }
-                        for r in rows[:HEADLINES]
-                    ],
+                        for r in rows
+                        # 화면이 링크로 여는 값이다. http(s)가 아닌 주소(javascript: 등)는 두지 않는다.
+                        if r.url.lower().startswith(("http://", "https://"))
+                    ][:HEADLINES],
                     "mentions": [
                         {"instrument_id": ids[n], "name": n, "articles": c}
                         for n, c in counted.most_common(MENTIONS)
@@ -178,10 +184,12 @@ class ThemeNewsCollector(NaverNewsCollector):
                         },
                     )
                 )
+                # 테마마다 커밋한다. 뒤 테마에서 네이버가 실패해도 앞서 끝난 테마를 잃지 않고, HTTP를 기다리는
+                # 동안 행 잠금을 쥐고 있지 않는다. 쓰는 행은 매번 끝난 테마 하나라 반쪽 행은 생기지 않는다.
+                session.commit()
                 done += 1
                 if sweep.hit_page_cap:
                     capped.append(theme.key)
-        session.commit()
         detail = f"{done}/{len(self.themes)} themes since {since:%Y-%m-%d %H:%M}Z for {day}"
         if capped:
             detail += f"; capped at 1,000: {', '.join(capped)}"

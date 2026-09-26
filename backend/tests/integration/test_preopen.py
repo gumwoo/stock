@@ -368,7 +368,7 @@ class TestStages:
         clock = Clock(datetime.combine(DAY, time(8, 30), tzinfo=SEOUL))
         assert preopen_service.run_supplement(world.session, clock=clock, sleep=clock.sleep)
         world.session.refresh(pool)
-        for stage in ("supplement", "supplement_llm"):
+        for stage in ("supplement", "supplement_llm", "theme_refresh"):
             entry = pool.stages[stage]
             assert entry["status"] == "SKIPPED"  # type: ignore[index]
             assert "llm" in entry["detail"]  # type: ignore[index]
@@ -383,9 +383,10 @@ class TestStages:
         preopen_service._note(world.session, pool, "sweep", news_started_at=swept)
         preopen_service._mark(world.session, pool, "llm", "PARTIAL")
         seen: dict[str, Any] = {}
+        collectors: list[Any] = []
 
         def fake_run(collector: Any, _session: Any) -> CollectorRun:
-            seen["collector"] = collector
+            collectors.append(collector)
             return CollectorRun(
                 source=collector.name, started_at=swept, status=CollectorStatus.SUCCESS
             )
@@ -401,7 +402,9 @@ class TestStages:
         clock = Clock(datetime.combine(DAY, time(8, 30), tzinfo=SEOUL))
         preopen_service.run_supplement(world.session, clock=clock, sleep=clock.sleep)
 
-        collector = seen["collector"]
+        # 보충 스윕 다음에 테마어 뉴스가 한 번 더 돈다(표시 전용).
+        assert [c.name for c in collectors] == ["PREOPEN_NEWS_SUPPLEMENT", "THEME_NEWS"]
+        collector = collectors[0]
         assert collector.name == "PREOPEN_NEWS_SUPPLEMENT"
         assert collector.instrument_ids == frozenset(world.ids)
         assert collector.since == swept
@@ -450,7 +453,8 @@ class TestStages:
         assert pool is not None
         world.session.refresh(pool)
         stages = {k: v["status"] for k, v in pool.stages.items()}  # type: ignore[index]
-        assert list(stages) == ["sweep", "pool", "search_trends", "prefetch", "llm"]
+        assert list(stages) == ["sweep", "pool", "search_trends", "prefetch", "llm", "theme_news"]
+        assert stages["theme_news"] == "SUCCESS"
         assert stages["sweep"] == stages["pool"] == stages["search_trends"] == "SUCCESS"
         assert stages["llm"] == "SKIPPED"
         assert pool.stages["sweep"]["news_started_at"] == started.isoformat()  # type: ignore[index]
@@ -516,7 +520,7 @@ class TestStages:
         # 대체 풀이 끝낸 풀 확정 기록은 늦은 체인이 덮지 않는다.
         assert stages["pool"] == "SUCCESS"
         assert pool.status == DEGRADED_FALLBACK
-        for name in ("search_trends", "prefetch", "llm"):
+        for name in ("search_trends", "prefetch", "llm", "theme_news"):
             assert stages[name] == "SKIPPED"
         assert "NaverDataLabCollector" not in order
 

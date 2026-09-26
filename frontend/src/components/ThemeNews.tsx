@@ -3,11 +3,15 @@ import { api } from "../api/client";
 import type { ThemeNewsDay } from "../api/types";
 import "./ThemeNews.css";
 
+/** 외부 기사 주소는 http(s)일 때만 링크로 연다(저장할 때도 거르지만 화면에서 한 번 더). */
+const safe = (url: string) => /^https?:\/\//i.test(url);
+
 /**
  * 테마어 뉴스: 전날 장 마감 뒤 테마어("AI 관련주", "원전" 등)로 찾은 기사 수와, 그 기사에 이름이 나온 종목.
  *
- * 표시 전용이다. 목록의 선정·순위·점수에는 들어가지 않는다. 밤사이 업종 연구에서 이런 움직임은 9시 시가에
- * 이미 반영돼 있었으므로, 테마 기사가 많다는 것은 "살 이유"가 아니라 "볼 곳"이다.
+ * 표시 전용이다. 목록의 선정·순위·점수에는 들어가지 않는다. 밤사이 업종 연구와 NXT 후속 연구에서 이런
+ * 신호로 9시나 8시에 사서 비용 뒤·평소(비교군) 대비 남는다는 근거를 찾지 못했으므로, 테마 기사가 많다는 것은
+ * "살 이유"가 아니라 "볼 곳"이다.
  */
 export function ThemeNews() {
   const [data, setData] = useState<ThemeNewsDay | null>(null);
@@ -82,9 +86,13 @@ export function ThemeNews() {
           <ul className="themes__headlines">
             {selected.headlines.map((h) => (
               <li key={h.url}>
-                <a href={h.url} target="_blank" rel="noreferrer">
-                  {h.title}
-                </a>
+                {safe(h.url) ? (
+                  <a href={h.url} target="_blank" rel="noreferrer">
+                    {h.title}
+                  </a>
+                ) : (
+                  h.title
+                )}
                 <span className="themes__muted">
                   {" "}
                   · {h.host ?? ""} {time(h.published_at)}
