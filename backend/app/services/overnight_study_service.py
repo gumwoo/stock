@@ -236,6 +236,18 @@ class Result:
     """평가일 → 그 전 한국 거래일(휴장일 보정 뒤)."""
 
 
+def liquid_tickers(by_day: dict[str, dict[date, tuple[float, float, float]]]) -> list[str]:
+    """학습 구간(2023-09-21~2025-09-19) 200일 이상, 평균 일 거래대금 10억 원 이상. 트럼프 연구도 같은 유니버스를 쓴다."""
+    liquid = []
+    for t, series in by_day.items():
+        tr = [
+            (c * v) for d, (_, c, v) in series.items() if study.TRAIN_FIRST <= d <= study.TRAIN_LAST
+        ]
+        if len(tr) >= study.MIN_TRAIN_DAYS and statistics.fmean(tr) >= study.MIN_TRADED_VALUE:
+            liquid.append(t)
+    return liquid
+
+
 def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
     res = Result()
     tickers = universe(session)
@@ -275,13 +287,7 @@ def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
     by_day: dict[str, dict[date, tuple[float, float, float]]] = {
         t: {date.fromisoformat(d): (o, c, v) for d, o, c, v in rows} for t, rows in daily.items()
     }
-    liquid = []
-    for t, series in by_day.items():
-        tr = [
-            (c * v) for d, (_, c, v) in series.items() if study.TRAIN_FIRST <= d <= study.TRAIN_LAST
-        ]
-        if len(tr) >= study.MIN_TRAIN_DAYS and statistics.fmean(tr) >= study.MIN_TRADED_VALUE:
-            liquid.append(t)
+    liquid = liquid_tickers(by_day)
     res.liquid = len(liquid)
     res.liquid_names = sorted(liquid)
     gap: dict[str, dict[date, float]] = {}

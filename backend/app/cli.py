@@ -852,6 +852,57 @@ def cmd_overnight_nxt(folder: str, kis_minutes: str | None, fetch: bool, counts_
     return 0
 
 
+def _fit_line(label: str, fit: object) -> str:
+    from app.scoring.trump_study import Fit
+
+    assert isinstance(fit, Fit)
+    b = _fmt(fit.b * 100 if fit.b is not None else None, "+.3f")
+    return f"{label} b {b}%p t {_fmt(fit.t, '.2f')} (n {fit.n}, 주 {fit.clusters})"
+
+
+def _trump_verdict(v: object) -> str:
+    from app.scoring.trump_study import Verdict
+
+    assert isinstance(v, Verdict)
+    fb, bb = (h.b * 100 if h.b is not None else None for h in v.halves)
+    hb = v.holdout.b * 100 if v.holdout.b is not None else None
+    return (
+        f"{v.key} {v.state:<16} 신호 {v.signal_days} 비교 {v.comparison_days} | "
+        + _fit_line("연구", v.study)
+        + f" | 절반 [{_fmt(fb, '+.3f')}, {_fmt(bb, '+.3f')}] 홀드아웃 {_fmt(hb, '+.3f')}"
+        + f"(n {v.holdout.n})  {v.text}"
+    )
+
+
+def cmd_trump_study(folder: str, archive: str) -> int:
+    """트럼프 관세 글 → 다음 한국 거래일 갭·첫 1시간. 파일만 읽는다."""
+    from pathlib import Path
+
+    from app.scoring import trump_study as ts
+    from app.services import trump_study_service as svc
+
+    res = svc.run(Path(folder), Path(archive))
+    print(f"글 {res.posts}개, 관세 글(URL 제외 본문) {res.tariff_posts}개")
+    print(f"관측 {len(res.days)}일, 1,000종목 미만으로 뺀 날: {[str(d) for d in res.dropped_days]}")
+    for v in res.verdicts:
+        print("  " + _trump_verdict(v))
+    print(
+        f"포워드 기록 후보: {'예' if res.candidate else '아니오'} (T2와 T3 모두, v{ts.STUDY_VERSION})"
+    )
+    for label, (n, mean, med, trim) in res.describe.items():
+        print(
+            f"  탐색 연구 구간 {label}: {n}일 평균 {mean * 100:+.3f}% "
+            f"중앙값 {med * 100:+.3f}% 10% 절단 {trim * 100:+.3f}%"
+        )
+    for label, vs in res.explore.items():
+        print(f"  탐색 [{label}]")
+        for v in vs:
+            print("    " + _trump_verdict(v))
+    for label, fit in res.explore_fits.items():
+        print("  탐색 " + _fit_line(label, fit))
+    return 0
+
+
 def cmd_intraday(analyze: bool) -> int:
     """What the minute bars say: the usual day, and the morning lists against their questions."""
     with session_scope() as session:
@@ -1118,6 +1169,13 @@ def main(argv: list[str] | None = None) -> int:
     nx.add_argument("--fetch", action="store_true", help="fetch NXT minute bars from KIS first")
     nx.add_argument("--counts-only", action="store_true", help="count observable days; no verdict")
 
+    tr = sub.add_parser(
+        "trump-study",
+        help="Trump tariff posts vs next KR session gap and first hour; files only",
+    )
+    tr.add_argument("--dir", default="data/overnight_study")
+    tr.add_argument("--archive", default="data/trump/truth_archive.csv")
+
     watch = sub.add_parser("watchlist", help="the newest morning watchlist; reads only")
     watch.add_argument("--take", action="store_true", help="freeze today's if none exists")
 
@@ -1183,6 +1241,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_disclosure_first_hour(
                 args.data, args.minutes, args.first, args.last, args.fetch, args.limit
             )
+        case "trump-study":
+            return cmd_trump_study(args.dir, args.archive)
         case "overnight-nxt":
             return cmd_overnight_nxt(args.dir, args.kis_minutes, args.fetch, args.counts_only)
         case "overnight-study":
