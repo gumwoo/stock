@@ -61,6 +61,7 @@ from app.collectors.naver_news import NaverNewsCollector
 from app.collectors.preopen_news import PreopenNewsSupplement
 from app.collectors.quota import QuotaGuard
 from app.collectors.theme_news import ThemeNewsCollector
+from app.collectors.theme_news import morning_day as morning_day  # 화면(API)용 재노출
 from app.collectors.yfinance_history import YFinanceHistoryCollector
 from app.config import get_settings
 from app.core.calendar import Market, MarketCalendar
@@ -107,6 +108,8 @@ KR = MarketCalendar(Market.KR)
 MORNING = time(7, 0)
 # 08:30·08:40 단계가 앞 단계를 기다리는 한계. 08:50 목록 전에 끝나야 한다.
 DEADLINE = time(8, 45)
+# 목록을 얼리는 시각. worker의 `_KR_WATCHLIST` cron(08:50)과 같아야 한다.
+LIST_AT = time(8, 50)
 POLL = timedelta(seconds=60)
 
 DISCOVERY_TOP = 30

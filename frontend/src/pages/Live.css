@@ -21,6 +21,11 @@
   gap: var(--s-1);
 }
 
+/* display를 준 요소는 hidden 속성이 덮이므로 명시한다. 차트(.live__chart)에는 display를 주지 않는다. */
+.live__intervals[hidden] {
+  display: none;
+}
+
 .live__interval {
   border: 1px solid var(--c-border);
   background: transparent;
@@ -39,23 +44,29 @@
 
 .live__body {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 280px 1fr;
   gap: var(--s-5);
+}
+
+.live__side {
+  border-right: 1px solid var(--c-border);
+  padding-right: var(--s-3);
+}
+
+.live__listhead {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  padding: 0 var(--s-2) var(--s-2);
 }
 
 .live__list {
   list-style: none;
-  border-right: 1px solid var(--c-border);
-  padding-right: var(--s-3);
   max-height: 640px;
   overflow-y: auto;
 }
 
 .live__item {
-  display: grid;
-  grid-template-columns: 24px 1fr auto;
-  align-items: baseline;
-  gap: var(--s-2);
+  display: block;
   width: 100%;
   padding: var(--s-2);
   border: none;
@@ -66,8 +77,38 @@
   cursor: pointer;
 }
 
+.live__item:hover {
+  background: var(--c-bg-subtle);
+}
+
 .live__item--on {
   background: var(--c-bg-subtle);
+}
+
+.live__item--on .live__name {
+  font-weight: var(--w-semibold);
+}
+
+.live__row {
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  align-items: baseline;
+  gap: var(--s-2);
+}
+
+.live__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin: var(--s-1) 0 0 32px;
+}
+
+.live__tag {
+  font-size: var(--t-micro);
+  color: var(--c-text-secondary);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  padding: 0 var(--s-2);
 }
 
 .live__rank {
@@ -108,8 +149,13 @@
 
 .live__price {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: var(--s-3);
+}
+
+.live__price .live__change {
+  font-size: var(--t-h3);
 }
 
 .live__big {
@@ -137,10 +183,52 @@
   padding: 2px var(--s-2);
 }
 
-.live__fact {
+.live__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-5);
+  margin-top: var(--s-3);
+  font-size: var(--t-small);
+}
+
+.live__facts dt {
   font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
+
+.live__facts dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.live__warn {
+  margin-top: var(--s-2);
+  font-size: var(--t-micro);
+  color: var(--c-warn);
+}
+
+.live__stale {
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  padding: var(--s-3) var(--s-4);
+  margin-bottom: var(--s-4);
+  font-size: var(--t-small);
   color: var(--c-text-secondary);
-  padding: 2px 0;
+}
+
+.live__stale .morning {
+  margin-top: var(--s-3);
+}
+
+.live__link {
+  margin-top: var(--s-1);
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: var(--t-small);
+  color: var(--c-accent);
+  cursor: pointer;
 }
 
 .live__chart {
@@ -157,10 +245,13 @@
   .live__body {
     grid-template-columns: 1fr;
   }
-  .live__list {
+  .live__side {
     border-right: none;
     border-bottom: 1px solid var(--c-border);
-    max-height: 220px;
+    padding-right: 0;
+  }
+  .live__list {
+    max-height: 260px;
   }
 }
 
@@ -170,9 +261,6 @@
   color: var(--c-text-secondary);
 }
 
-.live__fact--warn {
-  color: var(--c-warn);
-}
 
 .live__abstain {
   margin: 6px 0 0;

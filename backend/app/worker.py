@@ -116,6 +116,7 @@ _KR_PREOPEN_SUPPLEMENT = CronTrigger(
     day_of_week="mon-fri", hour=8, minute=30, timezone="Asia/Seoul"
 )
 _KR_PREOPEN_SCORES = CronTrigger(day_of_week="mon-fri", hour=8, minute=40, timezone="Asia/Seoul")
+# `preopen_service.LIST_AT`과 같아야 한다(화면이 "다음 목록 시각"으로 보여 준다).
 _KR_WATCHLIST = CronTrigger(day_of_week="mon-fri", hour=8, minute=50, timezone="Asia/Seoul")
 
 

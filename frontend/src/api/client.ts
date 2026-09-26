@@ -6,6 +6,7 @@ import type {
   Instrument,
   LiveBar,
   LiveState,
+  PreopenToday,
   Signal,
   ThemeNewsDay,
 } from "./types";
@@ -39,4 +40,5 @@ export const api = {
   live: () => get<LiveState>("/api/live"),
   liveBars: (code: string) => get<LiveBar[]>(`/api/live/${code}/bars`),
   themes: () => get<ThemeNewsDay>("/api/themes/today"),
+  preopenToday: () => get<PreopenToday>("/api/preopen/today"),
 };

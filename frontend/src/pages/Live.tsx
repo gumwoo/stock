@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
+import { MorningStatus, dayLabel } from "../components/MorningStatus";
 import { ThemeNews } from "../components/ThemeNews";
-import type { LiveBar, LiveMember, LiveMessage, LiveState } from "../api/types";
+import type { LiveBar, LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
 import { useLiveChart } from "../hooks/useLiveChart";
 import "./Live.css";
 
@@ -14,10 +15,11 @@ import "./Live.css";
  * read against the morning's reason for looking, not instead of it.
  */
 
+// 좋은·나쁜 뉴스는 색이 아니라 기호로 구분한다(한국식 상승 빨강과 부딪히지 않게).
 const REASONS: Record<string, string> = {
   DISCOVERY_SURGE: "뉴스 급증",
-  POSITIVE_NEWS_OVERLAY: "좋은 뉴스",
-  NEGATIVE_NEWS_OVERLAY: "나쁜 뉴스",
+  POSITIVE_NEWS_OVERLAY: "＋좋은 뉴스",
+  NEGATIVE_NEWS_OVERLAY: "－나쁜 뉴스",
   DISCLOSURE_EVENT: "공시",
   SEARCH_SURGE: "검색 급증",
   TRACKED_HIGH_SCORE: "점수 상위",
@@ -43,6 +45,23 @@ function statusLabel(status: string): string {
   if (status.startsWith("closed")) return "오늘 장 마감";
   if (status.startsWith("reconnecting")) return "재연결 중";
   return status;
+}
+
+/** 상태 앞의 기호. 색만으로 구분하지 않는다. */
+function statusMark(status: string): string {
+  if (status.startsWith("live")) return "●";
+  if (status.startsWith("off") || status.startsWith("another process")) return "✕";
+  return "○";
+}
+
+/** 게이트웨이가 목록을 보여 줄 수 없는 상태(꺼짐, 다른 프로세스가 연결을 씀). */
+function feedUnavailable(status: string): boolean {
+  return status.startsWith("off") || status.startsWith("another process");
+}
+
+function changeClass(change: number | undefined): string {
+  if (change == null || change === 0) return "live__change";
+  return change > 0 ? "live__change live__change--up" : "live__change live__change--down";
 }
 
 function sourceLabel(source: string | null): string {
@@ -72,6 +91,8 @@ export function Live() {
   const [selected, setSelected] = useState<string | null>(null);
   const [interval, setInterval_] = useState<Interval>("1m");
   const [error, setError] = useState<string | null>(null);
+  const [preopen, setPreopen] = useState<PreopenToday | null>(null);
+  const [stepsOpen, setStepsOpen] = useState(false);
   const { container, reset, push } = useLiveChart(440);
   const seconds = useRef<Map<number, LiveBar>>(new Map());
   const selectedRef = useRef<string | null>(null);
@@ -92,11 +113,33 @@ export function Live() {
           if (!alive) return;
           setState(s);
           setError(null);
-          if (selectedRef.current === null && s.members.length > 0) setSelected(s.members[0].code);
+          // 새 날 목록에 이전에 고른 종목이 없으면 첫 종목으로 다시 고른다.
+          const codes = s.members.map((m) => m.code);
+          if (selectedRef.current === null || !codes.includes(selectedRef.current)) {
+            setSelected(codes[0] ?? null);
+          }
         })
         .catch((e: Error) => alive && setError(e.message));
     load();
     const timer = window.setInterval(load, 15_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  // 아침 흐름 상태(다음 목록 시각, 단계). 실시간 연결과 따로 DB에서 읽는다.
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api
+        .preopenToday()
+        .then((p) => {
+          if (alive) setPreopen(p);
+        })
+        .catch(() => undefined);
+    load();
+    const timer = window.setInterval(load, 60_000);
     return () => {
       alive = false;
       window.clearInterval(timer);
@@ -207,27 +250,59 @@ export function Live() {
     [state, selected],
   );
 
+  // 체결마다 state가 바뀌므로 id 목록 문자열을 기준으로 집합을 만든다. 오늘 아침 목록일 때만.
+  const idKey =
+    state?.source === "morning list" ? state.members.map((m) => m.instrument_id).join(",") : "";
+  const listIds = useMemo(() => (idKey ? new Set(idKey.split(",").map(Number)) : null), [idKey]);
+
+  const members = state?.members ?? [];
+  const empty = state !== null && members.length === 0;
+  const today = preopen?.day ?? null;
+  // 목록이 있어도 다음 아침 것이 아니면(전날 목록이 남아 있음) 알린다. 목록이 비었으면 카드가 먼저다.
+  const stale =
+    !empty && !!state?.day && !!today && state.day !== today && !state.status.startsWith("live");
+  const snapshot = preopen?.stages.find((s) => s.name === "snapshot")?.status ?? null;
+
+  const cardTitle = (): string => {
+    if (!preopen || !state) return "아침 상태를 불러오는 중…";
+    if (state.day === preopen.day && state.source?.startsWith("morning list (no names")) {
+      return "오늘은 조건에 맞는 종목이 없습니다.";
+    }
+    if (snapshot === "MISSING") return "오늘 목록을 만들지 못했습니다.";
+    if (!preopen.list_passed) return `다음 관찰 목록: ${dayLabel(preopen.day)} 08:50`;
+    if (snapshot === "SUCCESS" && feedUnavailable(state.status)) {
+      return "오늘 목록은 만들어졌지만 실시간 연결이 꺼져 이 화면에 보이지 않습니다. python -m app.cli watchlist 로 볼 수 있습니다.";
+    }
+    if (snapshot === "SUCCESS") return "오늘 목록이 만들어졌습니다. 08:55부터 이 화면에 표시됩니다.";
+    return `오늘 목록을 만드는 중입니다(${dayLabel(preopen.day)} 08:50).`;
+  };
+
   return (
     <section className="live">
       <header className="live__head">
         <div>
           <h1 className="live__title">오늘의 관찰</h1>
           <p className="live__disclaimer">
-            관찰 목록 — 매수 추천이 아닙니다. 오늘 뉴스·공시·검색 급증이 있어 확인할 가치가 있는
-            종목입니다.
+            관찰 목록 — 매수 추천이 아닙니다. 오늘 뉴스·공시·검색 급증이 있어 확인할 가치가 있는 종목입니다.
           </p>
           <p className="live__status">
-            {state
-              ? `${statusLabel(state.status)}${state.source ? ` · ${sourceLabel(state.source)}` : ""}`
-              : "불러오는 중…"}
+            {state ? (
+              <>
+                <span aria-hidden="true">{statusMark(state.status)}</span> {statusLabel(state.status)}
+                {state.source ? ` · ${sourceLabel(state.source)}` : ""}
+              </>
+            ) : (
+              "불러오는 중…"
+            )}
             {error ? ` · ${error}` : ""}
           </p>
         </div>
-        <div className="live__intervals" role="group" aria-label="봉 간격">
+        <div className="live__intervals" role="group" aria-label="봉 간격" hidden={empty}>
           {(["1m", "1s"] as Interval[]).map((i) => (
             <button
               key={i}
               className={interval === i ? "live__interval live__interval--on" : "live__interval"}
+              aria-pressed={interval === i}
               onClick={() => setInterval_(i)}
             >
               {i === "1m" ? "1분봉" : "1초봉"}
@@ -236,47 +311,74 @@ export function Live() {
         </div>
       </header>
 
-      <ThemeNews />
+      {stale && state?.day && today && preopen && (
+        <div className="live__stale">
+          <p>
+            {dayLabel(state.day)} 목록입니다. 다음 목록: {dayLabel(today)} 08:50 (08:55부터 이 화면에 표시)
+          </p>
+          <button className="live__link" aria-expanded={stepsOpen} onClick={() => setStepsOpen(!stepsOpen)}>
+            {stepsOpen ? "아침 단계 접기" : "아침 단계 보기"}
+          </button>
+          {stepsOpen && <MorningStatus data={preopen} title="다음 아침 단계" />}
+        </div>
+      )}
+
+      <ThemeNews listIds={listIds} listDay={state?.day ?? null} />
 
       <div className="live__body">
-        <ol className="live__list">
-          {state?.members.map((m) => (
-            <li key={m.code}>
-              <button
-                className={m.code === selected ? "live__item live__item--on" : "live__item"}
-                onClick={() => setSelected(m.code)}
-              >
-                <span className="live__rank">{m.rank}</span>
-                <span className="live__name">{m.name}</span>
-                <span
-                  className={
-                    m.last && m.last.change_pct > 0
-                      ? "live__change live__change--up"
-                      : m.last && m.last.change_pct < 0
-                        ? "live__change live__change--down"
-                        : "live__change"
-                  }
-                >
-                  {signed(m.last?.change_pct, 2, "%")}
-                </span>
-              </button>
-            </li>
-          ))}
-          {state && state.members.length === 0 && (
-            <li className="live__empty">
-              {state.source?.startsWith("morning list (no names")
-                ? "오늘 조건에 맞는 종목이 없습니다."
-                : "볼 종목이 없습니다."}
-            </li>
-          )}
-        </ol>
+        <div className="live__side">
+          <p className="live__listhead">
+            {empty
+              ? "목록 없음"
+              : `${stale && state?.day ? `${dayLabel(state.day)} 목록` : "오늘 목록"} ${members.length}종목 · 등락은 전일 대비`}
+          </p>
+          <ol className="live__list">
+            {members.map((m) => {
+              const reasons = m.reasons.map((r) => REASONS[r] ?? r);
+              return (
+                <li key={m.code}>
+                  <button
+                    className={m.code === selected ? "live__item live__item--on" : "live__item"}
+                    aria-current={m.code === selected ? "true" : undefined}
+                    onClick={() => setSelected(m.code)}
+                  >
+                    <span className="live__row">
+                      <span className="live__rank">{m.rank}</span>
+                      <span className="live__name">{m.name}</span>
+                      <span className={changeClass(m.last?.change_pct)}>
+                        {signed(m.last?.change_pct, 2, "%")}
+                      </span>
+                    </span>
+                    <span className="live__tags">
+                      {reasons.slice(0, 3).map((r) => (
+                        <span key={r} className="live__tag">
+                          {r}
+                        </span>
+                      ))}
+                      {reasons.length > 3 && <span className="live__tag">+{reasons.length - 3}</span>}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
 
         <div className="live__main">
+          {empty &&
+            (preopen ? (
+              <MorningStatus data={preopen} title={cardTitle()} />
+            ) : (
+              <p className="live__empty">{cardTitle()}</p>
+            ))}
           {member && (
             <div className="live__why">
               <div className="live__price">
                 <span className="live__big">
                   {member.last ? member.last.price.toLocaleString("ko-KR") : "–"}
+                </span>
+                <span className={changeClass(member.last?.change_pct)}>
+                  {signed(member.last?.change_pct, 2, "%")}
                 </span>
                 <span className="live__code">
                   {member.name} · {member.code}
@@ -288,26 +390,38 @@ export function Live() {
                     {REASONS[r] ?? r}
                   </span>
                 ))}
-                <span className="live__fact">뉴스 점수 {signed(member.overlay_points)}</span>
-                <span className="live__fact">
-                  검색량 {member.attention_surge == null ? "–" : `${member.attention_surge.toFixed(2)}배`}
-                </span>
-                {member.regime && <span className="live__fact">{REGIMES[member.regime] ?? member.regime}</span>}
-                <span className="live__fact">
-                  관찰용 점수 {member.total_score == null ? "–" : member.total_score.toFixed(1)}
-                </span>
-                {member.prefetch_status && PREFETCH[member.prefetch_status] && (
-                  <span className="live__fact live__fact--warn">{PREFETCH[member.prefetch_status]}</span>
-                )}
               </div>
+              <dl className="live__facts">
+                <div>
+                  <dt>뉴스 점수</dt>
+                  <dd>{signed(member.overlay_points)}</dd>
+                </div>
+                <div>
+                  <dt>검색량</dt>
+                  <dd>{member.attention_surge == null ? "–" : `${member.attention_surge.toFixed(2)}배`}</dd>
+                </div>
+                <div>
+                  <dt>국면</dt>
+                  <dd>{member.regime ? (REGIMES[member.regime] ?? member.regime) : "–"}</dd>
+                </div>
+                <div>
+                  <dt>관찰용 점수</dt>
+                  <dd>{member.total_score == null ? "–" : member.total_score.toFixed(1)}</dd>
+                </div>
+              </dl>
+              {member.prefetch_status && PREFETCH[member.prefetch_status] && (
+                <p className="live__warn">{PREFETCH[member.prefetch_status]}</p>
+              )}
               {member.abstained_reason && <p className="live__abstain">점수 보류: {member.abstained_reason}</p>}
             </div>
           )}
-          <div ref={container} className="live__chart" />
-          <p className="live__note">
-            들어오는 체결로 그린 화면용 차트이고 기록이 아닙니다. 분석에 쓰는 기록은 장 마감 뒤 받는
-            1분봉입니다.{interval === "1s" ? " 1초봉은 이 화면을 연 때부터 그립니다." : ""}
-          </p>
+          <div ref={container} className="live__chart" hidden={empty} />
+          {!empty && (
+            <p className="live__note">
+              들어오는 체결로 그린 화면용 차트이고 기록이 아닙니다. 분석에 쓰는 기록은 장 마감 뒤 받는
+              1분봉입니다.{interval === "1s" ? " 1초봉은 이 화면을 연 때부터 그립니다." : ""}
+            </p>
+          )}
         </div>
       </div>
     </section>

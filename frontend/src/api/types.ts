@@ -214,3 +214,23 @@ export interface ThemeNewsDay {
   day: string | null;
   themes: ThemeNews[];
 }
+
+/** 아침 흐름 한 단계. status가 null이면 아직 기록이 없다. SLOW는 60분 넘게 진행 중, MISSING은 개장했는데 목록이 없음. */
+export interface PreopenStage {
+  name: string;
+  label: string;
+  at: string;
+  status: string | null;
+  note: string | null;
+}
+
+export interface PreopenToday {
+  now: string;
+  /** 다음(또는 오늘) 아침이 속한 거래일. */
+  day: string;
+  list_at: string;
+  list_passed: boolean;
+  opened: boolean;
+  pool: { status: string; pool_count: number; asof: string | null } | null;
+  stages: PreopenStage[];
+}
