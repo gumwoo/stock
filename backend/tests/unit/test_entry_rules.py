@@ -116,3 +116,102 @@ def test_stop_price_is_put_on_the_tick_grid_before_one_tick_down() -> None:
 def test_entry_ticks_raise_the_fill() -> None:
     bars = [flat("0900", 100), flat("0904", 101), flat("0905", 102), flat("0950", 104)]
     assert er.r1(bars, entry_ticks=1) == pytest.approx(104 / 103 - 1)
+
+
+def _series(values: list[float]) -> dict[date, float]:
+    return {date(2026, 6, 1) + timedelta(days=i): v for i, v in enumerate(values)}
+
+
+def _entry_days(n: int) -> list[date]:
+    return [date(2026, 6, 1) + timedelta(days=i) for i in range(n)]
+
+
+def test_the_holdout_is_the_last_fifteen_entry_days() -> None:
+    # 연구 42일은 양수, 마지막 15일은 음수: 홀드아웃이 끝이어야 성립하지 않는다.
+    vals = [0.01 + (0.001 if i % 2 else -0.001) for i in range(42)] + [-0.01] * 15
+    v = er.judge_one("X", "", _series(vals), _entry_days(57))
+    assert v.holdout_days == 15 and v.holdout_mean is not None and v.holdout_mean < 0
+    assert v.state == "not established"
+
+
+def test_t_must_reach_two_and_a_half() -> None:
+    # 평균 0.001, 표준편차 약 0.0028: t 약 2.3이면 성립하지 않는다.
+    base = [0.001 + (0.0028 if i % 2 else -0.0028) for i in range(42)]
+    v = er.judge_one("X", "", _series([*base, 0.01] * 1 + [0.01] * 14), _entry_days(57))
+    assert v.t is not None and 2.0 < v.t < er.MIN_T and v.state == "not established"
+
+
+def test_both_halves_must_be_positive() -> None:
+    vals = [-0.001 + (0.0001 if i % 2 else -0.0001) for i in range(21)]
+    vals += [0.03 + (0.0001 if i % 2 else -0.0001) for i in range(21)]
+    v = er.judge_one("X", "", _series(vals + [0.01] * 15), _entry_days(57))
+    assert v.halves[0] is not None and v.halves[0] < 0 and v.state == "not established"
+
+
+def test_too_few_study_days() -> None:
+    v = er.judge_one("X", "", _series([0.01] * 19 + [0.01] * 15), _entry_days(34))
+    assert v.state == "not enough days"
+
+
+def test_candidates_need_their_pairs() -> None:
+    def verdicts(ok: set[str]) -> list[er.Verdict]:
+        return [
+            er.Verdict(
+                k, x, 42, 0.01, 3.0, (0.01, 0.01), 15, 0.01, "established" if k in ok else "no"
+            )
+            for k, x in er.QUESTIONS
+        ]
+
+    assert er.candidates(verdicts({"E1", "D1'"})) == ["R1"]
+    assert er.candidates(verdicts({"E1"})) == []
+    assert er.candidates(verdicts({"D3"})) == []
+    assert er.candidates(verdicts({"E3", "D3", "E2"})) == ["R2", "R3"]
+
+
+def test_cost_is_taken_from_e_but_not_from_differences() -> None:
+    bars = [flat("0900", 100), flat("0950", 101)]
+    days = {date(2026, 7, 1): [bars]}
+    assert er.day_values(days, er.r0)[date(2026, 7, 1)] == pytest.approx(0.01 - er.COST)
+    assert er.day_values(days, er.r3, minus=er.r0)[date(2026, 7, 1)] == pytest.approx(0.0)
+
+
+def test_range_high_ignores_the_0900_high_but_includes_the_open() -> None:
+    bars = [
+        bar("0900", 10_000, 10_500, 9_900, 10_000),  # 09:00 봉 고가는 범위에 넣지 않는다
+        flat("0902", 10_000),
+        bar("0906", 10_000, 10_050, 10_000, 10_050),  # H = 10,000을 넘음 → 10,010에 산다
+        flat("0950", 10_100),
+    ]
+    assert er.r2(bars) == pytest.approx(10_100 / 10_010 - 1)
+
+
+def test_take_profit_rounds_up_and_exit_is_the_last_bar() -> None:
+    # E 10,005 → 목표 10,305.15, 10원 호가로 올림 10,310.
+    bars = [flat("0900", 10_005), bar("0905", 10_100, 10_309, 10_050, 10_200), flat("0958", 10_150)]
+    assert er.r3(bars) == pytest.approx(10_150 / 10_005 - 1)  # 10,309는 목표 미달, 마지막 봉에 판다
+    hit = [flat("0900", 10_005), bar("0905", 10_100, 10_320, 10_050, 10_200), flat("0958", 9_000)]
+    assert er.r3(hit) == pytest.approx(10_310 / 10_005 - 1)
+    r1_exit = [
+        flat("0900", 100),
+        flat("0904", 101),
+        flat("0905", 101),
+        flat("0930", 90),
+        flat("0958", 103),
+    ]
+    assert er.r1(r1_exit) == pytest.approx(103 / 101 - 1)  # 진입 다음 봉이 아니라 마지막 봉
+
+
+def test_range_high_includes_the_open_so_a_bounce_below_it_is_no_breakout() -> None:
+    bars = [flat("0900", 10_000), flat("0902", 9_800), bar("0906", 9_850, 9_900, 9_850, 9_900)]
+    assert er.r2(bars) is None  # 09:01~09:04 고가(9,800)는 넘었지만 시가(10,000)는 못 넘었다
+
+
+def test_the_pre_registered_constants() -> None:
+    assert (er.COST, er.STOP, er.TAKE, er.MIN_T, er.HOLDOUT_DAYS, er.MIN_DAYS) == (
+        0.003,
+        0.02,
+        0.03,
+        2.5,
+        15,
+        20,
+    )

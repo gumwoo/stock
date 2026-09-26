@@ -76,6 +76,8 @@ def run(path: Path) -> EntryResult:
             er.judge_one(f"E:{label}", "비용 뒤", er.day_values(sample, rule), entry_days),
         ]
 
+    judged(er.r0, "R0 as is (baseline for the rows below)")
+    judged(er.buy_at_0905, "unconditional buy at first bar >=09:05")
     for stop, take in ((0.01, 0.01), (0.02, 0.02), (0.03, 0.03)):
         judged(partial(er.r3, stop=stop, take=take), f"R3 -{stop:.0%}/+{take:.0%}")
     judged(partial(er.r1, confirm="0902", after="0903"), "R1 confirm 09:02 buy >=09:03")
