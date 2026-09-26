@@ -131,3 +131,9 @@ def test_n3_subtracts_the_cost() -> None:
 def test_pre_close_stops_at_eight_forty_nine() -> None:
     bars = [bar("0801", 100, 101, 10), bar("0849", 101, 104, 10), bar("0855", 104, 108, 10)]
     assert n.pre_close(bars) == 104
+
+
+def test_nan_prices_are_not_a_name_day() -> None:
+    nan = float("nan")
+    assert n.name_day(nan, 100.0, 101.0, 102.0) is None
+    assert n.name_day(100.0, 100.0, 101.0, nan) is None

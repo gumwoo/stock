@@ -143,6 +143,15 @@ def split_date(signal_days: Sequence[date]) -> date:
     return ordered[len(ordered) // 2]
 
 
+def split_halves(study: Sequence[Day]) -> tuple[list[Day], list[Day]]:
+    """연구 구간을 `split_date` 앞(앞 절반)과 그 날부터(뒤 절반)로. 신호일이 없으면 둘 다 빈 목록."""
+    sig = [d.day for d in study if d.signal]
+    if not sig:
+        return [], []
+    cut = split_date(sig)
+    return [d for d in study if d.day < cut], [d for d in study if d.day >= cut]
+
+
 # --- 회귀 ---------------------------------------------------------------------------------
 
 
@@ -275,9 +284,7 @@ def judge(days: Sequence[Day], *, cost: float = COST) -> list[Verdict]:
     hold = [d for d in days if d.day in held]
     sig_days = [d.day for d in study if d.signal]
     n_sig, n_cmp = len(sig_days), sum(1 for d in study if not d.signal)
-    cut = split_date(sig_days) if sig_days else None
-    front = [d for d in study if cut is not None and d.day < cut]
-    back = [d for d in study if cut is not None and d.day >= cut]
+    front, back = split_halves(study)
     out = []
     for key, text in QUESTIONS:
         s = _fit(key, study, cost)

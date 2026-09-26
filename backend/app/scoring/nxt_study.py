@@ -33,6 +33,7 @@ g8·g9-g8·KRX 9시→10시, 진입가(첫 봉 시가, 08:49 종가), 거래대�
 from __future__ import annotations
 
 import hashlib
+import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -111,7 +112,11 @@ class NameDay:
 
 
 def name_day(p8: float | None, prev_close: float, open9: float, close10: float) -> NameDay | None:
-    if p8 is None or min(p8, prev_close, open9, close10) <= 0:
+    if p8 is None:
+        return None
+    values = (p8, prev_close, open9, close10)
+    # NaN은 비교 연산으로 걸러지지 않는다(min이 NaN이면 NaN <= 0은 거짓). 없는 값으로 뺀다.
+    if not all(math.isfinite(v) for v in values) or min(values) <= 0:
         return None
     g8, g9 = p8 / prev_close - 1, open9 / prev_close - 1
     edge = base.PRICE_LIMIT + base.LIMIT_SLACK
