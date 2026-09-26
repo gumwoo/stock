@@ -149,4 +149,9 @@ class TestMissingPrices:
         f.loc[pd.Timestamp(date(2020, 1, 6)), "Volume"] = float("nan")
         produced, _ = YFinanceHistoryCollector._to_rows(f, instrument_id=1, calendar=US, now=NOW)
 
-        assert [p["ts"] for p in produced] == [US.session_open(date(2020, 1, 2))]  # type: ignore[index]
+        # 가격 NaN(1/3)은 버리고, 거래량만 NaN(1/6)은 거래량 0으로 남긴다.
+        assert [p["ts"] for p in produced] == [  # type: ignore[index]
+            US.session_open(date(2020, 1, 2)),
+            US.session_open(date(2020, 1, 6)),
+        ]
+        assert produced[1]["volume"] == 0  # type: ignore[index]

@@ -67,8 +67,14 @@ def yf_ticker(symbol: str, market: Market, listing: Listing | None = None) -> st
     return f"{symbol}{_YF_SUFFIX[market]}"
 
 
-# 값이 하나라도 NaN이면 그 봉은 저장하지 않는다(`_to_rows`).
-PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
+# 가격이 하나라도 NaN이면 그 봉은 저장하지 않는다(`_to_rows`). 거래량은 보지 않는다: 지수는 거래량이
+# 비어 오기도 하는데, 그런 봉까지 버리면 정상 지수 봉을 잃는다. 거래량 NaN은 0으로 저장한다.
+PRICE_COLUMNS = ("Open", "High", "Low", "Close")
+
+
+def _finite_or_zero(value: object) -> float:
+    v = float(value)  # type: ignore[arg-type]
+    return v if math.isfinite(v) else 0.0
 
 
 class YFinanceHistoryCollector(BaseCollector):
@@ -209,7 +215,7 @@ class YFinanceHistoryCollector(BaseCollector):
                     high=Decimal(str(round(float(row["High"]), 6))),
                     low=Decimal(str(round(float(row["Low"]), 6))),
                     close=Decimal(str(round(float(row["Close"]), 6))),
-                    volume=Decimal(str(round(float(row["Volume"]), 4))),
+                    volume=Decimal(str(round(_finite_or_zero(row["Volume"]), 4))),
                     source="YFINANCE",
                 )
             )
@@ -261,6 +267,9 @@ class FxRateCollector(BaseCollector):
             day: date = index.date()
             read += 1
             if day in existing:
+                continue
+            if not math.isfinite(float(row["Close"])):
+                # 환율 NaN은 한 번 들어가면 이미 있는 날로 보고 다시 받지 않으므로 영구히 남는다.
                 continue
             session.add(
                 FxRate(

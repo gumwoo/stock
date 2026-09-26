@@ -324,3 +324,13 @@ class TestNaNRevisions:
 
         assert candle_repo.history(session, iid, Interval.DAY_1) == []
         assert candle_repo.opening_price(session, iid, Interval.DAY_1, BAR_TS) is None
+
+    def test_a_bar_with_only_its_close_missing_is_missing(self, session: Session) -> None:
+        iid = session.info["instrument_id"]
+        row = bar(iid, "100")
+        row["close"] = Decimal("NaN")
+        candle_repo.save_revisions(session, [row])
+        session.commit()
+
+        assert candle_repo.history(session, iid, Interval.DAY_1) == []
+        assert candle_repo.count_for(session, iid, Interval.DAY_1) == 0

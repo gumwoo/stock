@@ -231,7 +231,7 @@ def revisions_of(
 def count_for(session: Session, instrument_id: int, interval: Interval) -> int:
     """Number of distinct bars, counting a restated bar once."""
     stmt = select(func.count(func.distinct(Candle.ts))).where(
-        Candle.instrument_id == instrument_id, Candle.interval == interval
+        Candle.instrument_id == instrument_id, Candle.interval == interval, _finite()
     )
     return int(session.execute(stmt).scalar() or 0)
 
