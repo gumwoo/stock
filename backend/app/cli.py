@@ -903,6 +903,40 @@ def cmd_trump_study(folder: str, archive: str) -> int:
     return 0
 
 
+def cmd_entry_rules(minutes: str) -> int:
+    """진입·청산 규칙 R0~R3을 공시 v2 1분봉으로 잰다. 파일만 읽는다."""
+    from pathlib import Path
+
+    from app.scoring import entry_rules as er
+    from app.services import entry_rules_service as svc
+
+    res = svc.run(Path(minutes))
+    print(f"종목일 {res.name_days}, 09:00 봉 있음 {res.with_open}")
+
+    def line(v: er.Verdict) -> str:
+        halves = ", ".join(_fmt(h * 100 if h is not None else None, "+.3f") for h in v.halves)
+        return (
+            f"{v.key:5} {v.state:<16} 연구 {v.days}일 평균 "
+            f"{_fmt(v.mean * 100 if v.mean is not None else None, '+.3f')}% t {_fmt(v.t, '.2f')} "
+            f"절반 [{halves}] | 홀드아웃 {v.holdout_days}일 "
+            f"{_fmt(v.holdout_mean * 100 if v.holdout_mean is not None else None, '+.3f')}%  {v.text}"
+        )
+
+    for v in res.verdicts:
+        print("  " + line(v))
+    print(f"포워드 기록 후보: {res.candidates or '없음'} (v{er.STUDY_VERSION})")
+    for name, share in res.bought.items():
+        n, mean, med, trim = res.pooled.get(name, (0, 0.0, 0.0, 0.0))
+        print(
+            f"  탐색 {name}: 산 비율 {share:.1%}, 종목일 {n}개 평균 {mean * 100:+.3f}% "
+            f"중앙값 {med * 100:+.3f}% 10% 절단 {trim * 100:+.3f}% (비용 전)"
+        )
+    for label, vs in res.explore.items():
+        for v in vs:
+            print(f"  탐색 [{label}] " + line(v))
+    return 0
+
+
 def cmd_intraday(analyze: bool) -> int:
     """What the minute bars say: the usual day, and the morning lists against their questions."""
     with session_scope() as session:
@@ -1176,6 +1210,12 @@ def main(argv: list[str] | None = None) -> int:
     tr.add_argument("--dir", default="data/overnight_study")
     tr.add_argument("--archive", default="data/trump/truth_archive.csv")
 
+    en = sub.add_parser(
+        "entry-rules",
+        help="entry/exit rules R0-R3 on the disclosure first-hour minute bars; files only",
+    )
+    en.add_argument("--minutes", required=True, help="first-hour minute file (disclosure v2)")
+
     watch = sub.add_parser("watchlist", help="the newest morning watchlist; reads only")
     watch.add_argument("--take", action="store_true", help="freeze today's if none exists")
 
@@ -1241,6 +1281,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_disclosure_first_hour(
                 args.data, args.minutes, args.first, args.last, args.fetch, args.limit
             )
+        case "entry-rules":
+            return cmd_entry_rules(args.minutes)
         case "trump-study":
             return cmd_trump_study(args.dir, args.archive)
         case "overnight-nxt":
