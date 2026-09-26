@@ -139,3 +139,14 @@ class TestTheBoardDecidesTheTicker:
 
     def test_us_listings_take_no_suffix(self) -> None:
         assert yf_ticker("AAPL", Market.US, Listing.NASDAQ) == "AAPL"
+
+
+class TestMissingPrices:
+    def test_a_bar_with_a_nan_price_is_not_stored(self) -> None:
+        days = [date(2020, 1, 2), date(2020, 1, 3), date(2020, 1, 6)]
+        f = frame(days)
+        f.loc[pd.Timestamp(date(2020, 1, 3)), "Close"] = float("nan")
+        f.loc[pd.Timestamp(date(2020, 1, 6)), "Volume"] = float("nan")
+        produced, _ = YFinanceHistoryCollector._to_rows(f, instrument_id=1, calendar=US, now=NOW)
+
+        assert [p["ts"] for p in produced] == [US.session_open(date(2020, 1, 2))]  # type: ignore[index]

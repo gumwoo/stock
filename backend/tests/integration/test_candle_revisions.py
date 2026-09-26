@@ -299,3 +299,28 @@ class TestBarAvailability:
 
         assert len(visible) == 1
         assert visible[0].close == Decimal("100.000000")
+
+
+class TestNaNRevisions:
+    """yfinance가 전에 정상 가격을 준 날을 나중에 NaN으로 주면(J&J 2026-08-25), NaN 수정본은 없는 것으로 본다."""
+
+    def test_a_nan_revision_does_not_hide_the_real_one(self, session: Session) -> None:
+        iid = session.info["instrument_id"]
+        candle_repo.save_revisions(session, [bar(iid, "100")])
+        session.commit()
+        _set_ingested_at(session, iid, datetime(2026, 9, 22, tzinfo=UTC))
+        candle_repo.save_revisions(session, [bar(iid, "NaN")])
+        session.commit()
+
+        assert len(candle_repo.revisions_of(session, iid, Interval.DAY_1, BAR_TS)) == 2
+        got = candle_repo.history(session, iid, Interval.DAY_1)
+        assert [str(c.close) for c in got] == ["100.000000"]
+        assert candle_repo.opening_price(session, iid, Interval.DAY_1, BAR_TS) == Decimal("100")
+
+    def test_a_bar_that_only_ever_had_nan_is_missing(self, session: Session) -> None:
+        iid = session.info["instrument_id"]
+        candle_repo.save_revisions(session, [bar(iid, "NaN")])
+        session.commit()
+
+        assert candle_repo.history(session, iid, Interval.DAY_1) == []
+        assert candle_repo.opening_price(session, iid, Interval.DAY_1, BAR_TS) is None

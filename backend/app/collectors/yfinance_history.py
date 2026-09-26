@@ -23,6 +23,7 @@ runs — and reproducibility is the point of the whole design.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Collection
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -64,6 +65,10 @@ def yf_ticker(symbol: str, market: Market, listing: Listing | None = None) -> st
     if listing is not None:
         return f"{symbol}{_YF_LISTING[listing]}"
     return f"{symbol}{_YF_SUFFIX[market]}"
+
+
+# 값이 하나라도 NaN이면 그 봉은 저장하지 않는다(`_to_rows`).
+PRICE_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
 
 
 class YFinanceHistoryCollector(BaseCollector):
@@ -126,6 +131,9 @@ class YFinanceHistoryCollector(BaseCollector):
             rows, before_calendar = self._to_rows(
                 frame, instrument.instrument_id, calendar, now=utc_now()
             )
+            blank = int(frame[list(PRICE_COLUMNS)].isna().any(axis=1).sum())
+            if blank:
+                warnings.append(f"{ticker}: {blank} bars with a missing price were not stored")
             if before_calendar:
                 warnings.append(
                     f"{ticker}: {before_calendar} bars predate the {instrument.market} "
@@ -178,6 +186,12 @@ class YFinanceHistoryCollector(BaseCollector):
                 continue
             if not calendar.is_session(day):
                 # yfinance occasionally emits a bar for a non-session day.
+                continue
+            values = [float(row[c]) for c in PRICE_COLUMNS]
+            if not all(math.isfinite(v) for v in values):
+                # yfinance는 전에 정상 가격을 준 날을 나중에 NaN으로 주기도 한다(J&J 2026-08-25).
+                # 저장하면 NaN이 최신 수정본이 되어 정상값을 가리고, 읽으면 RSI가 NaN이 되어
+                # 신호를 저장할 수 없다. 가격이 빠진 봉은 봉이 아니다.
                 continue
             opened_at = calendar.session_open(day)
             available_at = calendar.bar_available_at(opened_at)

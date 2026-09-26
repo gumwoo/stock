@@ -145,7 +145,9 @@ function RunDetail({
             <th className="bt__th bt__th--num">표본 외</th>
             <th className="bt__th bt__th--num">최대 낙폭</th>
             <th className="bt__th bt__th--num">샤프</th>
-            <th className="bt__th bt__th--num">거래 수</th>
+            <th className="bt__th bt__th--num" title="사고 판 것까지 끝난 거래만 셉니다. 구간 끝까지 들고 있던 포지션은 수익률에는 들어가지만 여기에는 세지 않습니다.">
+              청산 거래
+            </th>
             <th className="bt__th">주의</th>
           </tr>
         </thead>
@@ -174,6 +176,10 @@ function RunDetail({
           </tr>
         </tbody>
       </table>
+      <p className="bt__footnote">
+        청산 거래는 사고 판 것까지 끝난 거래만 셉니다. 구간 끝까지 들고 있던 포지션은 수익률에는 들어가지만
+        여기에는 세지 않아서, 수익률이 있는데 0으로 보일 수 있습니다.
+      </p>
 
       <div className="bt__holdout">
         <h3 className="bt__holdoutTitle">홀드아웃</h3>
@@ -188,7 +194,7 @@ function RunDetail({
               <Figure label="수익률" value={pct(holdout.total_return)} />
               <Figure label="최대 낙폭" value={pct(holdout.max_drawdown)} />
               <Figure label="샤프" value={num(holdout.sharpe)} />
-              <Figure label="거래 수" value={String(holdout.trades)} />
+              <Figure label="청산 거래" value={String(holdout.trades)} />
             </div>
           </>
         ) : (

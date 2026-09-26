@@ -21,10 +21,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TypedDict
 
-from sqlalchemy import func, select
+from sqlalchemy import Numeric, and_, func, literal, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
-from sqlalchemy.sql import Subquery
+from sqlalchemy.sql import ColumnElement, Subquery
 
 from app.models import Candle, Interval
 from app.repositories import bulk
@@ -133,6 +133,16 @@ def latest_ts(session: Session, instrument_id: int, interval: Interval) -> datet
     return session.execute(stmt).scalar()
 
 
+def _finite() -> ColumnElement[bool]:
+    """시가·고가·저가·종가가 모두 NaN이 아닌 행.
+
+    Postgres numeric의 NaN은 NaN끼리 같다고 본다. 그래서 `!=`로 걸러진다. NaN 수정본은 없는 것으로
+    보고, 그 앞의 정상 수정본이 그 봉을 대신한다(J&J 2026-08-25: 9/22 273.14 → 9/25 NaN).
+    """
+    nan = literal("NaN").cast(Numeric)
+    return and_(Candle.open != nan, Candle.high != nan, Candle.low != nan, Candle.close != nan)
+
+
 def _newest_revision_subquery(
     instrument_id: int,
     interval: Interval,
@@ -143,6 +153,7 @@ def _newest_revision_subquery(
     stmt = select(Candle.ts, func.max(Candle.ingested_at).label("ingested_at")).where(
         Candle.instrument_id == instrument_id,
         Candle.interval == interval,
+        _finite(),
     )
     if ingested_before is not None:
         stmt = stmt.where(Candle.ingested_at <= ingested_before)
@@ -256,6 +267,7 @@ def opening_price(
             Candle.instrument_id == instrument_id,
             Candle.interval == interval,
             Candle.ts == ts,
+            _finite(),
         )
         .order_by(Candle.ingested_at.desc())
         .limit(1)
