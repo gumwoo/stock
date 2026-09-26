@@ -659,5 +659,6 @@ def run_nxt(
     }
     for label, (pick, mn, cost) in variants.items():
         obs = observe_all(pick, min_names=mn, cost=cost, count=False)
-        out.explore[label] = study.judge(obs, evald, questions=nxt.QUESTIONS)
+        texts = [(k, t.replace("0.30%", f"{cost:.2%}")) for k, t in nxt.QUESTIONS]
+        out.explore[label] = study.judge(obs, evald, questions=texts)
     return out
