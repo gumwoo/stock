@@ -111,3 +111,23 @@ def test_judge_takes_other_questions_with_the_same_rule() -> None:
         "N4": "established",
     }
     assert [v.key for v in base.judge(obs, sessions)] == ["O1", "O2", "O3", "O4"]
+
+
+def test_limits_on_both_sides_and_the_krx_gap_check() -> None:
+    # 정확히 29.5%는 부동소수로 만들 수 없어(129.5/100 - 1 = 0.29499...) 경계 양옆만 본다.
+    assert n.name_day(129.6, 100.0, 129.9, 120.0) is None
+    assert n.name_day(70.4, 100.0, 80.0, 80.0) is None
+    assert n.name_day(129.4, 100.0, 129.9, 120.0) is not None
+    assert n.name_day(103.0, 100.0, 131.0, 120.0) is None  # g9가 30.1%를 넘으면 데이터 흔적
+
+
+def test_n3_subtracts_the_cost() -> None:
+    ctrl = [f"K{i}" for i in range(5)]
+    values = {"A": _nd(0.0, 0.02), "B": _nd(0.0, 0.02)} | {k: _nd(0.0, 0.0) for k in ctrl}
+    obs = n.observe(date(2026, 3, 3), ["^SOX"], {"^SOX": ["A", "B"]}, values, ctrl, cost=0.004)
+    assert obs is not None and obs.values["N3"] == pytest.approx(0.02 - 0.004)
+
+
+def test_pre_close_stops_at_eight_forty_nine() -> None:
+    bars = [bar("0801", 100, 101, 10), bar("0849", 101, 104, 10), bar("0855", 104, 108, 10)]
+    assert n.pre_close(bars) == 104
