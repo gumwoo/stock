@@ -28,7 +28,12 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.collectors.base import CollectionResult, SkipCollection
+from app.collectors.base import (
+    CollectionResult,
+    RateLimitedError,
+    SkipCollection,
+    UpstreamUnavailableError,
+)
 from app.collectors.naver_news import MAX_START, PAGE_SIZE, NaverNewsCollector
 from app.collectors.quota import QuotaGuard
 from app.core.calendar import Market, MarketCalendar
@@ -139,7 +144,14 @@ class ThemeNewsCollector(NaverNewsCollector):
         with httpx.Client() as client:
             for theme in self.themes:
                 asked_at = utc_now()
-                sweep = self._sweep(client, query=theme.query, since=since)
+                try:
+                    sweep = self._sweep(client, query=theme.query, since=since)
+                except RateLimitedError:
+                    raise  # 서버가 한도를 말했다: 원장이 틀렸다는 뜻이라 FAILED로 시끄럽게 남긴다
+                except UpstreamUnavailableError as exc:
+                    # 네이버가 잠깐 실패했다. 앞서 커밋한 테마는 그대로 두고 여기서 멈춘다(PARTIAL).
+                    stopped = f"{theme.key}: {exc}"
+                    break
                 read += sweep.read
                 seen: dict[str, Any] = {}
                 for row, _ in sweep.rows:
