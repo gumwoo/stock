@@ -117,7 +117,11 @@ def day_value(
     gs: list[float] = []
     fs: list[float] = []
     for prev, open9, close10 in names:
-        if min(prev, open9, close10) <= 0:
+        # yfinance 파일에는 NaN 가격이 섞여 있다. 없는 값으로 보고 뺀다(비교 연산만으로는 NaN이 걸러지지 않는다).
+        if (
+            not all(math.isfinite(v) for v in (prev, open9, close10))
+            or min(prev, open9, close10) <= 0
+        ):
             continue
         g = open9 / prev - 1
         if abs(g) > PRICE_LIMIT + LIMIT_SLACK or g >= LIMIT_UP:

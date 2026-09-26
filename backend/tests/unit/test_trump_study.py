@@ -111,3 +111,14 @@ def test_too_few_signal_days_is_not_enough() -> None:
     # 20주 = 100일 중 60일이 홀드아웃이라 연구 구간 신호일은 16일뿐이다.
     assert all(v.state == "not enough days" for v in t.judge(_days(0.006, n_weeks=20)))
     assert t.ols_cluster([], {}, [], target="const").b is None
+
+
+def test_nan_prices_are_missing_not_averaged() -> None:
+    nan = float("nan")
+    names = [(100.0, 101.0, 102.0)] * 1000 + [
+        (nan, 101.0, 102.0),
+        (100.0, nan, 1.0),
+        (100.0, 101.0, nan),
+    ]
+    got = t.day_value(names)
+    assert got is not None and got[2] == 1000 and math.isfinite(got[0]) and math.isfinite(got[1])
