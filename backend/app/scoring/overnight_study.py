@@ -335,12 +335,17 @@ def holdout_days(eval_sessions: Sequence[date]) -> set[date]:
 
 
 def judge(
-    observations: Sequence[Observation], eval_sessions: Sequence[date], *, drop: str | None = None
+    observations: Sequence[Observation],
+    eval_sessions: Sequence[date],
+    *,
+    drop: str | None = None,
+    questions: Sequence[tuple[str, str]] = QUESTIONS,
 ) -> list[Verdict]:
-    """O1~O4 판정. `drop`을 주면 그 지표를 뺀 값으로 다시 센다(leave-one-out)."""
+    """O1~O4 판정. `drop`을 주면 그 지표를 뺀 값으로 다시 센다(leave-one-out). `questions`는 같은 판정
+    규칙을 다른 질문(NXT 후속 연구)에 쓸 때만 바꾼다."""
     held = holdout_days(eval_sessions)
     out = []
-    for key, text in QUESTIONS:
+    for key, text in questions:
         study_vals: list[float] = []
         held_vals: list[float] = []
         for o in sorted(observations, key=lambda o: o.day):

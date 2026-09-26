@@ -31,6 +31,7 @@ from app.collectors.yfinance_history import yf_ticker
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.repositories import instrument_repo
+from app.scoring import nxt_study as nxt
 from app.scoring import overnight_study as study
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,8 @@ US_FILE = "us_daily.json"
 KR_DAILY_FILE = "kr_daily.json"
 KR_HOUR_FILE = "kr_0900.json"
 FAILURES_FILE = "failures.json"
+NXT_FILE = "nxt_0800.json"
+NXT_SAVE_EVERY = 25
 
 
 # --- 수집 -------------------------------------------------------------------------------
@@ -226,6 +229,11 @@ class Result:
     build_v3: bool = False
     lost: dict[date, str] = field(default_factory=dict)
     """신호가 있었는데 관측하지 못한 평가일과 그 이유."""
+    active: dict[date, list[str]] = field(default_factory=dict)
+    """평가일 → 그날 큰 밤이었던 지표(품질 검사 통과분). 신호 없는 날은 빠진다."""
+    liquid_names: list[str] = field(default_factory=list)
+    prev_of: dict[date, date] = field(default_factory=dict)
+    """평가일 → 그 전 한국 거래일(휴장일 보정 뒤)."""
 
 
 def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
@@ -251,6 +259,7 @@ def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
     kr_prev_close = {d: KR.session_close(prev_of[d]) for d in days}
     train = [d for d in days if d <= study.TRAIN_LAST]
     evald = [d for d in days if study.EVAL_FIRST <= d <= study.EVAL_LAST]
+    res.prev_of = {d: prev_of[d] for d in evald}
 
     r_mkt = study.align(days, kr_open, kr_prev_close, _us_series(us[study.MARKET]))
     e: dict[str, dict[date, float | None]] = {}
@@ -274,6 +283,7 @@ def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
         if len(tr) >= study.MIN_TRAIN_DAYS and statistics.fmean(tr) >= study.MIN_TRADED_VALUE:
             liquid.append(t)
     res.liquid = len(liquid)
+    res.liquid_names = sorted(liquid)
     gap: dict[str, dict[date, float]] = {}
     for t in liquid:
         s = by_day[t]
@@ -306,6 +316,7 @@ def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
     # 예상 관측 수: 미국 데이터와 지표 구성만으로(한국 결과를 보기 전).
     held = study.holdout_days(evald)
     active = {d: [i for i in passed if study.is_big(e[i][d], sigma[i][d])] for d in evald}
+    res.active = {d: a for d, a in active.items() if a}
     res.signal_days = {
         "study": sum(1 for d in evald if active[d] and d not in held),
         "holdout": sum(1 for d in evald if active[d] and d in held),
@@ -374,3 +385,279 @@ def run(session: Session, folder: Path, kis_minutes: Path | None) -> Result:
         res.o3_costs[cost] = study.mean_t(vals)
     res.build_v3 = study.build_v3(res.verdicts)
     return res
+
+
+# --- NXT 08:00 후속 연구 (`app/scoring/nxt_study.py`) ------------------------------------------
+
+
+def _nxt_key(ticker: str, day: date) -> str:
+    return f"{ticker}|{day.isoformat()}"
+
+
+def nxt_pairs(res: Result, folder: Path) -> tuple[list[tuple[str, date]], dict[date, list[str]]]:
+    """받을 (티커, 날짜): 신호 종목일과 비교군. 비교군은 그날 KRX 09:00 봉과 전날 종가가 있는 목록 밖 종목."""
+    daily = _load(folder / KR_DAILY_FILE)
+    hour = _load(folder / KR_HOUR_FILE)
+    has_hour = {t: {r[0] for r in rows} for t, rows in hour.items()}
+    has_daily = {t: {r[0] for r in rows} for t, rows in daily.items()}
+    listed = {n for names in res.lists.values() for n, _ in names}
+    pairs: set[tuple[str, date]] = set()
+    controls: dict[date, list[str]] = {}
+    for d, inds in sorted(res.active.items()):
+        pairs |= {(n, d) for i in inds for n, _ in res.lists[i]}
+        prev = res.prev_of[d].isoformat()
+        cands = [
+            t
+            for t in res.liquid_names
+            if d.isoformat() in has_hour.get(t, set()) and prev in has_daily.get(t, set())
+        ]
+        controls[d] = nxt.control_sample(d, cands, listed)
+        pairs |= {(t, d) for t in controls[d]}
+    return sorted(pairs, key=lambda p: (p[1], p[0])), controls
+
+
+def _nxt_bars(body: dict[str, Any], ymd: str) -> list[list[Any]]:
+    """응답에서 그날 08:00~09:00 봉만. 커서 09:00 앞 120개라 전날 애프터마켓 봉이 섞여 온다."""
+    out = []
+    for r in body.get("output2") or []:
+        if not isinstance(r, dict) or str(r.get("stck_bsop_date")) != ymd:
+            continue
+        label = str(r.get("stck_cntg_hour") or "")[:4]
+        if "0800" <= label <= "0900":
+            out.append(
+                [
+                    label,
+                    float(r["stck_oprc"]),
+                    float(r["stck_hgpr"]),
+                    float(r["stck_lwpr"]),
+                    float(r["stck_prpr"]),
+                    float(r.get("cntg_vol") or 0),
+                ]
+            )
+    return sorted(out)
+
+
+def fetch_nxt(folder: Path, pairs: Sequence[tuple[str, date]]) -> dict[str, Any]:
+    """KIS NXT 1분봉. 종목일마다 1회, 날짜 오름차순(분봉 보관이 1년이라 오래된 날부터 사라진다). 그날 08:00~09:00
+    봉을 원본대로 파일에 둔다. 이어받기."""
+    from app.collectors.base import RateLimitedError, SkipCollection, UpstreamUnavailableError
+    from app.collectors.kis import KisClient, KisError
+    from app.collectors.kis_minute import STOCK_PATH, STOCK_TR, kis_run_lock
+
+    path = folder / NXT_FILE
+    data = _load(path)
+    todo = [(t, d) for t, d in pairs if _nxt_key(t, d) not in data]
+    calls = 0
+    try:
+        with KisClient() as client:
+            for t, d in todo:
+                ymd = d.strftime("%Y%m%d")
+                rec: dict[str, Any] | None = None
+                for _attempt in range(5):
+                    try:
+                        with kis_run_lock():
+                            body, _ = client.get(
+                                STOCK_PATH,
+                                tr_id=STOCK_TR,
+                                params={
+                                    "FID_COND_MRKT_DIV_CODE": "NX",
+                                    "FID_INPUT_ISCD": t.split(".")[0],
+                                    "FID_INPUT_HOUR_1": "090000",
+                                    "FID_INPUT_DATE_1": ymd,
+                                    "FID_PW_DATA_INCU_YN": "Y",
+                                    "FID_FAKE_TICK_INCU_YN": "N",
+                                },
+                            )
+                        rec = {"bars": _nxt_bars(body, ymd)}
+                        break
+                    except SkipCollection:
+                        time.sleep(60)  # 다른 KIS 실행이 돌고 있다. 두 배 속도로 부르지 않는다
+                    except KisError as exc:
+                        rec = {"error": f"{exc}"[:200]}  # 종목 하나의 거절(예: NXT 비상장)
+                        break
+                if rec is None:
+                    raise SkipCollection("another KIS run kept the lock")
+                calls += 1
+                data[_nxt_key(t, d)] = rec
+                if calls % NXT_SAVE_EVERY == 0:
+                    _save(path, data)
+                    logger.info("overnight nxt: %d/%d calls", calls, len(todo))
+    except RateLimitedError:
+        logger.error("overnight nxt: KIS refused the rate; stopping, progress kept")
+        raise
+    except UpstreamUnavailableError as exc:
+        logger.error("overnight nxt: KIS unavailable (%s); progress kept", exc)
+        raise
+    finally:
+        _save(path, data)
+    return data
+
+
+@dataclass(slots=True)
+class NxtResult:
+    base: Result
+    pairs: int = 0
+    fetched: int = 0
+    reasons: Counter[str] = field(default_factory=Counter)
+    """신호 종목일이 관측되지 않은 이유."""
+    reasons_by_period: dict[str, Counter[str]] = field(default_factory=dict)
+    signal_name_days: dict[str, int] = field(default_factory=dict)
+    """기간 → 신호 종목일 수(관측 비율의 분모)."""
+    per_indicator_names: dict[str, list[int]] = field(default_factory=dict)
+    """지표 → 그 지표가 큰 밤인 신호일마다 관측 가능한 목록 종목 수."""
+    control_names: list[int] = field(default_factory=list)
+    early_values: dict[str, float] = field(default_factory=dict)
+    """신호 쪽·비교군 관측 종목일의 08:00~08:04 거래대금 중앙값(원). 두 집단의 크기 차이를 본다."""
+    observations: list[study.Observation] = field(default_factory=list)
+    verdicts: list[study.Verdict] = field(default_factory=list)
+    candidate: bool = False
+    explore: dict[str, list[study.Verdict]] = field(default_factory=dict)
+    """탐색(판정 아님): 같은 종목일의 g8·g9-g8·KRX 9→10, 그리고 진입가·최소 종목 수·비용을 바꾼 판정."""
+    pooled: dict[str, tuple[int, float, float, float]] = field(default_factory=dict)
+    """신호 종목일을 한데 모은 a·b의 (개수, 평균, 중앙값, 10% 절단평균). 비용 전. 탐색."""
+
+
+def _trimmed(values: Sequence[float], share: float = 0.1) -> float:
+    v = sorted(values)
+    k = int(len(v) * share)
+    return statistics.fmean(v[k : len(v) - k])
+
+
+_Pick = Callable[[Sequence[nxt.Bar]], float | None]
+
+
+def run_nxt(
+    session: Session,
+    folder: Path,
+    kis_minutes: Path | None,
+    fetch: bool,
+    *,
+    counts_only: bool = False,
+) -> NxtResult:
+    """`counts_only`면 관측 가능 수만 세고 판정하지 않는다(판정 전에 표본 크기를 먼저 본다)."""
+    res = run(session, folder, kis_minutes)
+    out = NxtResult(res)
+    if res.gate is None or not res.gate.passed:
+        return out
+    pairs, controls = nxt_pairs(res, folder)
+    if fetch:
+        fetch_nxt(folder, pairs)
+    raw = _load(folder / NXT_FILE)
+    out.pairs = len(pairs)
+    out.fetched = sum(1 for t, d in pairs if _nxt_key(t, d) in raw)
+
+    daily = {
+        t: {r[0]: float(r[2]) for r in rows} for t, rows in _load(folder / KR_DAILY_FILE).items()
+    }
+    hour = {
+        t: {r[0]: (float(r[1]), float(r[2])) for r in rows}
+        for t, rows in _load(folder / KR_HOUR_FILE).items()
+    }
+    lists = {i: [n for n, _ in names] for i, names in res.lists.items()}
+    evald = sorted(res.prev_of)
+    held = study.holdout_days(evald)
+    study_days = sorted(d for d in res.active if d not in held)
+    middle = study_days[len(study_days) // 2]
+
+    def period(d: date) -> str:
+        if d in held:
+            return "holdout"
+        return "study front" if d < middle else "study back"
+
+    def bars_of(t: str, d: date) -> list[nxt.Bar]:
+        rec = raw.get(_nxt_key(t, d)) or {}
+        return [
+            (str(b[0]), float(b[1]), float(b[2]), float(b[3]), float(b[4]), float(b[5]))
+            for b in rec.get("bars", [])
+        ]
+
+    def values_for(
+        d: date, names: Sequence[str], pick: _Pick, count: bool
+    ) -> dict[str, nxt.NameDay]:
+        got: dict[str, nxt.NameDay] = {}
+        prev = res.prev_of[d].isoformat()
+        for t in names:
+            rec = raw.get(_nxt_key(t, d))
+            why = None
+            if rec is None:
+                why = "not fetched"
+            elif "error" in rec:
+                why = "fetch refused"
+            elif not rec["bars"]:
+                why = "no NX bars that day"
+            else:
+                bars = bars_of(t, d)
+                h, pc = hour.get(t, {}).get(d.isoformat()), daily.get(t, {}).get(prev)
+                if not any(nxt.ENTRY_FIRST <= b[0] <= nxt.ENTRY_LAST and b[5] > 0 for b in bars):
+                    why = "no trade 08:00-08:04"
+                elif h is None or pc is None:
+                    why = "no KRX price"
+                elif (p8 := pick(bars)) is None:
+                    why = "thin (< 10M KRW)"
+                elif (v := nxt.name_day(p8, pc, h[0], h[1])) is None:
+                    why = "price excluded"
+                else:
+                    got[t] = v
+            if count:
+                out.signal_name_days[period(d)] = out.signal_name_days.get(period(d), 0) + 1
+                if why is not None:
+                    out.reasons[why] += 1
+                    out.reasons_by_period.setdefault(period(d), Counter())[why] += 1
+        return got
+
+    def observe_all(
+        pick: _Pick, *, min_names: int, cost: float, count: bool
+    ) -> list[study.Observation]:
+        obs = []
+        pooled: dict[str, list[float]] = {"a": [], "b": []}
+        values5: dict[str, list[float]] = {"signal": [], "control": []}
+        for d, inds in sorted(res.active.items()):
+            names = sorted({n for i in inds for n in lists[i]})
+            vals = values_for(d, names, pick, count)
+            ctrl = values_for(d, controls[d], pick, False)
+            if count:
+                out.control_names.append(len(ctrl))
+                values5["signal"] += [nxt.early_value(bars_of(t, d)) for t in vals]
+                values5["control"] += [nxt.early_value(bars_of(t, d)) for t in ctrl]
+                for i in inds:
+                    out.per_indicator_names.setdefault(i, []).append(
+                        sum(1 for n in lists[i] if n in vals)
+                    )
+                pooled["a"] += [v.a for v in vals.values()]
+                pooled["b"] += [v.b for v in vals.values()]
+            o = nxt.observe(
+                d, inds, lists, {**vals, **ctrl}, controls[d], min_names=min_names, cost=cost
+            )
+            if o is not None:
+                obs.append(o)
+        if count:
+            out.early_values = {k: statistics.median(v) for k, v in values5.items() if v}
+            for key, vs in pooled.items():
+                if vs:
+                    out.pooled[key] = (
+                        len(vs),
+                        statistics.fmean(vs),
+                        statistics.median(vs),
+                        _trimmed(vs),
+                    )
+        return obs
+
+    out.observations = observe_all(nxt.entry, min_names=nxt.MIN_NAMES, cost=nxt.COST, count=True)
+    if counts_only:
+        return out
+    out.verdicts = study.judge(out.observations, evald, questions=nxt.QUESTIONS)
+    out.candidate = nxt.candidate(out.verdicts)
+    out.explore["same name-days"] = study.judge(out.observations, evald, questions=nxt.EXPLORE_KEYS)
+    variants: dict[str, tuple[_Pick, int, float]] = {
+        "entry: first bar open": (nxt.first_open, nxt.MIN_NAMES, nxt.COST),
+        "entry: 08:49 close": (nxt.pre_close, nxt.MIN_NAMES, nxt.COST),
+        "min names 1": (nxt.entry, 1, nxt.COST),
+        "value floor 0": (lambda b: nxt.entry(b, min_value=0), nxt.MIN_NAMES, nxt.COST),
+        "value floor 50M": (lambda b: nxt.entry(b, min_value=50_000_000), nxt.MIN_NAMES, nxt.COST),
+        "cost 0.20%": (nxt.entry, nxt.MIN_NAMES, 0.002),
+        "cost 0.40%": (nxt.entry, nxt.MIN_NAMES, 0.004),
+    }
+    for label, (pick, mn, cost) in variants.items():
+        obs = observe_all(pick, min_names=mn, cost=cost, count=False)
+        out.explore[label] = study.judge(obs, evald, questions=nxt.QUESTIONS)
+    return out

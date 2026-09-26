@@ -63,3 +63,18 @@ def test_an_hourly_open_that_disagrees_with_the_daily_open_fails(tmp_path: Path)
 def test_no_kis_file_means_no_pass(tmp_path: Path) -> None:
     _world(tmp_path, yf_close=101.0, daily_open=100.0)
     assert not svc.quality_gate(tmp_path, None, {7: "000660.KS"}).passed
+
+
+def test_nxt_bars_keep_only_that_day_premarket_and_nine() -> None:
+    row = {"stck_oprc": "100", "stck_hgpr": "101", "stck_lwpr": "99", "stck_prpr": "100.5"}
+    body = {
+        "output2": [
+            {**row, "stck_bsop_date": "20251010", "stck_cntg_hour": "090000", "cntg_vol": "10"},
+            {**row, "stck_bsop_date": "20251010", "stck_cntg_hour": "080000", "cntg_vol": "5"},
+            {**row, "stck_bsop_date": "20251010", "stck_cntg_hour": "075900", "cntg_vol": "5"},
+            {**row, "stck_bsop_date": "20251002", "stck_cntg_hour": "080100", "cntg_vol": "7"},
+        ]
+    }
+    got = svc._nxt_bars(body, "20251010")
+    assert [b[0] for b in got] == ["0800", "0900"]  # 전날 애프터마켓·08:00 전 봉은 버린다
+    assert got[0] == ["0800", 100.0, 101.0, 99.0, 100.5, 5.0]

@@ -778,6 +778,78 @@ def cmd_overnight_study(folder: str, kis_minutes: str | None, fetch: bool) -> in
     return 0
 
 
+def _verdict_line(v: object) -> str:
+    from app.scoring.overnight_study import Verdict
+
+    assert isinstance(v, Verdict)
+    halves = ", ".join(_fmt(h * 100 if h is not None else None, "+.3f") for h in v.halves)
+    return (
+        f"{v.key:6} {v.state:<16} 연구 {v.days}일 평균 "
+        f"{_fmt(v.mean * 100 if v.mean is not None else None, '+.3f')}% t {_fmt(v.t, '.2f')} "
+        f"절반 [{halves}] | 홀드아웃 {v.holdout_days}일 "
+        f"{_fmt(v.holdout_mean * 100 if v.holdout_mean is not None else None, '+.3f')}%  {v.text}"
+    )
+
+
+def cmd_overnight_nxt(folder: str, kis_minutes: str | None, fetch: bool, counts_only: bool) -> int:
+    """밤사이 신호일을 NXT 08:00 진입으로 다시 잰다. `--fetch`면 KIS NXT 1분봉을 받는다(파일에만)."""
+    import statistics
+    from pathlib import Path
+
+    from app.scoring import nxt_study as nxt
+    from app.services import overnight_study_service as svc
+
+    with session_scope() as session:
+        res = svc.run_nxt(
+            session,
+            Path(folder),
+            Path(kis_minutes) if kis_minutes else None,
+            fetch,
+            counts_only=counts_only,
+        )
+    if res.base.gate is None or not res.base.gate.passed:
+        print("품질 게이트를 통과하지 못해 멈춘다")
+        return 1
+    print(f"받을 종목일 {res.pairs}, 받은 것 {res.fetched}")
+    print(f"신호 종목일(기간별): {res.signal_name_days}")
+    print(f"관측 못 한 이유: {dict(res.reasons)}")
+    for per, c in sorted(res.reasons_by_period.items()):
+        print(f"  {per}: {dict(c)}")
+    for ind, ns in res.per_indicator_names.items():
+        print(
+            f"지표 {ind:5} 신호일 {len(ns)}일, 관측 가능 목록 종목 수 {ns}, "
+            f"2종목 이상 {sum(1 for n in ns if n >= nxt.MIN_NAMES)}일"
+        )
+    cn = res.control_names
+    print(
+        f"비교군 관측 가능 종목 수: 중앙값 {statistics.median(cn) if cn else None}, "
+        f"최소 {min(cn) if cn else None}, 5개 미만 {sum(1 for n in cn if n < nxt.CONTROL_MIN)}일"
+    )
+    print(
+        "08:00~08:04 거래대금 중앙값: "
+        + ", ".join(f"{k} {v / 1e6:,.0f}백만 원" for k, v in res.early_values.items())
+    )
+    held = {v.key: v.holdout_days for v in res.verdicts}
+    print(f"관측 {len(res.observations)}일 {held or ''}")
+    if counts_only:
+        return 0
+    for v in res.verdicts:
+        print("  " + _verdict_line(v))
+    print(
+        f"포워드 기록 후보: {'예' if res.candidate else '아니오'} ((N1과 N2) 또는 (N3과 N4), v{nxt.STUDY_VERSION})"
+    )
+    for key, (n, mean, med, trim) in res.pooled.items():
+        print(
+            f"  탐색 종목일 모음 {key}: {n}개 평균 {mean * 100:+.3f}% 중앙값 {med * 100:+.3f}% "
+            f"10% 절단 {trim * 100:+.3f}% (비용 전)"
+        )
+    for label, vs in res.explore.items():
+        print(f"  탐색 [{label}]")
+        for v in vs:
+            print("    " + _verdict_line(v))
+    return 0
+
+
 def cmd_intraday(analyze: bool) -> int:
     """What the minute bars say: the usual day, and the morning lists against their questions."""
     with session_scope() as session:
@@ -1035,6 +1107,15 @@ def main(argv: list[str] | None = None) -> int:
     on.add_argument("--kis-minutes", default=None, help="KIS first-hour file for the quality gate")
     on.add_argument("--fetch", action="store_true", help="fetch from yfinance first")
 
+    nx = sub.add_parser(
+        "overnight-nxt",
+        help="overnight signal days re-measured from an NXT 08:00 entry; files only, no DB writes",
+    )
+    nx.add_argument("--dir", default="data/overnight_study")
+    nx.add_argument("--kis-minutes", default=None, help="KIS first-hour file for the quality gate")
+    nx.add_argument("--fetch", action="store_true", help="fetch NXT minute bars from KIS first")
+    nx.add_argument("--counts-only", action="store_true", help="count observable days; no verdict")
+
     watch = sub.add_parser("watchlist", help="the newest morning watchlist; reads only")
     watch.add_argument("--take", action="store_true", help="freeze today's if none exists")
 
@@ -1100,6 +1181,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_disclosure_first_hour(
                 args.data, args.minutes, args.first, args.last, args.fetch, args.limit
             )
+        case "overnight-nxt":
+            return cmd_overnight_nxt(args.dir, args.kis_minutes, args.fetch, args.counts_only)
         case "overnight-study":
             return cmd_overnight_study(args.dir, args.kis_minutes, args.fetch)
         case "preopen":
