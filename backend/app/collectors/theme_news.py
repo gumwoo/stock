@@ -174,7 +174,7 @@ class ThemeNewsCollector(NaverNewsCollector):
                             "host": r.publisher_host,
                         }
                         for r in rows
-                        # 화면이 링크로 여는 값이다. http(s)가 아닌 주소(javascript: 등)는 두지 않는다.
+                        # 저장하는 외부 주소는 http(s)만 둔다(javascript: 등은 버린다). 화면은 제목만 보이고 링크를 열지 않는다.
                         if r.url.lower().startswith(("http://", "https://"))
                     ][:HEADLINES],
                     "mentions": [

@@ -104,10 +104,6 @@
   margin-bottom: var(--s-2);
 }
 
-.themes__headlines a {
-  color: var(--c-text);
-}
-
 .themes__muted {
   color: var(--c-text-tertiary);
 }

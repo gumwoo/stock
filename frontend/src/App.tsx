@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Dashboard } from "./pages/Dashboard";
 import { InstrumentDetail } from "./pages/InstrumentDetail";
-import { Backtest } from "./pages/Backtest";
+import { Research } from "./pages/Research";
 import { Live } from "./pages/Live";
 import { api } from "./api/client";
 import type { Diagnostics } from "./api/types";
@@ -32,7 +32,7 @@ const CAPABILITY_EFFECT: Record<string, string> = {
 export function App() {
   const [config, setConfig] = useState<Diagnostics | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
-  const [tab, setTab] = useState<"signals" | "live" | "backtest">("signals");
+  const [tab, setTab] = useState<"signals" | "live" | "research">("signals");
 
   useEffect(() => {
     api.config().then(setConfig).catch(() => setConfig(null));
@@ -62,13 +62,13 @@ export function App() {
             오늘의 관찰
           </button>
           <button
-            className={tab === "backtest" ? "shell__tab shell__tab--on" : "shell__tab"}
+            className={tab === "research" ? "shell__tab shell__tab--on" : "shell__tab"}
             onClick={() => {
-              setTab("backtest");
+              setTab("research");
               setDetailId(null);
             }}
           >
-            백테스트
+            연구
           </button>
         </nav>
         <span className="shell__disclaimer">
@@ -77,8 +77,8 @@ export function App() {
       </header>
 
       <main className="shell__main">
-        {tab === "backtest" ? (
-          <Backtest />
+        {tab === "research" ? (
+          <Research />
         ) : tab === "live" ? (
           <Live />
         ) : detailId === null ? (

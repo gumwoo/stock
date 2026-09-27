@@ -1,0 +1,193 @@
+.rs__header {
+  margin-bottom: var(--s-5);
+}
+
+.rs__h1 {
+  font-size: var(--t-h1);
+  font-weight: var(--w-semibold);
+}
+
+.rs__lead {
+  margin-top: var(--s-1);
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+}
+
+.rs__overview {
+  margin-top: var(--s-3);
+  font-size: var(--t-body);
+  line-height: 1.6;
+}
+
+.rs__card {
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  margin-bottom: var(--s-3);
+}
+
+.rs__head {
+  display: block;
+  width: 100%;
+  padding: var(--s-4) var(--s-5);
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  position: relative;
+}
+
+.rs__titleline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-2);
+  padding-right: var(--s-7);
+}
+
+.rs__title {
+  font-size: var(--t-h3);
+  font-weight: var(--w-semibold);
+}
+
+.rs__badge {
+  font-size: var(--t-micro);
+  color: var(--c-text);
+  border: 1px solid var(--c-border-strong);
+  border-radius: 999px;
+  padding: 0 var(--s-2);
+}
+
+.rs__note {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
+
+.rs__summary {
+  display: block;
+  margin-top: var(--s-2);
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+  line-height: 1.6;
+}
+
+.rs__toggle {
+  position: absolute;
+  top: var(--s-4);
+  right: var(--s-5);
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
+
+.rs__body {
+  padding: 0 var(--s-5) var(--s-4);
+  font-size: var(--t-small);
+}
+
+.rs__meta {
+  color: var(--c-text-tertiary);
+  font-size: var(--t-micro);
+  margin-bottom: var(--s-2);
+}
+
+.rs__q,
+.rs__limits {
+  margin: var(--s-2) 0;
+  line-height: 1.6;
+}
+
+.rs__label {
+  color: var(--c-text-tertiary);
+  margin-right: var(--s-1);
+}
+
+.rs__tablewrap {
+  overflow-x: auto;
+  margin: var(--s-3) 0;
+}
+
+.rs__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-small);
+}
+
+.rs__table th,
+.rs__table td {
+  text-align: left;
+  padding: var(--s-2);
+  border-bottom: 1px solid var(--c-border);
+  vertical-align: top;
+}
+
+.rs__table th {
+  font-weight: var(--w-medium);
+  color: var(--c-text-tertiary);
+  font-size: var(--t-micro);
+}
+
+.rs__num {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.rs__table th.rs__num {
+  text-align: right;
+}
+
+.rs__key {
+  font-weight: var(--w-semibold);
+  white-space: nowrap;
+}
+
+.rs__verdict {
+  white-space: nowrap;
+  color: var(--c-text-secondary);
+}
+
+.rs__verdict--yes {
+  color: var(--c-text);
+  font-weight: var(--w-semibold);
+}
+
+.rs__source {
+  margin-top: var(--s-2);
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  word-break: break-word;
+}
+
+.rs__source code {
+  font-family: var(--font-mono);
+}
+
+.rs__list {
+  padding-left: var(--s-4);
+  display: grid;
+  gap: var(--s-2);
+  line-height: 1.6;
+}
+
+.rs__runs {
+  margin-top: var(--s-3);
+  border: 1px solid var(--c-border);
+  background: transparent;
+  border-radius: 999px;
+  padding: var(--s-1) var(--s-3);
+  font: inherit;
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+  cursor: pointer;
+}
+
+.rs__backtest {
+  margin-top: var(--s-3);
+  overflow-x: auto;
+}
+
+/* 카드 안에서는 실행 목록과 상세를 위아래로 둔다(카드 폭에서 두 열이면 표가 넘친다). */
+.rs__backtest .bt {
+  grid-template-columns: 1fr;
+  gap: var(--s-4);
+}

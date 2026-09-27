@@ -3,9 +3,6 @@ import { api } from "../api/client";
 import type { ThemeNewsDay } from "../api/types";
 import "./ThemeNews.css";
 
-/** 외부 기사 주소는 http(s)일 때만 링크로 연다(저장할 때도 거르지만 화면에서 한 번 더). */
-const safe = (url: string) => /^https?:\/\//i.test(url);
-
 /** 접힌 상태에서 보이는 칩 수. API가 기사 수 순으로 준다. */
 const FOLDED = 6;
 const EXPANDED_KEY = "stock.themes.expanded";
@@ -152,13 +149,8 @@ export function ThemeNews({
           <ul className="themes__headlines">
             {selected.headlines.map((h) => (
               <li key={h.url}>
-                {safe(h.url) ? (
-                  <a href={h.url} target="_blank" rel="noreferrer">
-                    {h.title}
-                  </a>
-                ) : (
-                  h.title
-                )}
+                {/* 제목만 보인다. 소유자는 원문이 필요 없어 링크를 두지 않는다. */}
+                {h.title}
                 <span className="themes__muted">
                   {" "}
                   · {h.host ?? ""} {time(h.published_at)}
