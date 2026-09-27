@@ -44,6 +44,7 @@ function Card({
   title,
   badge,
   note,
+  period,
   summary,
   initiallyOpen,
   children,
@@ -51,24 +52,28 @@ function Card({
   title: string;
   badge: string;
   note?: string;
+  period?: string;
   summary: string;
   initiallyOpen: boolean;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(initiallyOpen);
+  // 제목은 h2 안의 버튼(접근성 이름은 제목만), 기간·요약은 버튼 밖에 둔다. 접혀 있어도 기간이 보여야
+  // 결론이 일반론으로 읽히지 않는다.
   return (
     <section className="rs__card">
-      <button className="rs__head" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <span className="rs__titleline">
+      <h2 className="rs__h2">
+        <button className="rs__head" aria-expanded={open} onClick={() => setOpen(!open)}>
           <span className="rs__title">{title}</span>
           <span className="rs__badge">{badge}</span>
           {note && <span className="rs__note">{note}</span>}
-        </span>
-        <span className="rs__summary">{summary}</span>
-        <span className="rs__toggle" aria-hidden="true">
-          {open ? "접기" : "자세히"}
-        </span>
-      </button>
+          <span className="rs__toggle" aria-hidden="true">
+            {open ? "접기" : "자세히"}
+          </span>
+        </button>
+      </h2>
+      {period && <p className="rs__period">{period}</p>}
+      <p className="rs__summary">{summary}</p>
       {open && <div className="rs__body">{children}</div>}
     </section>
   );
@@ -77,7 +82,6 @@ function Card({
 function StudyBody({ study }: { study: Study }) {
   return (
     <>
-      <p className="rs__meta">{study.period}</p>
       <p className="rs__q">
         <span className="rs__label">질문</span> {study.question}
       </p>
@@ -128,14 +132,16 @@ export function Research() {
       <header className="rs__header">
         <h1 className="rs__h1">연구</h1>
         <p className="rs__lead">
-          질문과 판정 규칙을 결과보다 먼저 고정하고 잰 것들입니다. 매매 권유가 아닙니다.
+          아래 여섯 연구는 질문과 판정 규칙을 결과보다 먼저 고정하고 잰 것들입니다. 매매 권유가 아닙니다.
         </p>
         <p className="rs__overview">
           지금까지 잰 연구에서 8시~10시 전에 사고파는 매매가 비용 뒤에 남는다는 근거는 찾지 못했습니다. 비용 0.30%를
           넣어 잰 질문 7개(진입·청산 E1~E3, 밤사이 업종 O3, NXT N2·N3, 트럼프 T2)가 모두 성립하지 않았습니다. 공시
           v2는 비용 전으로 쟀고, 비용 전에도 9시에 사서 10시 전에 파는 평균이 0보다 크다는 근거(F1)를 찾지
           못했습니다. 성립한 질문(공시 v1의 D3·D4, v2의 F3)은 갭의 방향이나 움직임의 크기에 관한 것이지 사서
-          남는지에 관한 것이 아닙니다. 모두 미리 고정한 규칙으로 판정했고 기간은 3개월~2년입니다.
+          남는지에 관한 것이 아닙니다. 모두 미리 고정한 규칙으로 판정했고 기간은 3개월~2년입니다. 다만 표본
+          규칙 일부(공시 ±30% 제외, 밤사이 9/22 처리)는 결과를 본 뒤 정했고, 공시 v2·v3와 NXT는 이미 본 표본을 다른
+          방식으로 다시 본 것이라 독립된 확인이 아닙니다(각 문서에 적었습니다).
         </p>
       </header>
 
@@ -145,6 +151,7 @@ export function Research() {
           title={s.title}
           badge={s.badge}
           note={s.note}
+          period={s.period}
           summary={s.conclusion}
           initiallyOpen={i === 0}
         >
@@ -155,14 +162,15 @@ export function Research() {
       <Card
         title="아직 모르는 것"
         badge="판정 전"
-        summary="아침 관찰 목록이 맞는지, 신호와 뉴스 오버레이가 실제 수익으로 이어지는지는 기록을 쌓는 중입니다."
+        summary="아침 관찰 목록이 맞는지는 첫 목록(2026-09-28)부터 기록을 쌓아 판정하고, 신호와 뉴스 오버레이가 실제 수익으로 이어지는지는 포워드 기록을 쌓는 중입니다."
         initiallyOpen={false}
       >
         <ul className="rs__list">
           <li>
             <strong>아침 관찰 목록이 맞는가.</strong> 첫 V2 목록은 2026-09-28입니다. 미리 고정한 질문 일곱 개(좋은
             뉴스 종목이 그날 목록 평균보다 나은가 등)는 목록 20일째에 읽기 시작하고, 60일째에 처음 60일로 한 번만
-            판정합니다. H6·H7은 비용 전 질문이라 성립해도 비용 뒤 근거는 아닙니다.
+            판정합니다. 그중 두 질문(H6·H7: 공시 이유 종목, 그리고 목록 전체를 9시 시가에 사서 10시 전에 파는 평균)은 비용 전으로 재므로 성립해도
+            비용 뒤 근거는 아닙니다.
           </li>
           <li>
             <strong>신호와 뉴스 오버레이가 실제 수익으로 이어지는가.</strong> 포워드 기록을 쌓는 중이고, 판단은

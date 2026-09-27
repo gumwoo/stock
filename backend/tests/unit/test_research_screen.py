@@ -47,10 +47,34 @@ def _data_rows(section: list[str]) -> list[list[str]]:
     return rows
 
 
+def _header(section: list[str]) -> list[str]:
+    """판정 표의 머리 행(첫 칸이 비고 둘째 칸이 "질문")."""
+    heads = [_cells(line) for line in section if line.startswith("| |")]
+    heads = [h for h in heads if len(h) == len(FIELDS) and h[1] == "질문"]
+    assert len(heads) == 1, f"expected one table header, found {len(heads)}"
+    return heads[0]
+
+
 def _mismatches(studies: list[dict]) -> list[str]:  # type: ignore[type-arg]
     problems = []
     for study in studies:
-        table = _data_rows(_section(ROOT / study["doc"], study["section"]))
+        section = _section(ROOT / study["doc"], study["section"])
+        table = _data_rows(section)
+        # 열 이름(표본 수가 들어 있다: "연구 42일 평균", "홀드아웃 15일")도 문서 머리 행과 같아야 한다.
+        if _header(section)[2:6] != study["columns"]:
+            problems.append(
+                f"{study['id']}: columns {study['columns']} != doc {_header(section)[2:6]}"
+            )
+        # 배지 옆 "성립 n/m"은 행의 판정에서 센 값과 같아야 한다.
+        counted = re.search(r"성립 (\d+)/(\d+)", study["note"])
+        established = sum(1 for r in study["rows"] if r["verdict"] == "성립")
+        if counted is None or (int(counted[1]), int(counted[2])) != (
+            established,
+            len(study["rows"]),
+        ):
+            problems.append(
+                f"{study['id']}: note {study['note']!r} vs {established}/{len(study['rows'])}"
+            )
         if len(table) != len(study["rows"]):
             problems.append(f"{study['id']}: doc {len(table)} rows, screen {len(study['rows'])}")
         for row in study["rows"]:
@@ -82,5 +106,9 @@ def test_the_guard_catches_a_flipped_verdict_and_a_flipped_sign() -> None:
     d3 = next(r for r in v1["rows"] if r["key"] == "D3")
     d3["verdict"] = "성립 안 함"  # 문서는 성립
     d2["t"] = minus + d2["t"]  # 문서는 양수
+    v1["columns"][3] = "홀드아웃 16일"  # 문서는 15일
     problems = _mismatches(studies)
     assert any(" D3:" in p for p in problems) and any(" D2:" in p for p in problems)
+    assert any("columns" in p for p in problems)
+    # D3를 뒤집었으니 "성립 2/4"도 이제 행과 맞지 않는다.
+    assert any("note" in p for p in problems)
