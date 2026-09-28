@@ -19,6 +19,7 @@ from app.repositories import bulk
 from app.repositories.candle_repo import CandleRow
 from app.repositories.filing_repo import FilingRow
 from app.repositories.fundamental_repo import FundamentalRow
+from app.repositories.market_cap_repo import MarketCapRow
 from app.repositories.minute_repo import SecondBarRow
 from app.repositories.news_repo import NewsItemRow, QueryHitRow
 
@@ -92,6 +93,9 @@ class TestTheWidthsTheRepositoriesPass:
 
     def test_a_second_bar_row_binds_eight(self) -> None:
         assert len(SecondBarRow._fields) == 8
+
+    def test_a_market_cap_row_binds_ten(self) -> None:
+        assert len(MarketCapRow._fields) == 10
 
     def test_the_widest_row_still_allows_a_useful_batch(self) -> None:
         """A sanity floor: if some future row made batches tiny, the collection

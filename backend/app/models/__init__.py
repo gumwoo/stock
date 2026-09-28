@@ -33,6 +33,7 @@ from app.models.market import (
     CorporateAction,
     CorporateActionType,
     FxRate,
+    MarketCapRank,
     MarketIndexBar,
 )
 from app.models.news import (
@@ -98,6 +99,7 @@ __all__ = [
     "Listing",
     "LiveSecondBar",
     "LlmCall",
+    "MarketCapRank",
     "MarketIndexBar",
     "MatchMethod",
     "MinuteBar",

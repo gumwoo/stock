@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import signal
 import sys
+import time as time_module
 from collections.abc import Callable
 from types import FrameType
 
@@ -25,6 +26,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.collectors.base import CollectorError, run_collector
 from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import DartFundamentalCollector
+from app.collectors.kis_market_cap import KisMarketCapCollector
 from app.collectors.kis_minute import (
     DEFAULT_BACKFILL_SESSIONS,
     KisIndexMinuteCollector,
@@ -40,6 +42,7 @@ from app.core import logging as logging_setup
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import advisory_lock, session_scope
+from app.models.collector import CollectorStatus
 from app.services import (
     forward_service,
     intraday_service,
@@ -98,6 +101,8 @@ _KR_DAILY_LOOP = CronTrigger(day_of_week="mon-fri", hour=16, minute=40, timezone
 _US_PRICES = CronTrigger(day_of_week="tue-sat", hour=7, minute=0, timezone="Asia/Seoul")
 _SEC_WEEKLY = CronTrigger(day_of_week="sat", hour=8, minute=0, timezone="Asia/Seoul")
 
+# 장 마감 뒤 시가총액 순위(지수 대형주 표시용). 15:40 지수 분봉 뒤, 16:20 분봉 앞이라 KIS 한 번에 하나 잠금이 비어 있다.
+_KR_MARKET_CAP = CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone="Asia/Seoul")
 # The day's minute bars, after the close and before the daily loop. A job of
 # its own: a failure here must not take the proven daily loop down with it.
 _KR_MINUTES = CronTrigger(day_of_week="mon-fri", hour=16, minute=20, timezone="Asia/Seoul")
@@ -188,6 +193,17 @@ def _daily_loop() -> None:
             forward_service.snapshot_candidates(session),
             forward_service.evaluate_candidates(session),
         )
+
+
+def _kr_market_cap() -> None:
+    """시가총액 순위. 다른 KIS 실행이 잠금을 쥐고 있으면(SKIPPED) 1분 뒤 두 번까지 다시 해 본다."""
+    for attempt in range(3):
+        with session_scope() as session:
+            run = run_collector(KisMarketCapCollector(), session)
+        if run.status is not CollectorStatus.SKIPPED or "another KIS run" not in (run.detail or ""):
+            return
+        if attempt < 2:
+            time_module.sleep(60)
 
 
 def _kr_minutes() -> None:
@@ -301,6 +317,14 @@ def build_scheduler() -> BlockingScheduler:
         coalesce=True,
         # A list taken after the open is not a morning list: late is not at all.
         misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        guarded("kis_market_cap_after_close", _kr_market_cap),
+        _KR_MARKET_CAP,
+        id="kis_market_cap_after_close",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
     )
     scheduler.add_job(
         guarded("kis_minutes_after_close", _kr_minutes),

@@ -21,8 +21,10 @@ from sqlalchemy import (
     Date,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     UniqueConstraint,
@@ -31,6 +33,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.types import Interval
 from app.models.base import Base, BigIntPk, IngestedAt
+from app.models.instrument import Listing
 
 
 class CorporateActionType(StrEnum):
@@ -199,6 +202,40 @@ class CorporateAction(Base):
 
     def __repr__(self) -> str:
         return f"<CorporateAction {self.instrument_id} {self.action_type} ex={self.ex_date}>"
+
+
+class MarketCapRank(Base):
+    """한 세션이 끝난 뒤의 시가총액 순위(KIS 시가총액 상위, 보통주 상위 30). 지수 대형주 표시용.
+
+    `weight_pct`는 KIS가 주는 "시장 전체 시가총액 비중"(%)이다. `market_cap_eok`는 억원. 세션 날짜는 수집기가 "마지막으로
+    끝난 한국 세션"으로 정한다(장중에는 받지 않는다). 목록 선정·채점에는 쓰지 않는다 — 화면 표시와 사후 분석 전용.
+    """
+
+    __tablename__ = "market_cap_rank"
+
+    id: Mapped[BigIntPk]
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    listing: Mapped[Listing] = mapped_column(
+        Enum(Listing, name="listing", native_enum=False, length=8), nullable=False
+    )
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    code: Mapped[str] = mapped_column(String(12), nullable=False)
+    instrument_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("instrument.instrument_id", ondelete="SET NULL"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    market_cap_eok: Mapped[Decimal] = mapped_column(Numeric(24, 2), nullable=False)
+    weight_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    close: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    listed_shares: Mapped[Decimal] = mapped_column(Numeric(24, 0), nullable=False)
+    ingested_at: Mapped[IngestedAt]
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_date", "listing", "code", name="uq_market_cap_rank_day_listing_code"
+        ),
+        Index("ix_market_cap_rank_instrument_day", "instrument_id", "session_date"),
+    )
 
 
 class MarketIndexBar(Base):
