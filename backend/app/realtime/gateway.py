@@ -67,7 +67,9 @@ class LiveEvent:
     first_at: str
     title: str
     sentiment: float
+    # articles는 묶음의 읽기 전체(기사 + 공시)다. 화면은 둘을 나눠 보인다.
     articles: int
+    disclosures: int = 0
     url: str | None = None
     lead_source: str | None = None
     lead_id: int | None = None
@@ -170,6 +172,7 @@ def to_events(raw: object) -> tuple[LiveEvent, ...]:
                     title=str(e["title"]),
                     sentiment=float(e.get("sentiment") or 0.0),
                     articles=int(e.get("articles") or 0),
+                    disclosures=int(e.get("disclosures") or 0),
                     lead_source=str(lead["source"]) if lead.get("source") else None,
                     lead_id=int(lead["id"]) if lead.get("id") else None,
                 )
@@ -278,6 +281,8 @@ def _legacy_link(
         start = datetime.fromisoformat(event.first_at)
     except ValueError:
         return None
+    if start.tzinfo is None:
+        return None  # 시간대 없는 값은 비교할 수 없다. 이 이벤트만 링크 없이 둔다
     end = min(start + window, asof)
     if event.title.startswith("[공시] "):
         rcept = session.execute(
@@ -619,6 +624,7 @@ class Gateway:
                             "title": e.title,
                             "sentiment": e.sentiment,
                             "articles": e.articles,
+                            "disclosures": e.disclosures,
                             "url": e.url,
                         }
                         for e in m.events

@@ -175,7 +175,10 @@ export interface LiveEvent {
   first_at: string;
   title: string;
   sentiment: number;
+  /** 묶음의 읽기 전체(기사 + 공시). */
   articles: number;
+  /** 그중 공시 수. 옛 서버는 보내지 않는다. */
+  disclosures?: number;
   /** 제목을 준 기사(네이버 주소 우선)나 DART 공시 주소. 못 찾으면 null. */
   url: string | null;
 }

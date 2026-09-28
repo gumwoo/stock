@@ -61,6 +61,14 @@ function feedUnavailable(status: string): boolean {
   return status.startsWith("off") || status.startsWith("another process");
 }
 
+/** 묶음의 기사·공시 수. 하나뿐이면 적지 않는다. articles는 공시까지 센 수다. */
+function countLabel(articles: number, disclosures: number): string {
+  const news = Math.max(articles - disclosures, 0);
+  if (news + disclosures <= 1) return "";
+  const parts = [news > 0 ? `기사 ${news}건` : "", disclosures > 0 ? `공시 ${disclosures}건` : ""].filter(Boolean);
+  return ` · ${parts.join(" · ")}`;
+}
+
 function changeClass(change: number | undefined): string {
   if (change == null || change === 0) return "live__change";
   return change > 0 ? "live__change live__change--up" : "live__change live__change--down";
@@ -448,8 +456,10 @@ export function Live() {
                 <p className="live__warn">{PREFETCH[member.prefetch_status]}</p>
               )}
               {member.events && member.events.length > 0 && (
-                <section className="live__events" aria-label="근거 뉴스·공시">
-                  <h3 className="live__eventsTitle">근거 뉴스·공시</h3>
+                <section className="live__events" aria-labelledby="live-events-title">
+                  <h2 id="live-events-title" className="live__eventsTitle">
+                    근거 뉴스·공시
+                  </h2>
                   <ul className="live__eventList">
                     {member.events.map((e, i) => {
                       const dir = e.sentiment > 0 ? "up" : e.sentiment < 0 ? "down" : "flat";
@@ -464,7 +474,7 @@ export function Live() {
                           </span>
                           <span className="live__eventMeta">
                             {eventTypeLabel(e.event_type)} · {shortSeoulTime(e.first_at)}
-                            {e.articles > 1 ? ` · 기사 ${e.articles}건` : ""}
+                            {countLabel(e.articles, e.disclosures ?? 0)}
                           </span>
                           {e.url ? (
                             <a className="live__eventTitle" href={e.url} target="_blank" rel="noopener noreferrer">

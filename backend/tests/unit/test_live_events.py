@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -10,6 +10,7 @@ from app.realtime.gateway import (
     DART_VIEW,
     LiveEvent,
     LiveMember,
+    _legacy_link,
     attach_links,
     event_link,
     news_link,
@@ -51,7 +52,12 @@ class TestToEvents:
             }
         ]
         (e,) = to_events(raw)
-        assert (e.event_type, e.sentiment, e.articles) == ("SHAREHOLDER_RETURN", 0.6, 1)
+        assert (e.event_type, e.sentiment, e.articles, e.disclosures) == (
+            "SHAREHOLDER_RETURN",
+            0.6,
+            1,
+            1,
+        )
         assert (e.lead_source, e.lead_id, e.url) == ("DART", 42, None)
 
     def test_old_rows_without_lead_and_broken_items_do_not_raise(self) -> None:
@@ -125,6 +131,7 @@ def test_the_state_carries_the_events() -> None:
             "title": "첫 기사",
             "sentiment": 0.7,
             "articles": 1,
+            "disclosures": 0,
             "url": "https://x/1",
         }
     ]
@@ -135,3 +142,10 @@ def test_the_state_carries_the_events() -> None:
 )
 def test_unreadable_numbers_drop_only_that_event(bad: list[dict[str, object]]) -> None:
     assert to_events(bad) == ()
+
+
+def test_a_naive_time_skips_only_that_event_before_any_query() -> None:
+    # 시간대 없는 first_at은 asof(aware)와 비교할 수 없다. 예외로 전체 링크를 지우지 않고 그 이벤트만 링크 없이 둔다.
+    # 조회 전에 돌아오므로 세션이 필요 없다.
+    naive = event("시간대 없는 기사", first_at="2026-09-27T23:18:00")
+    assert _legacy_link(None, 1, naive, ASOF, timedelta(hours=24)) is None
