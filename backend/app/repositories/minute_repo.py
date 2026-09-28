@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.models.intraday import IndexMinuteBar, MinuteBar, MinuteFetch
+from app.models.intraday import IndexMinuteBar, LiveSecondBar, MinuteBar, MinuteFetch
 from app.repositories import bulk
 
 COMPLETE = "COMPLETE"
@@ -44,6 +44,40 @@ class IndexMinuteRow(NamedTuple):
     high: Decimal
     low: Decimal
     close: Decimal
+
+
+class SecondBarRow(NamedTuple):
+    instrument_id: int
+    session_date: date
+    ts: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+
+
+def save_second_bars(session: Session, rows: Sequence[SecondBarRow]) -> int:
+    """실시간 1초봉을 넣거나 고친다. commit하지 않는다. 넣거나 고친 행 수를 돌려준다.
+
+    저장하는 순간 진행 중이던 초는 체결이 더 들어와 다음 저장에서 다시 오므로, 겹치면 새 값으로 갱신한다.
+    한 문장 안에 같은 (종목, 초)가 두 번 있으면 Postgres가 거절하니 호출하는 쪽이 중복을 없앤다.
+    """
+    written = 0
+    for batch in bulk.batched(rows, columns=len(SecondBarRow._fields)):
+        stmt = pg_insert(LiveSecondBar).values([r._asdict() for r in batch])
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["instrument_id", "ts"],
+            set_={
+                "open": stmt.excluded.open,
+                "high": stmt.excluded.high,
+                "low": stmt.excluded.low,
+                "close": stmt.excluded.close,
+                "volume": stmt.excluded.volume,
+            },
+        )
+        written += len(session.execute(stmt.returning(LiveSecondBar.id)).scalars().all())
+    return written
 
 
 def save_bars(session: Session, rows: Sequence[MinuteBarRow]) -> int:

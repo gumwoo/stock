@@ -6,9 +6,11 @@ caret-separated fields in the order KIS's own sample lists them for
 `H0STCNT0`. Anything else on the socket is JSON: an answer to a subscription,
 or a PINGPONG to be echoed.
 
-`LiveBook` folds trades into one-minute bars per name. It is what the chart
-shows while the session runs; it is never stored. The record is the REST
-minute bars fetched after the close (`app/collectors/kis_minute.py`).
+`LiveBook` folds trades into one-minute and one-second bars per name. It is
+what the chart shows while the session runs. The gateway saves the one-second
+bars as it goes (`live_second_bar`), for looking back at a day's chart; the
+record analysed is the REST minute bars fetched after the close
+(`app/collectors/kis_minute.py`).
 """
 
 from __future__ import annotations
@@ -146,7 +148,8 @@ class LiveBook:
     """Each name's one-minute and one-second bars for today, built from what has arrived.
 
     초봉은 분봉과 같은 체결로 함께 쌓는다. 클릭한 종목만이 아니라 목록 전부를, 서버가 실시간 연결을 시작한 때부터.
-    과거 초봉은 받을 곳이 없어 REST로 채우지 못한다(분봉만 `seed`로 채운다). 저장하지 않는 화면용이다.
+    과거 초봉은 받을 곳이 없어 REST로 채우지 못한다(분봉만 `seed`로 채운다). 초봉은 게이트웨이가 주기적으로
+    `live_second_bar`에 저장한다(지난날 차트용). 분봉은 저장하지 않는다(기록은 장 마감 뒤 REST 1분봉).
     메모리(예측, 실측 아님): 초봉 하나가 dict 항목·int 키·float 5개 리스트로 약 300바이트라, 40종목이 장중 매초
     체결되는 최악이면 약 94만 봉, 곧 280MB 안팎이다. 실제로는 체결 없는 초가 많아 그보다 작다. 상한은 두지 않는다.
     장이 끝나도 다음 거래일 연결 때까지 그대로 둔다(장 뒤에도 그날 차트를 볼 수 있게). 그동안 이 메모리를 쥔다.

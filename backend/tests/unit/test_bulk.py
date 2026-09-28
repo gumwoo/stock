@@ -19,6 +19,7 @@ from app.repositories import bulk
 from app.repositories.candle_repo import CandleRow
 from app.repositories.filing_repo import FilingRow
 from app.repositories.fundamental_repo import FundamentalRow
+from app.repositories.minute_repo import SecondBarRow
 from app.repositories.news_repo import NewsItemRow, QueryHitRow
 
 
@@ -89,6 +90,9 @@ class TestTheWidthsTheRepositoriesPass:
     def test_a_candle_row_binds_ten(self) -> None:
         assert len(CandleRow.__annotations__) == 10
 
+    def test_a_second_bar_row_binds_eight(self) -> None:
+        assert len(SecondBarRow._fields) == 8
+
     def test_the_widest_row_still_allows_a_useful_batch(self) -> None:
         """A sanity floor: if some future row made batches tiny, the collection
         would still work but would issue thousands of statements."""
@@ -96,6 +100,7 @@ class TestTheWidthsTheRepositoriesPass:
             len(FilingRow._fields),
             len(FundamentalRow._fields),
             len(CandleRow.__annotations__),
+            len(SecondBarRow._fields),
         )
 
         assert bulk.PARAMETER_LIMIT // widest > 1000

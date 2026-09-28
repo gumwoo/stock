@@ -19,8 +19,10 @@ bars, through the same reserved, paced client and the same one-KIS-run lock
 as the evening's collection, so a chart opened at 11:00 starts at 09:00. A
 socket opened before the 09:00 open fills nothing: there is nothing earlier.
 
-Nothing here is stored. The record is the REST minute bars fetched after the
-close.
+**Saved:** the one-second bars, every minute and once more when the session
+ends (`live_second_bar`), so a past day's chart can be looked at again. They
+exist only for the time the socket was connected. The record analysed is the
+REST minute bars fetched after the close.
 """
 
 from __future__ import annotations
@@ -30,7 +32,8 @@ import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -47,7 +50,8 @@ from app.models import Instrument, WatchlistMember, WatchlistSnapshot
 from app.models.disclosure import Disclosure
 from app.models.news import NewsItem, NewsSentiment
 from app.realtime.kis_feed import LiveBook, parse_control, parse_trades, subscribe_message
-from app.repositories import instrument_repo
+from app.repositories import instrument_repo, minute_repo
+from app.repositories.minute_repo import SecondBarRow
 from app.scoring.watchlist import MAX_MEMBERS, STRATEGY_VERSION_V2
 from app.services import overlay_service
 
@@ -323,6 +327,54 @@ def _legacy_link(
     return news_link(naver_url, url)
 
 
+SAVE_EVERY = 60  # 초. 1초봉을 DB에 옮기는 주기
+
+
+def seconds_to_save(
+    book: LiveBook, ids: dict[str, int], saved: dict[str, int]
+) -> tuple[list[SecondBarRow], dict[str, int]]:
+    """아직 저장하지 않은 1초봉과, 저장에 성공하면 옮길 종목별 워터마크. 순수하다(`saved`를 바꾸지 않는다).
+
+    이벤트 루프에서 부른다(체결이 dict를 바꾸는 곳과 같은 스레드라 도는 중에 바뀌지 않는다). 종목마다 뒤에서부터
+    돌다가 워터마크보다 이른 초에서 멈춘다: dict는 넣은 순서이고 KIS 체결은 종목마다 시간순으로 온다는 가정이다.
+    워터마크의 초 자체는 다시 보낸다(그 초에 늦게 온 체결을 반영하려고, 저장은 upsert).
+    """
+    rows: list[SecondBarRow] = []
+    marks: dict[str, int] = {}
+    for code, sec in book.seconds.items():
+        iid = ids.get(code)
+        if iid is None:
+            continue
+        since = saved.get(code, 0)
+        mine: list[SecondBarRow] = []
+        for t in reversed(sec):
+            if t < since:
+                break
+            o, h, lo, c, v = sec[t]
+            mine.append(
+                SecondBarRow(
+                    iid,
+                    book.day,
+                    datetime.fromtimestamp(t, UTC),
+                    Decimal(str(o)),
+                    Decimal(str(h)),
+                    Decimal(str(lo)),
+                    Decimal(str(c)),
+                    Decimal(str(v)),
+                )
+            )
+        if mine:
+            rows.extend(mine)
+            marks[code] = int(max(r.ts for r in mine).timestamp())
+    return rows, marks
+
+
+def write_seconds(rows: list[SecondBarRow]) -> int:
+    """새 세션에서 저장하고 commit한다(게이트웨이의 다른 일과 트랜잭션을 나누지 않는다)."""
+    with session_scope() as session:
+        return minute_repo.save_second_bars(session, rows)
+
+
 def seed_minutes(
     members: list[LiveMember], day: date, now: datetime
 ) -> dict[str, list[tuple[int, float, float, float, float, float]]]:
@@ -423,6 +475,7 @@ class Gateway:
         members: Callable[[date], tuple[str, list[LiveMember]]] = load_members,
         seed: Callable[..., dict[str, Any]] = seed_minutes,
         lock: Callable[[], FeedLock] = FeedLock,
+        save_seconds: Callable[[list[SecondBarRow]], int] = write_seconds,
     ) -> None:
         self._connect = connect
         self._approval = approval
@@ -430,6 +483,10 @@ class Gateway:
         self._members = members
         self._seed = seed
         self._lock = lock
+        self._save_seconds = save_seconds
+        # 1초봉 저장 상태. book과 같은 수명이다(같은 날 재연결이면 유지, 새 날이면 비운다).
+        self._ids: dict[str, int] = {}
+        self._saved: dict[str, int] = {}
         self.status = "idle"
         self.source: str | None = None
         self.members: list[LiveMember] = []
@@ -507,6 +564,10 @@ class Gateway:
             # 새로 만들면 끊길 때마다 그날 1초봉이 사라진다. seed는 setdefault라 기존 봉을 덮지 않는다.
             if self.book is None or self.book.day != day:
                 self.book = LiveBook(day)
+                self._ids = {}
+                self._saved = {}
+            # 재연결로 멤버가 바뀌어도 앞서 받은 종목의 초봉을 저장할 수 있게 누적한다.
+            self._ids.update({m.code: m.instrument_id for m in self.members})
             if not self.members:
                 self.status = "no names to watch today"
                 return False
@@ -530,15 +591,41 @@ class Gateway:
                     if self._clock() >= MarketCalendar(Market.KR).session_open(day)
                     else None
                 )
+                saver = asyncio.create_task(self._save_loop())
                 try:
                     await self._relay(socket, until)
                 finally:
                     if seeding is not None:
                         seeding.cancel()
+                    saver.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await saver
+                    # 끝나는 이유가 무엇이든(마감, 끊김, 종료) 남은 초봉을 한 번 더 저장한다.
+                    await self.save_now()
             self.status = "closed for the day"
             return True
         finally:
             await asyncio.to_thread(lock.release)
+
+    async def _save_loop(self) -> None:
+        while True:
+            await asyncio.sleep(SAVE_EVERY)
+            await self.save_now()
+
+    async def save_now(self) -> int:
+        """아직 저장하지 않은 1초봉을 DB로 옮긴다. 실패해도 피드는 계속되고, 같은 구간을 다음에 다시 보낸다."""
+        if self.book is None:
+            return 0
+        rows, marks = seconds_to_save(self.book, self._ids, self._saved)
+        if not rows:
+            return 0
+        try:
+            written = await asyncio.to_thread(self._save_seconds, rows)
+        except Exception:  # 저장은 보조 기록이다. 시세 중계를 멈추지 않는다
+            logger.exception("live feed: saving %d one-second bars failed; will retry", len(rows))
+            return 0
+        self._saved.update(marks)
+        return written
 
     async def _relay(self, socket: Any, until: datetime) -> None:
         while self._clock() < until:

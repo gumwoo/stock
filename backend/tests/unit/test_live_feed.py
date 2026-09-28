@@ -10,7 +10,7 @@ import json
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
-from app.realtime.gateway import Gateway, LiveMember
+from app.realtime.gateway import Gateway, LiveMember, seconds_to_save
 from app.realtime.kis_feed import (
     TRADE_FIELDS,
     LiveBook,
@@ -237,10 +237,26 @@ class Lock:
 MEMBERS = [LiveMember(1, "005930", "삼성전자", 1, ("TRACKED",), None, None, None)]
 
 
-def gateway(socket: Socket, lock: Lock, clock: list[datetime], seeded: list[Any]) -> Gateway:
+SAVED: list[list[Any]] = []
+
+
+def gateway(
+    socket: Socket,
+    lock: Lock,
+    clock: list[datetime],
+    seeded: list[Any],
+    saved: list[Any] | None = None,
+) -> Gateway:
     def seed(members: Any, day: date, now: datetime) -> dict[str, Any]:
         seeded.append((len(members), day))
         return {"005930": [(minute_epoch(day, time(9, 0)), 1.0, 2.0, 0.5, 1.5, 10.0)]}
+
+    # 1초봉 저장은 가짜로 받는다. 단위 테스트가 실제 DB에 쓰지 않게.
+    sink = saved if saved is not None else SAVED
+
+    def save(rows: list[Any]) -> int:
+        sink.append(list(rows))
+        return len(rows)
 
     return Gateway(
         connect=lambda url, **_: socket,
@@ -249,6 +265,7 @@ def gateway(socket: Socket, lock: Lock, clock: list[datetime], seeded: list[Any]
         members=lambda day: ("morning list", MEMBERS),
         seed=seed,
         lock=lambda: lock,
+        save_seconds=save,
     )
 
 
@@ -361,3 +378,73 @@ def test_a_socket_opened_during_the_session_fills_the_earlier_minutes() -> None:
     calls = _count_fills(g)
     assert asyncio.run(g.session_once()) is True
     assert calls == [date(2026, 9, 23)]
+
+
+class TestSavingSeconds:
+    """1초봉을 DB로 옮기는 규칙: 새 구간만, 늦은 체결을 위해 마지막 초는 다시, 실패하면 워터마크를 옮기지 않는다."""
+
+    def test_first_save_takes_everything_and_marks_the_last_second(self) -> None:
+        book = LiveBook(DAY)
+        book.add(trade("093501", 100, 5))
+        book.add(trade("093503", 101, 1))
+        rows, marks = seconds_to_save(book, {"005930": 7}, {})
+        base = minute_epoch(DAY, time(9, 35))
+        assert sorted(int(r.ts.timestamp()) for r in rows) == [base + 1, base + 3]
+        assert {r.instrument_id for r in rows} == {7} and marks == {"005930": base + 3}
+        assert rows[0].session_date == DAY
+
+    def test_the_marked_second_is_sent_again_for_late_trades(self) -> None:
+        book = LiveBook(DAY)
+        book.add(trade("093501", 100, 5))
+        book.add(trade("093503", 101, 1))
+        base = minute_epoch(DAY, time(9, 35))
+        saved = {"005930": base + 3}
+        book.add(trade("093503", 99, 2))  # 저장한 뒤 같은 초에 온 체결
+        book.add(trade("093504", 98, 1))
+        rows, marks = seconds_to_save(book, {"005930": 7}, saved)
+        assert sorted(int(r.ts.timestamp()) for r in rows) == [base + 3, base + 4]
+        third = next(r for r in rows if int(r.ts.timestamp()) == base + 3)
+        assert (third.low, third.close, third.volume) == (99, 99, 3)
+        assert saved == {"005930": base + 3}  # 순수: 넘긴 워터마크를 바꾸지 않는다
+        assert marks == {"005930": base + 4}
+
+    def test_names_without_an_id_are_skipped(self) -> None:
+        book = LiveBook(DAY)
+        book.add(Trade("000660", time(9, 35, 1), 50.0, 1, 0, 0.0))
+        assert seconds_to_save(book, {"005930": 7}, {}) == ([], {})
+
+    def test_a_failed_save_keeps_the_watermark_and_retries_the_same_seconds(self) -> None:
+        calls: list[int] = []
+
+        def broken(rows: list[Any]) -> int:
+            calls.append(len(rows))
+            raise RuntimeError("database is down")
+
+        g = Gateway(save_seconds=broken)
+        g.book = LiveBook(DAY)
+        g._ids = {"005930": 7}
+        g.book.add(trade("093501", 100, 5))
+        assert asyncio.run(g.save_now()) == 0
+        assert g._saved == {}
+        assert asyncio.run(g.save_now()) == 0
+        assert calls == [1, 1]  # 같은 구간을 다시 보낸다
+
+    def test_a_successful_save_moves_the_watermark(self) -> None:
+        got: list[list[Any]] = []
+        g = Gateway(save_seconds=lambda rows: got.append(rows) or len(rows))
+        g.book = LiveBook(DAY)
+        g._ids = {"005930": 7}
+        g.book.add(trade("093501", 100, 5))
+        assert asyncio.run(g.save_now()) == 1
+        assert g._saved == {"005930": minute_epoch(DAY, time(9, 35)) + 1}
+
+
+def test_the_session_saves_what_is_left_when_it_ends() -> None:
+    clock = [datetime(2026, 9, 23, 1, 0, tzinfo=UTC)]  # 10:00 in Seoul
+    socket = Socket([frame(record("005930", "100001", "284500", "13"))], clock)
+    saved: list[Any] = []
+    g = gateway(socket, Lock(), clock, [], saved)
+    _count_fills(g)
+    assert asyncio.run(g.session_once()) is True
+    rows = [r for batch in saved for r in batch]
+    assert [(r.instrument_id, int(r.close)) for r in rows] == [(1, 284500)]

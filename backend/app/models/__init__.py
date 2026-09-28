@@ -19,7 +19,13 @@ from app.models.fundamental import (
     FundamentalSource,
 )
 from app.models.instrument import Instrument, Listing, SymbolHistory
-from app.models.intraday import IndexMinuteBar, IntradaySummary, MinuteBar, MinuteFetch
+from app.models.intraday import (
+    IndexMinuteBar,
+    IntradaySummary,
+    LiveSecondBar,
+    MinuteBar,
+    MinuteFetch,
+)
 from app.models.kis import KisCredential
 from app.models.llm import LlmCall
 from app.models.market import (
@@ -90,6 +96,7 @@ __all__ = [
     "IntradaySummary",
     "KisCredential",
     "Listing",
+    "LiveSecondBar",
     "LlmCall",
     "MarketIndexBar",
     "MatchMethod",

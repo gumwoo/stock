@@ -1,9 +1,10 @@
 """One-minute bars from KIS, the record the intraday analysis is computed from.
 
 **The REST bars fetched after the close are the record.** The live chart shows
-what the WebSocket delivers during the session, and none of that is stored:
-a dropped connection or a day nobody opened the chart must not leave a hole
-in what is analysed.
+what the WebSocket delivers during the session. Of that, only the one-second
+bars are kept (`LiveSecondBar`), for looking at a past day's chart: they exist
+only while the feed was connected and cannot be fetched again, so a dropped
+connection leaves a hole in them. Nothing is analysed from them.
 
 **Times.** `ts` is the start of the minute, in UTC, and `available_at` its end:
 the bar is knowable only once the minute is over — the same rule as a daily
@@ -69,6 +70,36 @@ class MinuteBar(Base):
     __table_args__ = (
         UniqueConstraint("instrument_id", "ts", name="uq_minute_bar_instrument_ts"),
         Index("ix_minute_bar_instrument_day", "instrument_id", "session_date"),
+    )
+
+
+class LiveSecondBar(Base):
+    """실시간 체결로 만든 1초봉 하나. 지난날 차트를 다시 보려고 남기는 화면용 기록이다.
+
+    분석 기록이 아니다(분석은 장 마감 뒤 REST로 받는 `MinuteBar`). 서버가 실시간 연결을 들고 있던 동안만 생기고,
+    끊긴 구간은 비며 나중에 되받을 곳이 없다. 체결이 없는 초는 행이 없다. `ts`는 그 초의 시작(UTC).
+    """
+
+    __tablename__ = "live_second_bar"
+
+    id: Mapped[BigIntPk]
+    instrument_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("instrument.instrument_id", ondelete="CASCADE"), nullable=False
+    )
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, doc="Start of the second, UTC."
+    )
+    open: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    high: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    low: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    close: Mapped[Decimal] = mapped_column(Price, nullable=False)
+    volume: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    ingested_at: Mapped[IngestedAt]
+
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "ts", name="uq_live_second_bar_instrument_ts"),
+        Index("ix_live_second_bar_instrument_day", "instrument_id", "session_date"),
     )
 
 
