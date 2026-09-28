@@ -69,10 +69,10 @@ def _kst(hour: str, minute: str) -> str:
     return f"{(int(hour) + 9) % 24:02d}:{minute}"
 
 
-def _stopped(reason: str) -> str:
+def _stopped(reason: str, *, started: bool) -> str:
     """LLM 배치가 멈춘 이유(llm_service.py의 report.stopped). 공급자 문구 같은 뒷부분은 버린다."""
     if reason.startswith("another LLM run is in progress"):
-        return "다른 해석 작업이 돌고 있어 멈춤"
+        return "다른 해석 작업이 돌고 있어 " + ("멈춤" if started else "시작하지 않음")
     usage = re.match(r"(five-hour|seven-day) usage at (\d+)%", reason)
     if usage:
         window = "5시간" if usage[1] == "five-hour" else "7일"
@@ -95,8 +95,11 @@ def _llm(detail: str) -> str | None:
     if not m:
         return None
     # items는 판정·해석을 합쳐 모델에 보낸 기사 수다(형식이 틀린 답이 온 묶음 포함). "해석한 건수"가 아니다.
-    text = f"모델에 보낸 기사 {m[1]}/{m[2]}건"
-    return f"{text} · {_stopped(m[3])}" if m[3] is not None else text
+    # 분모는 남은 기사 수가 아니라 예산 상한이다.
+    text = f"모델에 보낸 기사 {m[1]}건(상한 {m[2]})"
+    if m[3] is None:
+        return text
+    return f"{text} · {_stopped(m[3], started=m[1] != '0')}"
 
 
 def _prefetch(detail: str) -> str | None:
@@ -153,7 +156,7 @@ def _for_stage(name: str, detail: str) -> str | None:
     elif name == s.SCORE:
         m = re.fullmatch(r"(\d+) scored, (\d+) without bars, (\d+) failed; (\d+) peers", detail)
         if m:
-            return f"점수 {m[1]} · 일봉 없음 {m[2]} · 실패 {m[3]} · 비교군 {m[4]}"
+            return f"점수 낸 종목 {m[1]} · 일봉 없음 {m[2]} · 실패 {m[3]} · 비교군 {m[4]}"
     return None
 
 

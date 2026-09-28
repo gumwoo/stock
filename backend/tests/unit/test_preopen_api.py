@@ -96,24 +96,48 @@ def test_the_list_time_matches_the_worker_cron() -> None:
         ("prefetch", "FAILED 2, FETCHED 3", "실패 2 · 새로 받음 3"),
         ("pool", "already frozen at 22:08Z", "이미 07:08에 확정됨"),
         ("search_trends", "84 names, PARTIAL", "84종목, 일부만"),
-        ("llm", "37 of 100 items", "모델에 보낸 기사 37/100건"),
+        ("llm", "37 of 100 items", "모델에 보낸 기사 37건(상한 100)"),
         (
             "llm",
             "37 of 100 items; stopped: five-hour usage at 91%",
-            "모델에 보낸 기사 37/100건 · 5시간 사용량 91%에서 멈춤",
+            "모델에 보낸 기사 37건(상한 100) · 5시간 사용량 91%에서 멈춤",
         ),
         (
             "supplement_llm",
             "0 of 30 items; stopped: seven-day usage at 88% by the last call; not starting",
-            "모델에 보낸 기사 0/30건 · 7일 사용량 88%라 시작하지 않음",
+            "모델에 보낸 기사 0건(상한 30) · 7일 사용량 88%라 시작하지 않음",
         ),
         (
             "llm",
             "5 of 100 items; stopped: unavailable: provider said\nsomething long",
-            "모델에 보낸 기사 5/100건 · LLM을 쓸 수 없어 멈춤",
+            "모델에 보낸 기사 5건(상한 100) · LLM을 쓸 수 없어 멈춤",
         ),
-        ("llm", "2 of 100 items; stopped: something new", "모델에 보낸 기사 2/100건 · 도중에 멈춤"),
+        (
+            "llm",
+            "2 of 100 items; stopped: something new",
+            "모델에 보낸 기사 2건(상한 100) · 도중에 멈춤",
+        ),
         ("llm", "LLM_SCHEDULE_ENABLED is off", "예약 해석이 꺼져 있음"),
+        (
+            "llm",
+            "0 of 100 items; stopped: another LLM run is in progress",
+            "모델에 보낸 기사 0건(상한 100) · 다른 해석 작업이 돌고 있어 시작하지 않음",
+        ),
+        (
+            "supplement_llm",
+            "12 of 30 items; stopped: another LLM run is in progress",
+            "모델에 보낸 기사 12건(상한 30) · 다른 해석 작업이 돌고 있어 멈춤",
+        ),
+        (
+            "llm",
+            "3 of 100 items; stopped: call quota: anthropic_daily 10/10",
+            "모델에 보낸 기사 3건(상한 100) · 호출 한도로 멈춤",
+        ),
+        (
+            "llm",
+            "8 of 100 items; stopped: subscription refused: rate limited",
+            "모델에 보낸 기사 8건(상한 100) · 구독에서 거절되어 멈춤",
+        ),
         ("theme_news", "FAILED", "실패"),
         (
             "theme_refresh",
@@ -124,7 +148,7 @@ def test_the_list_time_matches_the_worker_cron() -> None:
         (
             "score",
             "71 scored, 13 without bars, 0 failed; 18 peers",
-            "점수 71 · 일봉 없음 13 · 실패 0 · 비교군 18",
+            "점수 낸 종목 71 · 일봉 없음 13 · 실패 0 · 비교군 18",
         ),
         ("prefetch", "pool was not frozen", "후보 풀이 확정되지 않아 건너뜀"),
         ("score", "past the open", "장이 이미 열려 건너뜀"),
