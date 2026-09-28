@@ -91,6 +91,8 @@ function signed(value: number | null | undefined, digits = 1, suffix = ""): stri
 export function Live() {
   const [state, setState] = useState<LiveState | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // 브라우저 소켓이 다시 붙을 때마다 올린다. 끊긴 동안 놓친 체결을 서버 봉으로 다시 받게 한다.
+  const [reconnects, setReconnects] = useState(0);
   const [interval, setInterval_] = useState<Interval>("1m");
   const [error, setError] = useState<string | null>(null);
   const [preopen, setPreopen] = useState<PreopenToday | null>(null);
@@ -108,8 +110,9 @@ export function Live() {
   selectedRef.current = selected;
   intervalRef.current = interval;
 
-  // 체결 한 건을 차트에 반영한다. 1분봉도 1초봉도 서버가 쌓은 완성된 봉을 그대로 그린다(브라우저에서 더하지 않아
-  // 받는 사이에 빠진 체결이 있어도 다음 체결 때 서버 값으로 바로잡힌다). `after`보다 이른 봉은 이미 받은 봉에 있다.
+  // 체결 한 건을 차트에 반영한다. 1분봉도 1초봉도 서버가 쌓은 그 봉을 그대로 그린다(브라우저에서 더하지 않는다).
+  // 놓친 체결이 있어도 같은 봉에 다음 체결이 오면 서버 값으로 바로잡힌다. 이미 지난 봉은 봉을 다시 받을 때(종목·간격
+  // 전환, 소켓 재연결) 바로잡힌다. `after`보다 이른 봉은 이미 받은 봉에 있다.
   const apply = useCallback(
     (message: TradeMessage, after: number) => {
       const bar = intervalRef.current === "1m" ? message.bar : message.sbar;
@@ -198,7 +201,7 @@ export function Live() {
     return () => {
       current = false;
     };
-  }, [selected, interval, reset, apply]);
+  }, [selected, interval, reconnects, reset, apply]);
 
   // Trades as they happen. A dropped socket is opened again a few seconds later.
   useEffect(() => {
@@ -206,12 +209,17 @@ export function Live() {
     let socket: WebSocket | null = null;
     let retry: number | undefined;
     let closed = false;
+    let dropped = false;
     const open = () => {
       socket = new WebSocket(`${scheme}://${window.location.host}/ws/live`);
       socket.onmessage = onMessage;
-      socket.onopen = () => setError(null);
+      socket.onopen = () => {
+        setError(null);
+        if (dropped) setReconnects((n) => n + 1);
+      };
       socket.onclose = () => {
         if (closed) return;
+        dropped = true;
         setError("실시간 연결이 끊겨 다시 연결하는 중…");
         retry = window.setTimeout(open, 3_000);
       };
@@ -446,7 +454,9 @@ export function Live() {
             <p className="live__note">
               들어오는 체결로 그린 화면용 차트이고 기록이 아닙니다. 분석에 쓰는 기록은 장 마감 뒤 받는
               1분봉입니다. 1분봉과 1초봉은 서버가 목록 전 종목을 계속 쌓고 있어, 종목을 바꿔도 이어서 보입니다.
-              {interval === "1s" ? " 1초봉은 서버가 실시간 연결을 시작한 때부터 있습니다(과거 1초봉은 받을 곳이 없습니다)." : ""}
+              {interval === "1s"
+                ? " 1초봉은 서버가 실시간 연결을 시작한 때부터 있고, 서버와 증권사 연결이 끊겼던 동안은 비어 있습니다(과거 1초봉은 받을 곳이 없습니다)."
+                : ""}
             </p>
           )}
         </div>
