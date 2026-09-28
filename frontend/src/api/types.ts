@@ -164,7 +164,20 @@ export interface LiveMember {
   total_score: number | null;
   prefetch_status: string | null;
   abstained_reason: string | null;
+  /** 목록 이유 뒤의 뉴스·공시 묶음(뉴스 점수가 큰 순, 최대 5개). 옛 서버는 보내지 않는다. */
+  events?: LiveEvent[];
   last: { price: number; change_pct: number; day_volume: number } | null;
+}
+
+export interface LiveEvent {
+  event_type: string;
+  /** 묶음의 첫 기사·공시가 나온 시각(ISO). */
+  first_at: string;
+  title: string;
+  sentiment: number;
+  articles: number;
+  /** 제목을 준 기사(네이버 주소 우선)나 DART 공시 주소. 못 찾으면 null. */
+  url: string | null;
 }
 
 export interface LiveState {

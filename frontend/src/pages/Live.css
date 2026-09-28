@@ -273,3 +273,83 @@
   width: 64px;
   height: 18px;
 }
+
+/* 근거 뉴스·공시. 방향은 기호와 증거 색(--c-supports / --c-opposes)으로, 가격 방향 색은 쓰지 않는다. */
+.live__events {
+  margin-top: var(--s-3);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--c-border);
+}
+
+.live__eventsTitle {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-micro);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+
+.live__eventList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s-2);
+}
+
+.live__event {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  column-gap: var(--s-2);
+  row-gap: 2px;
+  align-items: baseline;
+}
+
+.live__eventDir {
+  grid-row: span 2;
+  font-weight: 600;
+  text-align: center;
+}
+
+.live__eventDir--up {
+  color: var(--c-supports);
+}
+
+.live__eventDir--down {
+  color: var(--c-opposes);
+}
+
+.live__eventDir--flat {
+  color: var(--c-text-tertiary);
+}
+
+.live__eventMeta {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
+
+.live__eventTitle {
+  font-size: var(--t-small);
+  color: var(--c-text);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+a.live__eventTitle {
+  text-decoration: underline;
+  text-decoration-color: var(--c-border);
+  text-underline-offset: 3px;
+}
+
+a.live__eventTitle:hover {
+  text-decoration-color: currentColor;
+}
+
+/* 화면에는 안 보이고 스크린리더만 읽는 문구. */
+.live__srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

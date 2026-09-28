@@ -169,6 +169,7 @@ def _detail(result: OverlayAt, limit: int = 10) -> list[dict[str, object]]:
             "decay": round(c.decay, 3),
             "contribution": round(c.contribution, 4),
             "title": c.title[:200],
+            "lead": {"source": c.lead_source, "id": c.lead_id},
         }
         for c in result.overlay.clusters[:limit]
     ]

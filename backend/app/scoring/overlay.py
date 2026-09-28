@@ -110,6 +110,9 @@ class Cluster:
     title: str
     news_item_ids: tuple[int, ...]
     disclosure_ids: tuple[int, ...] = ()
+    # 제목을 준 읽기. 화면이 그 기사·공시로 링크를 건다(NEWS면 news_item id, DART면 disclosure id).
+    lead_source: str = "NEWS"
+    lead_id: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +173,9 @@ def compute_overlay(
         intensity = max(r.intensity for r in group)
         confidence = max(r.confidence for r in pointed) if pointed else 0.0
         news = [r for r in group if r.source == "NEWS"]
+        # The article that says most about the event, not merely the
+        # first: a market wrap often breaks a story before its own report.
+        lead = max(news or group, key=lambda r: (r.intensity * r.confidence, -r.news_item_id))
         clusters.append(
             Cluster(
                 event_type=first.event_type,
@@ -180,13 +186,11 @@ def compute_overlay(
                 confidence=confidence,
                 decay=decay,
                 contribution=sentiment * intensity * confidence * decay,
-                # The article that says most about the event, not merely the
-                # first: a market wrap often breaks a story before its own report.
-                title=max(
-                    news or group, key=lambda r: (r.intensity * r.confidence, -r.news_item_id)
-                ).title,
+                title=lead.title,
                 news_item_ids=tuple(r.news_item_id for r in news),
                 disclosure_ids=tuple(r.news_item_id for r in group if r.source == "DART"),
+                lead_source=lead.source,
+                lead_id=lead.news_item_id,
             )
         )
     raw = sum(c.contribution for c in clusters)

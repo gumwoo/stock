@@ -29,8 +29,8 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import date, datetime, time
+from dataclasses import dataclass, replace
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -44,9 +44,12 @@ from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import _lock_key, get_engine, session_scope
 from app.models import Instrument, WatchlistMember, WatchlistSnapshot
+from app.models.disclosure import Disclosure
+from app.models.news import NewsItem, NewsSentiment
 from app.realtime.kis_feed import LiveBook, parse_control, parse_trades, subscribe_message
 from app.repositories import instrument_repo
 from app.scoring.watchlist import MAX_MEMBERS, STRATEGY_VERSION_V2
+from app.services import overlay_service
 
 logger = logging.getLogger(__name__)
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -54,6 +57,20 @@ OPENS = time(8, 55)
 CLOSES = time(15, 35)
 FEED_LOCK = "kis_ws_feed"
 SEED_ATTEMPTS = 5
+
+
+@dataclass(frozen=True, slots=True)
+class LiveEvent:
+    """목록 이유 뒤의 뉴스·공시 묶음 하나(화면용). `url`은 제목을 준 기사·공시로 가는 링크, 못 찾으면 None."""
+
+    event_type: str
+    first_at: str
+    title: str
+    sentiment: float
+    articles: int
+    url: str | None = None
+    lead_source: str | None = None
+    lead_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +86,7 @@ class LiveMember:
     total_score: float | None = None
     prefetch_status: str | None = None
     abstained_reason: str | None = None
+    events: tuple[LiveEvent, ...] = ()
 
 
 # 게이트웨이가 알리는 목록 출처. 화면이 이 코드로 문구를 고른다.
@@ -84,6 +102,7 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
     두 행이 나와 예외가 난다. V2 목록이 0개인 날은 0개가 답이다. "오늘 이유가
     있는 종목이 없다"를 추적 종목으로 덮으면 V1로 되돌아간다.
     """
+    found: list[LiveMember] = []
     with session_scope() as session:
         snap = session.execute(
             select(WatchlistSnapshot)
@@ -91,7 +110,7 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
             .order_by((WatchlistSnapshot.strategy_version == STRATEGY_VERSION_V2).desc())
             .limit(1)
         ).scalar_one_or_none()
-        found: list[LiveMember] = []
+        asof = snap.asof if snap is not None else None
         if snap is not None:
             rows = session.execute(
                 select(WatchlistMember, Instrument.name)
@@ -115,19 +134,188 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
                             m.total_score,
                             m.prefetch_status,
                             m.abstained_reason,
+                            to_events(m.overlay_events),
                         )
                     )
-            return (MORNING_LIST if rows else MORNING_LIST_EMPTY), found
-        tracked = instrument_repo.list_active(session, asof=day, market=Market.KR, tracked=True)
-        for n, inst in enumerate(tracked[:MAX_MEMBERS], 1):
-            code = instrument_repo.current_symbol(session, inst.instrument_id)
-            if code:
-                found.append(
-                    LiveMember(
-                        inst.instrument_id, code, inst.name, n, ("TRACKED",), None, None, None
+            source = MORNING_LIST if rows else MORNING_LIST_EMPTY
+        else:
+            tracked = instrument_repo.list_active(session, asof=day, market=Market.KR, tracked=True)
+            for n, inst in enumerate(tracked[:MAX_MEMBERS], 1):
+                code = instrument_repo.current_symbol(session, inst.instrument_id)
+                if code:
+                    found.append(
+                        LiveMember(
+                            inst.instrument_id, code, inst.name, n, ("TRACKED",), None, None, None
+                        )
                     )
+            return TRACKED_FALLBACK, found
+    # 링크는 멤버를 읽은 세션을 닫은 뒤 따로 찾는다. 링크 조회의 SQL 오류가 같은 트랜잭션을 망가뜨려 목록·구독까지
+    # 막지 않게 하려는 것이다(화면 보조 기능이 시세 피드를 멈추면 안 된다).
+    return source, attach_links(found, asof)
+
+
+def to_events(raw: object) -> tuple[LiveEvent, ...]:
+    """저장된 overlay_events(JSON)를 화면용으로. 키가 빠진 옛 행이 있어도 피드를 멈추지 않게 항목마다 너그럽게 읽는다."""
+    out: list[LiveEvent] = []
+    for e in raw if isinstance(raw, list) else []:
+        if not isinstance(e, dict) or not e.get("title"):
+            continue
+        raw_lead = e.get("lead")
+        lead: dict[str, Any] = raw_lead if isinstance(raw_lead, dict) else {}
+        try:
+            out.append(
+                LiveEvent(
+                    event_type=str(e.get("event_type") or "OTHER"),
+                    first_at=str(e.get("first_at") or ""),
+                    title=str(e["title"]),
+                    sentiment=float(e.get("sentiment") or 0.0),
+                    articles=int(e.get("articles") or 0),
+                    lead_source=str(lead["source"]) if lead.get("source") else None,
+                    lead_id=int(lead["id"]) if lead.get("id") else None,
                 )
-        return TRACKED_FALLBACK, found
+            )
+        except (TypeError, ValueError):
+            continue
+    return tuple(out)
+
+
+DART_VIEW = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="
+
+
+def event_link(url: str | None) -> str | None:
+    """화면에 걸 링크. http/https만 통과한다(저장된 문자열을 그대로 href에 넣지 않는다)."""
+    if url and url.lower().startswith(("http://", "https://")):
+        return url
+    return None
+
+
+def news_link(naver_url: str | None, url: str | None) -> str | None:
+    """네이버 기사 주소를 먼저(원문이 네이버와 같으면 naver_url이 비어 있다), 없으면 원문 주소."""
+    return event_link(naver_url) or event_link(url)
+
+
+def attach_links(
+    members: list[LiveMember],
+    asof: datetime | None,
+    lookup: Callable[[list[LiveMember], datetime | None], dict[tuple[int, int], str]] | None = None,
+) -> list[LiveMember]:
+    """이벤트마다 링크를 채운다. 조회가 어떤 이유로든 실패하면 링크 없이 그대로 돌려준다."""
+    if not any(m.events for m in members):
+        return members
+    try:
+        links = (lookup or lookup_links)(members, asof)
+    except Exception:  # 링크는 보조 표시다. 목록과 구독을 막지 않는다
+        logger.exception("live feed: event links failed; showing titles only")
+        return members
+    out = []
+    for m in members:
+        if not m.events:
+            out.append(m)
+            continue
+        events = tuple(
+            replace(e, url=links.get((m.instrument_id, i))) for i, e in enumerate(m.events)
+        )
+        out.append(replace(m, events=events))
+    return out
+
+
+def lookup_links(members: list[LiveMember], asof: datetime | None) -> dict[tuple[int, int], str]:
+    """(종목, 이벤트 순번) → 링크. 새 세션에서 읽기만 한다."""
+    window = overlay_service.PARAMS.cluster_window
+    found: dict[tuple[int, int], str] = {}
+    with session_scope() as session:
+        news_ids = {
+            e.lead_id for m in members for e in m.events if e.lead_source == "NEWS" and e.lead_id
+        }
+        dart_ids = {
+            e.lead_id for m in members for e in m.events if e.lead_source == "DART" and e.lead_id
+        }
+        news = (
+            {
+                i: news_link(n, u)
+                for i, n, u in session.execute(
+                    select(NewsItem.id, NewsItem.naver_url, NewsItem.url).where(
+                        NewsItem.id.in_(news_ids)
+                    )
+                ).all()
+            }
+            if news_ids
+            else {}
+        )
+        dart = (
+            {
+                i: event_link(DART_VIEW + r)
+                for i, r in session.execute(
+                    select(Disclosure.id, Disclosure.rcept_no).where(Disclosure.id.in_(dart_ids))
+                ).all()
+            }
+            if dart_ids
+            else {}
+        )
+        for m in members:
+            for i, e in enumerate(m.events):
+                if e.lead_source == "NEWS" and e.lead_id:
+                    link = news.get(e.lead_id)
+                elif e.lead_source == "DART" and e.lead_id:
+                    link = dart.get(e.lead_id)
+                else:
+                    link = _legacy_link(session, m.instrument_id, e, asof, window)
+                if link:
+                    found[(m.instrument_id, i)] = link
+    return found
+
+
+def _legacy_link(
+    session: Any, instrument_id: int, event: LiveEvent, asof: datetime | None, window: timedelta
+) -> str | None:
+    """제목을 준 기사 id가 저장되지 않은 옛 목록(2026-09-28 목록)용. 정확하고 유일하게 맞을 때만 링크를 건다.
+
+    다음 목록부터는 `lead`가 저장되므로 쓰이지 않는다. 지워도 된다.
+    """
+    if asof is None or not event.first_at:
+        return None
+    try:
+        start = datetime.fromisoformat(event.first_at)
+    except ValueError:
+        return None
+    end = min(start + window, asof)
+    if event.title.startswith("[공시] "):
+        rcept = session.execute(
+            select(Disclosure.rcept_no)
+            .where(
+                Disclosure.instrument_id == instrument_id,
+                Disclosure.report_nm == event.title.removeprefix("[공시] "),
+                Disclosure.available_at >= start,
+                Disclosure.available_at <= end,
+                Disclosure.ingested_at <= asof,
+            )
+            .order_by(Disclosure.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if rcept:
+            return event_link(DART_VIEW + rcept)
+    # 저장된 제목은 앞 200자로 잘려 있다. 200자면 앞부분 일치로 찾는다.
+    title_match = (
+        NewsItem.title.startswith(event.title, autoescape=True)
+        if len(event.title) >= 200
+        else NewsItem.title == event.title
+    )
+    rows = session.execute(
+        select(NewsItem.id, NewsItem.naver_url, NewsItem.url)
+        .join(NewsSentiment, NewsSentiment.news_item_id == NewsItem.id)
+        .where(
+            NewsSentiment.instrument_id == instrument_id,
+            NewsSentiment.created_at <= asof,
+            title_match,
+            NewsItem.available_at >= start,
+            NewsItem.available_at <= end,
+        )
+        .distinct()
+    ).all()
+    if len(rows) != 1:
+        return None
+    _, naver_url, url = rows[0]
+    return news_link(naver_url, url)
 
 
 def seed_minutes(
@@ -424,6 +612,17 @@ class Gateway:
                     "total_score": m.total_score,
                     "prefetch_status": m.prefetch_status,
                     "abstained_reason": m.abstained_reason,
+                    "events": [
+                        {
+                            "event_type": e.event_type,
+                            "first_at": e.first_at,
+                            "title": e.title,
+                            "sentiment": e.sentiment,
+                            "articles": e.articles,
+                            "url": e.url,
+                        }
+                        for e in m.events
+                    ],
                     "last": (
                         {
                             "price": t.price,

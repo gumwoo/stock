@@ -178,3 +178,42 @@ class TestDisclosuresJoinTheNews:
         overlay = compute_overlay([*articles, filing], asof=T, params=P)
         assert len(overlay.clusters) == 1
         assert overlay.clusters[0].articles == 6
+
+
+class TestLead:
+    """제목을 준 읽기를 가리켜, 화면이 그 기사·공시로 링크를 걸 수 있게 한다."""
+
+    def test_the_lead_is_the_reading_that_gave_the_title(self) -> None:
+        weak = reading(1, intensity=0.3)
+        strong = reading(2, at=T - 2 * H, intensity=0.9)
+        (c,) = compute_overlay([weak, strong], asof=T, params=P).clusters
+        assert c.title == "article 2"
+        assert (c.lead_source, c.lead_id) == ("NEWS", 2)
+
+    def test_news_leads_even_when_a_disclosure_scores_higher(self) -> None:
+        dart = EventReading(
+            news_item_id=77,
+            available_at=T - H,
+            event_type="SHAREHOLDER_RETURN",
+            sentiment=0.6,
+            intensity=1.0,
+            confidence=1.0,
+            title="[공시] 자기주식취득결정",
+            source="DART",
+        )
+        (c,) = compute_overlay([dart, reading(5, intensity=0.2)], asof=T, params=P).clusters
+        assert (c.lead_source, c.lead_id, c.title) == ("NEWS", 5, "article 5")
+
+    def test_a_disclosure_only_cluster_leads_with_the_disclosure(self) -> None:
+        dart = EventReading(
+            news_item_id=77,
+            available_at=T - H,
+            event_type="SHAREHOLDER_RETURN",
+            sentiment=0.6,
+            intensity=0.6,
+            confidence=0.8,
+            title="[공시] 자기주식취득결정",
+            source="DART",
+        )
+        (c,) = compute_overlay([dart], asof=T, params=P).clusters
+        assert (c.lead_source, c.lead_id) == ("DART", 77)

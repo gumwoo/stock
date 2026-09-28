@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
+import { eventTypeLabel, shortSeoulTime } from "../api/format";
 import { MorningStatus, dayLabel } from "../components/MorningStatus";
 import { Sparkline } from "../components/Sparkline";
 import { ThemeNews } from "../components/ThemeNews";
@@ -445,6 +446,39 @@ export function Live() {
               </dl>
               {member.prefetch_status && PREFETCH[member.prefetch_status] && (
                 <p className="live__warn">{PREFETCH[member.prefetch_status]}</p>
+              )}
+              {member.events && member.events.length > 0 && (
+                <section className="live__events" aria-label="근거 뉴스·공시">
+                  <h3 className="live__eventsTitle">근거 뉴스·공시</h3>
+                  <ul className="live__eventList">
+                    {member.events.map((e, i) => {
+                      const dir = e.sentiment > 0 ? "up" : e.sentiment < 0 ? "down" : "flat";
+                      return (
+                        <li key={i} className="live__event">
+                          <span
+                            className={`live__eventDir live__eventDir--${dir}`}
+                            role="img"
+                            aria-label={dir === "up" ? "좋은 소식" : dir === "down" ? "나쁜 소식" : "방향 없음"}
+                          >
+                            {dir === "up" ? "+" : dir === "down" ? "−" : "·"}
+                          </span>
+                          <span className="live__eventMeta">
+                            {eventTypeLabel(e.event_type)} · {shortSeoulTime(e.first_at)}
+                            {e.articles > 1 ? ` · 기사 ${e.articles}건` : ""}
+                          </span>
+                          {e.url ? (
+                            <a className="live__eventTitle" href={e.url} target="_blank" rel="noopener noreferrer">
+                              {e.title}
+                              <span className="live__srOnly"> (새 탭)</span>
+                            </a>
+                          ) : (
+                            <span className="live__eventTitle">{e.title}</span>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
               )}
               {member.abstained_reason && <p className="live__abstain">점수 보류: {member.abstained_reason}</p>}
             </div>

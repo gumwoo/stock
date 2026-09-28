@@ -208,3 +208,40 @@ export function fullDatetime(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
 }
+
+// 뉴스·공시 묶음의 사건 종류(backend/app/scoring/overlay.py DEFAULT_HALF_LIVES의 13종).
+const EVENT_TYPE_LABEL: Record<string, string> = {
+  PRICE_MOVE: "주가 움직임",
+  OTHER: "기타",
+  INDUSTRY: "업황",
+  PRODUCT: "제품",
+  MANAGEMENT: "경영",
+  ANALYST_RATING: "증권사 의견",
+  EARNINGS: "실적",
+  GUIDANCE: "실적 전망",
+  SHAREHOLDER_RETURN: "주주환원",
+  ORDER_CONTRACT: "수주·계약",
+  CAPITAL_RAISE: "자금 조달",
+  LEGAL_REGULATORY: "법·규제",
+  MERGER_ACQUISITION: "인수합병",
+};
+
+export function eventTypeLabel(type: string): string {
+  return EVENT_TYPE_LABEL[type] ?? type;
+}
+
+/** "9/23 09:00" 꼴의 서울 시각. 읽을 수 없으면 빈 문자열. */
+export function shortSeoulTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t: string) => parts.find((x) => x.type === t)?.value ?? "";
+  return `${get("month")}/${get("day")} ${get("hour")}:${get("minute")}`;
+}
