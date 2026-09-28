@@ -39,24 +39,20 @@
   font-weight: var(--w-semibold);
 }
 
-.signals__action {
+.signals__day {
+  font: inherit;
+  font-size: var(--t-small);
+  color: var(--c-text);
   background: none;
   border: 1px solid var(--c-border);
   border-radius: var(--radius-sm);
-  padding: var(--s-2) var(--s-3);
+  padding: var(--s-1) var(--s-2);
+}
+
+.signals__lead {
+  margin: calc(-1 * var(--s-3)) 0 var(--s-5);
   font-size: var(--t-small);
-  color: var(--c-text-secondary);
-  transition: border-color 0.12s, color 0.12s;
-}
-
-.signals__action:hover:not(:disabled) {
-  border-color: var(--c-border-strong);
-  color: var(--c-text);
-}
-
-.signals__action:disabled {
-  opacity: 0.5;
-  cursor: default;
+  color: var(--c-text-tertiary);
 }
 
 .signals__error,
@@ -117,9 +113,10 @@
   color: var(--c-text-secondary);
 }
 
+/* 판단 표시는 가격 방향이 아니므로 가격 색(--c-up)이 아니라 증거 색을 쓴다. */
 .tag--buy_interest {
-  color: var(--c-up);
-  background: var(--c-up-soft);
+  color: var(--c-supports);
+  border-color: currentColor;
 }
 
 .tag--caution {
@@ -245,4 +242,43 @@
 .card__actions {
   display: flex;
   gap: var(--s-4);
+}
+
+.card__more:disabled {
+  color: var(--c-text-tertiary);
+  text-decoration: none;
+  cursor: default;
+}
+
+.card__parts {
+  margin: var(--s-1) 0 0;
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
+
+.card__listReasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin: 0;
+}
+
+.card__listReason {
+  font-size: var(--t-micro);
+  color: var(--c-text-secondary);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 1px var(--s-2);
+}
+
+.card__warn {
+  margin: 0;
+  font-size: var(--t-micro);
+  color: var(--c-warn);
+}
+
+.card__note {
+  margin: 0;
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
 }

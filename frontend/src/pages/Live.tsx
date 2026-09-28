@@ -1,39 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import { eventTypeLabel, shortSeoulTime } from "../api/format";
+import { LIST_REASON_LABEL, eventTypeLabel, shortSeoulTime } from "../api/format";
 import { MorningStatus, dayLabel } from "../components/MorningStatus";
 import { Sparkline } from "../components/Sparkline";
 import { ThemeNews } from "../components/ThemeNews";
-import type { LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
+import type { LiveBar, LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
 import { useLiveChart } from "../hooks/useLiveChart";
 import "./Live.css";
 
 /**
- * Today's watch: the morning's list, and a live chart of the chosen name.
+ * 오늘의 관찰: 그날 아침 목록과 고른 종목의 차트·근거 뉴스.
  *
- * Display only. The minute bars here are built from KIS's trades as they
- * arrive; the record the system analyses is fetched separately after the
- * close. Why each name is on the list stays beside its chart, so the price is
- * read against the morning's reason for looking, not instead of it.
+ * 두 가지로 본다. 고른 날이 실시간 연결이 들고 있는 날이면 **실시간**(웹소켓 체결로 그리는 1분봉·1초봉). 그 밖의
+ * 날(지난 목록, 장 밖에 서버를 다시 켠 뒤의 오늘)은 **기록**: 저장된 목록과 저장된 봉(장 마감 뒤 1분봉, 연결돼 있던
+ * 동안의 1초봉)을 보여 준다. 기록 모드에서는 웹소켓 체결을 차트에 넣지 않는다.
+ *
+ * 점수는 신호 탭에 있다. 여기는 차트와 목록에 오른 이유(뉴스·공시·검색량)다.
  */
-
-// 좋은·나쁜 뉴스는 색이 아니라 기호로 구분한다(한국식 상승 빨강과 부딪히지 않게).
-const REASONS: Record<string, string> = {
-  DISCOVERY_SURGE: "뉴스 급증",
-  POSITIVE_NEWS_OVERLAY: "＋좋은 뉴스",
-  NEGATIVE_NEWS_OVERLAY: "－나쁜 뉴스",
-  DISCLOSURE_EVENT: "공시",
-  SEARCH_SURGE: "검색 급증",
-  TRACKED_HIGH_SCORE: "점수 상위",
-  TRACKED: "추적 종목",
-};
-
-const REGIMES: Record<string, string> = {
-  RISK_ON: "상승장",
-  NEUTRAL: "중립",
-  RISK_OFF: "하락장",
-  UNKNOWN: "국면 모름",
-};
 
 /** The feed's state, which the API reports as short English codes, in Korean. */
 function statusLabel(status: string): string {
@@ -54,11 +37,6 @@ function statusMark(status: string): string {
   if (status.startsWith("live")) return "●";
   if (status.startsWith("off") || status.startsWith("another process")) return "✕";
   return "○";
-}
-
-/** 게이트웨이가 목록을 보여 줄 수 없는 상태(꺼짐, 다른 프로세스가 연결을 씀). */
-function feedUnavailable(status: string): boolean {
-  return status.startsWith("off") || status.startsWith("another process");
 }
 
 /** 묶음의 기사·공시 수. 하나뿐이면 적지 않는다. articles는 공시까지 센 수다. */
@@ -82,14 +60,29 @@ function sourceLabel(source: string | null): string {
   return source;
 }
 
-/** 사전 수집 상태 중 화면에 알릴 것만. 받았거나 이미 최신이면 표시하지 않는다. */
-const PREFETCH: Record<string, string> = {
-  SKIPPED_CAP: "데이터 미수집 (하루 상한 초과)",
-  FAILED: "데이터 수집 실패",
-  NO_DATA: "가격 데이터 없음",
-};
+/**
+ * 1초봉을 1분봉으로 합친다(장 마감 뒤 REST 1분봉을 받기 전의 당일용). 순수하다.
+ * 봉 시각은 UTC epoch 초이고 한국 시각의 분 경계도 60의 배수라(오프셋 32,400초) 60으로 내리면 그 분의 시작이다.
+ */
+export function secondsToMinutes(bars: LiveBar[]): LiveBar[] {
+  const out: LiveBar[] = [];
+  for (const b of bars) {
+    const t = Math.floor(b.time / 60) * 60;
+    const last = out[out.length - 1];
+    if (last && last.time === t) {
+      last.high = Math.max(last.high, b.high);
+      last.low = Math.min(last.low, b.low);
+      last.close = b.close;
+      last.volume += b.volume;
+    } else {
+      out.push({ time: t, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume });
+    }
+  }
+  return out;
+}
 
 type Interval = "1m" | "1s";
+type Mode = "pending" | "live" | "archive";
 type TradeMessage = Extract<LiveMessage, { type: "trade" }>;
 
 function signed(value: number | null | undefined, digits = 1, suffix = ""): string {
@@ -97,31 +90,50 @@ function signed(value: number | null | undefined, digits = 1, suffix = ""): stri
   return `${value > 0 ? "+" : ""}${value.toFixed(digits)}${suffix}`;
 }
 
-export function Live() {
+export function Live({
+  focus,
+  onFocusUsed,
+}: {
+  /** 신호 탭의 "차트·뉴스"로 넘어온 날짜·종목. 한 번 쓰고 `onFocusUsed`로 비운다. */
+  focus: { day: string; code: string } | null;
+  onFocusUsed: () => void;
+}) {
   const [state, setState] = useState<LiveState | null>(null);
+  const [days, setDays] = useState<string[] | null>(null);
+  const [day, setDay] = useState<string | null>(null);
+  const [archive, setArchive] = useState<{ day: string; members: LiveMember[] } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   // 브라우저 소켓이 다시 붙을 때마다 올린다. 끊긴 동안 놓친 체결을 서버 봉으로 다시 받게 한다.
   const [reconnects, setReconnects] = useState(0);
   const [interval, setInterval_] = useState<Interval>("1m");
+  const [chartNote, setChartNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [preopen, setPreopen] = useState<PreopenToday | null>(null);
   const [sparks, setSparks] = useState<Record<string, number[]>>({});
   const [preopenError, setPreopenError] = useState(false);
   const [stepsOpen, setStepsOpen] = useState(false);
   const { container, reset, push } = useLiveChart(440);
+
+  const liveHasList = !!state && !!state.day && state.members.length > 0;
+  const mode: Mode =
+    state === null || day === null ? "pending" : day === state.day && liveHasList ? "live" : "archive";
+
   const selectedRef = useRef<string | null>(null);
   const intervalRef = useRef<Interval>("1m");
-  // False while a new name or interval is being loaded: a live update then
+  const modeRef = useRef<Mode>("pending");
+  const dayRef = useRef<string | null>(null);
+  // False while a new name, interval or day is being loaded: a live update then
   // could be older than the series about to be set, which the chart refuses.
   const ready = useRef(false);
-  // 봉을 받는 동안 들어온 선택 종목의 체결.
+  // 봉을 받는 동안 들어온 선택 종목의 체결(실시간 모드에서만).
   const pending = useRef<TradeMessage[]>([]);
   selectedRef.current = selected;
   intervalRef.current = interval;
+  modeRef.current = mode;
+  dayRef.current = day;
 
   // 체결 한 건을 차트에 반영한다. 1분봉도 1초봉도 서버가 쌓은 그 봉을 그대로 그린다(브라우저에서 더하지 않는다).
-  // 놓친 체결이 있어도 같은 봉에 다음 체결이 오면 서버 값으로 바로잡힌다. 이미 지난 봉은 봉을 다시 받을 때(종목·간격
-  // 전환, 소켓 재연결) 바로잡힌다. `after`보다 이른 봉은 이미 받은 봉에 있다.
+  // `after`보다 이른 봉은 이미 받은 봉에 있다.
   const apply = useCallback(
     (message: TradeMessage, after: number) => {
       const bar = intervalRef.current === "1m" ? message.bar : message.sbar;
@@ -130,7 +142,7 @@ export function Live() {
     [push],
   );
 
-  // The list and each name's last trade, refreshed now and then.
+  // 실시간 목록과 각 종목의 마지막 체결, 추세선. 15초마다.
   useEffect(() => {
     let alive = true;
     const load = () =>
@@ -140,14 +152,8 @@ export function Live() {
           if (!alive) return;
           setState(s);
           setError(null);
-          // 새 날 목록에 이전에 고른 종목이 없으면 첫 종목으로 다시 고른다.
-          const codes = s.members.map((m) => m.code);
-          if (selectedRef.current === null || !codes.includes(selectedRef.current)) {
-            setSelected(codes[0] ?? null);
-          }
         })
         .catch((e: Error) => alive && setError(e.message));
-    // 목록 행의 추세선. 목록과 같은 주기로 한 번에 받는다.
     const loadSparks = () =>
       api
         .liveSparks()
@@ -167,10 +173,10 @@ export function Live() {
     };
   }, []);
 
-  // 아침 흐름 상태(다음 목록 시각, 단계). 실시간 연결과 따로 DB에서 읽는다.
+  // 아침 흐름 상태와 목록 날짜들. 실시간 연결과 따로 DB에서 읽는다.
   useEffect(() => {
     let alive = true;
-    const load = () =>
+    const load = () => {
       api
         .preopenToday()
         .then((p) => {
@@ -181,6 +187,11 @@ export function Live() {
         .catch(() => {
           if (alive) setPreopenError(true);
         });
+      api
+        .listDays()
+        .then((d) => alive && setDays(d))
+        .catch(() => alive && setDays((prev) => prev ?? []));
+    };
     load();
     const timer = window.setInterval(load, 60_000);
     return () => {
@@ -189,30 +200,109 @@ export function Live() {
     };
   }, []);
 
-  // A new name or interval: start the chart from what the server already built (1분봉도 1초봉도).
-  // 받는 사이에 들어온 체결은 버리지 않고 모아 두었다가, 받은 봉보다 새것만 이어 붙인다.
+  // 고를 수 있는 날짜: 목록 날짜들, 그리고 목록 없이 추적 종목을 참고로 보이는 실시간 날(목록 날짜에 없음).
+  const dayOptions = useMemo(() => {
+    const out = [...(days ?? [])];
+    if (liveHasList && state?.day && !out.includes(state.day)) out.unshift(state.day);
+    return out;
+  }, [days, liveHasList, state?.day]);
+
+  // 기본 날짜는 목록 날짜의 최신(없으면 실시간 날). 신호 탭에서 넘어온 날짜가 있으면 그날.
+  useEffect(() => {
+    if (focus) {
+      setDay(focus.day);
+      setSelected(focus.code);
+      onFocusUsed();
+      return;
+    }
+    if (day === null && days !== null) {
+      const first = days[0] ?? (liveHasList ? (state?.day ?? null) : null);
+      if (first) setDay(first);
+    }
+  }, [focus, onFocusUsed, day, days, liveHasList, state?.day]);
+
+  // 기록 모드의 목록. 날짜가 바뀌면 다시 받는다.
+  useEffect(() => {
+    if (mode !== "archive" || day === null) return;
+    if (archive?.day === day) return;
+    let alive = true;
+    setArchive(null);
+    api
+      .listMembers(day)
+      .then((r) => alive && setArchive({ day, members: r.members }))
+      .catch(() => alive && setArchive({ day, members: [] }));
+    return () => {
+      alive = false;
+    };
+  }, [mode, day, archive?.day]);
+
+  const shown: LiveMember[] =
+    mode === "live" ? (state?.members ?? []) : mode === "archive" && archive?.day === day ? archive.members : [];
+  // 목록 날짜도 실시간 목록도 없으면(첫 목록 전) 고를 날이 없다. 그때는 아침 카드를 보인다.
+  const noLists = state !== null && days !== null && days.length === 0 && !liveHasList;
+  const loading = !noLists && (mode === "pending" || (mode === "archive" && archive?.day !== day));
+  const empty = noLists || (!loading && shown.length === 0);
+
+  // 고른 종목이 이 목록에 없으면 첫 종목. 체결마다 도는 것을 막으려고 코드 목록 문자열로 본다.
+  const codesKey = shown.map((m) => m.code).join(",");
+  useEffect(() => {
+    if (loading) return;
+    const codes = codesKey ? codesKey.split(",") : [];
+    if (codes.length === 0) return;
+    if (selected === null || !codes.includes(selected)) setSelected(codes[0]);
+  }, [loading, codesKey, selected]);
+
+  // 종목·간격·날짜·모드가 바뀌면 차트를 새로 받는다. 실시간은 서버의 book, 기록은 저장된 봉.
+  const archiveIdKey = mode === "archive" ? codesKey : "";
   useEffect(() => {
     ready.current = false;
     pending.current = [];
-    if (selected === null) return;
+    setChartNote(null);
+    if (selected === null || day === null || mode === "pending") return;
     let current = true;
-    api
-      .liveBars(selected, interval)
-      .catch(() => [])
-      .then((bars) => {
+    if (mode === "live") {
+      api
+        .liveBars(selected, interval)
+        .catch(() => [])
+        .then((bars) => {
+          if (!current) return;
+          reset(bars, interval === "1s" ? 300 : undefined);
+          const last = bars.length ? bars[bars.length - 1].time : -Infinity;
+          ready.current = true;
+          for (const m of pending.current) apply(m, last);
+          pending.current = [];
+        });
+    } else {
+      const iid = archive?.members.find((m) => m.code === selected)?.instrument_id;
+      if (iid === undefined) return;
+      const load = async (): Promise<{ bars: LiveBar[]; note: string | null }> => {
+        const bars = await api.listBars(day, iid, interval).catch(() => [] as LiveBar[]);
+        if (bars.length > 0 || interval === "1s") {
+          return { bars, note: bars.length === 0 ? "그날 저장된 1초봉이 없습니다." : null };
+        }
+        // 장 마감 뒤 1분봉을 받기 전(16:20 전)의 당일: 저장된 1초봉을 합쳐 보인다.
+        const secs = await api.listBars(day, iid, "1s").catch(() => [] as LiveBar[]);
+        if (secs.length === 0) return { bars: [], note: "그날 저장된 봉이 없습니다." };
+        return {
+          bars: secondsToMinutes(secs),
+          note: "장 마감 뒤 1분봉을 받기 전이라 저장된 1초봉(실시간 연결이 있던 구간만)을 합쳐 보입니다.",
+        };
+      };
+      void load().then(({ bars, note }) => {
+        // 받는 사이 모드·날짜·종목·간격이 바뀌었으면 버린다.
         if (!current) return;
         reset(bars, interval === "1s" ? 300 : undefined);
-        const last = bars.length ? bars[bars.length - 1].time : -Infinity;
-        ready.current = true;
-        for (const m of pending.current) apply(m, last);
-        pending.current = [];
+        setChartNote(note);
       });
+    }
     return () => {
       current = false;
     };
-  }, [selected, interval, reconnects, reset, apply]);
+    // archive는 코드 목록(archiveIdKey)으로 대신한다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, interval, reconnects, reset, apply, mode, day, archiveIdKey]);
 
-  // Trades as they happen. A dropped socket is opened again a few seconds later.
+  // 체결 실시간. 끊기면 몇 초 뒤 다시 연다. 기록 모드에서는 차트에 넣지 않는다.
   useEffect(() => {
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     let socket: WebSocket | null = null;
@@ -240,18 +330,28 @@ export function Live() {
         return;
       }
       if (message.type === "seeded") {
+        if (modeRef.current !== "live") return;
         const code = selectedRef.current;
+        const seenDay = dayRef.current;
         if (code && message.codes.includes(code) && intervalRef.current === "1m") {
           api
             .liveBars(code)
             .then((bars) => {
-              // 받는 사이 종목이나 봉 간격을 바꿨으면 이 1분봉은 버린다.
-              if (selectedRef.current === code && intervalRef.current === "1m") reset(bars);
+              // 받는 사이 모드·날짜·종목·간격이 바뀌었으면 이 1분봉은 버린다.
+              if (
+                modeRef.current === "live" &&
+                dayRef.current === seenDay &&
+                selectedRef.current === code &&
+                intervalRef.current === "1m"
+              ) {
+                reset(bars);
+              }
             })
             .catch(() => undefined);
         }
         return;
       }
+      // 현재가는 실시간 목록(state)에만 적는다. 기록 모드 화면은 이 state를 쓰지 않는다.
       setState((prev) =>
         prev
           ? {
@@ -271,7 +371,7 @@ export function Live() {
             }
           : prev,
       );
-      if (message.code !== selectedRef.current) return;
+      if (modeRef.current !== "live" || message.code !== selectedRef.current) return;
       if (!ready.current) {
         pending.current.push(message);
         return;
@@ -286,37 +386,32 @@ export function Live() {
     };
   }, [reset, apply]);
 
-  const member: LiveMember | undefined = useMemo(
-    () => state?.members.find((m) => m.code === selected),
-    [state, selected],
-  );
+  const member: LiveMember | undefined = shown.find((m) => m.code === selected);
 
-  // 체결마다 state가 바뀌므로 id 목록 문자열을 기준으로 집합을 만든다. 오늘 아침 목록일 때만.
-  const idKey =
-    state?.source === "morning list" ? state.members.map((m) => m.instrument_id).join(",") : "";
+  // 테마 기사에 목록 종목 배지를 붙일 집합(아침 목록일 때만).
+  const isMorningList = mode === "archive" || state?.source === "morning list";
+  const idKey = isMorningList ? shown.map((m) => m.instrument_id).join(",") : "";
   const listIds = useMemo(() => (idKey ? new Set(idKey.split(",").map(Number)) : null), [idKey]);
 
-  const members = state?.members ?? [];
-  const empty = state !== null && members.length === 0;
-  const today = preopen?.day ?? null;
-  // 목록이 있어도 다음 아침 것이 아니면(전날 목록이 남아 있음) 알린다. 목록이 비었으면 카드가 먼저다.
-  const stale =
-    !empty && !!state?.day && !!today && state.day !== today && !state.status.startsWith("live");
   const snapshot = preopen?.stages.find((s) => s.name === "snapshot")?.status ?? null;
+  const latestListDay = days && days.length > 0 ? days[0] : null;
+  // 다음 아침 목록이 아직 없으면(아침 상태의 날이 최신 목록보다 뒤) 모드와 상관없이 알린다.
+  const nextPending = !!preopen && (latestListDay === null || preopen.day > latestListDay);
 
-  const cardTitle = (): string => {
+  const morningTitle = (): string => {
     if (!preopen && preopenError) return "아침 상태를 불러오지 못했습니다. API 서버가 켜져 있는지 확인해 주세요.";
-    if (!preopen || !state) return "아침 상태를 불러오는 중…";
-    if (state.day === preopen.day && state.source?.startsWith("morning list (no names")) {
-      return "오늘은 조건에 맞는 종목이 없습니다.";
-    }
-    if (snapshot === "MISSING") return "오늘 목록을 만들지 못했습니다.";
+    if (!preopen) return "아침 상태를 불러오는 중…";
+    if (snapshot === "MISSING") return `${dayLabel(preopen.day)} 목록을 만들지 못했습니다.`;
     if (!preopen.list_passed) return `다음 관찰 목록: ${dayLabel(preopen.day)} 08:50`;
-    if (snapshot === "SUCCESS" && feedUnavailable(state.status)) {
-      return "오늘 목록은 만들어졌지만 실시간 연결이 꺼져 이 화면에 보이지 않습니다. python -m app.cli watchlist 로 볼 수 있습니다.";
-    }
-    if (snapshot === "SUCCESS") return "오늘 목록이 만들어졌습니다. 08:55부터 이 화면에 표시됩니다.";
-    return `오늘 목록을 만드는 중입니다(${dayLabel(preopen.day)} 08:50).`;
+    if (snapshot === "SUCCESS") return `${dayLabel(preopen.day)} 목록이 만들어졌습니다.`;
+    return `${dayLabel(preopen.day)} 목록을 만드는 중입니다(08:50).`;
+  };
+
+  const statusLine = (): string => {
+    if (mode === "pending") return "불러오는 중…";
+    if (mode === "archive" && day) return `저장된 기록 · ${dayLabel(day)} 목록`;
+    if (!state) return "";
+    return `${statusLabel(state.status)}${state.source ? ` · ${sourceLabel(state.source)}` : ""}`;
   };
 
   return (
@@ -325,58 +420,73 @@ export function Live() {
         <div>
           <h1 className="live__title">오늘의 관찰</h1>
           <p className="live__disclaimer">
-            관찰 목록 — 매수 추천이 아닙니다. 오늘 뉴스·공시·검색 급증이 있어 확인할 가치가 있는 종목입니다.
+            관찰 목록 — 매수 추천이 아닙니다. 그날 뉴스·공시·검색 급증이 있어 확인할 가치가 있던 종목입니다.
           </p>
           <p className="live__status">
-            {state ? (
-              <>
-                <span aria-hidden="true">{statusMark(state.status)}</span> {statusLabel(state.status)}
-                {state.source ? ` · ${sourceLabel(state.source)}` : ""}
-              </>
-            ) : (
-              "불러오는 중…"
-            )}
+            {mode === "live" && state && <span aria-hidden="true">{statusMark(state.status)} </span>}
+            {statusLine()}
             {error ? ` · ${error}` : ""}
           </p>
         </div>
-        <div className="live__intervals" role="group" aria-label="봉 간격" hidden={empty}>
-          {(["1m", "1s"] as Interval[]).map((i) => (
-            <button
-              key={i}
-              className={interval === i ? "live__interval live__interval--on" : "live__interval"}
-              aria-pressed={interval === i}
-              onClick={() => setInterval_(i)}
+        <div className="live__controls">
+          {dayOptions.length > 0 && (
+            <select
+              className="live__day"
+              aria-label="목록 날짜"
+              value={day ?? ""}
+              onChange={(e) => {
+                setDay(e.target.value);
+                setSelected(null);
+              }}
             >
-              {i === "1m" ? "1분봉" : "1초봉"}
-            </button>
-          ))}
+              {dayOptions.map((d) => (
+                <option key={d} value={d}>
+                  {dayLabel(d)}
+                  {days && !days.includes(d) ? " (목록 없음·추적 종목 참고)" : ""}
+                  {d === state?.day && liveHasList ? " · 실시간" : ""}
+                </option>
+              ))}
+            </select>
+          )}
+          <div className="live__intervals" role="group" aria-label="봉 간격" hidden={empty || loading}>
+            {(["1m", "1s"] as Interval[]).map((i) => (
+              <button
+                key={i}
+                className={interval === i ? "live__interval live__interval--on" : "live__interval"}
+                aria-pressed={interval === i}
+                onClick={() => setInterval_(i)}
+              >
+                {i === "1m" ? "1분봉" : "1초봉"}
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
-      {stale && state?.day && today && preopen && (
+      {nextPending && preopen && latestListDay !== null && (
         <div className="live__stale">
-          <p>
-            {dayLabel(state.day)} 목록입니다. 다음 목록: {dayLabel(today)} 08:50 (08:55부터 이 화면에 표시)
-          </p>
+          <p>{morningTitle()}</p>
           <button className="live__link" aria-expanded={stepsOpen} onClick={() => setStepsOpen(!stepsOpen)}>
             {stepsOpen ? "아침 단계 접기" : "아침 단계 보기"}
           </button>
-          {stepsOpen && <MorningStatus data={preopen} title="다음 아침 단계" />}
+          {stepsOpen && <MorningStatus data={preopen} title="아침 단계" />}
         </div>
       )}
 
-      <ThemeNews listIds={listIds} listDay={state?.day ?? null} />
+      <ThemeNews listIds={listIds} listDay={day} onlyDay={day} />
 
       <div className="live__body">
         <div className="live__side">
           <p className="live__listhead">
-            {empty
-              ? "목록 없음"
-              : `${stale && state?.day ? `${dayLabel(state.day)} 목록` : "오늘 목록"} ${members.length}종목 · 등락은 전일 대비`}
+            {loading
+              ? "불러오는 중…"
+              : empty
+                ? "목록 없음"
+                : `${day ? dayLabel(day) : ""} 목록 ${shown.length}종목${mode === "live" ? " · 등락은 전일 대비" : ""}`}
           </p>
           <ol className="live__list">
-            {members.map((m) => {
-              const reasons = m.reasons.map((r) => REASONS[r] ?? r);
+            {shown.map((m) => {
+              const reasons = m.reasons.map((r) => LIST_REASON_LABEL[r] ?? r);
               return (
                 <li key={m.code}>
                   <button
@@ -387,7 +497,10 @@ export function Live() {
                     <span className="live__row">
                       <span className="live__rank">{m.rank}</span>
                       <span className="live__name">{m.name}</span>
-                      <Sparkline values={sparks[m.code]} change={m.last?.change_pct} />
+                      <Sparkline
+                        values={mode === "live" ? sparks[m.code] : undefined}
+                        change={m.last?.change_pct}
+                      />
                       <span className={changeClass(m.last?.change_pct)}>
                         {signed(m.last?.change_pct, 2, "%")}
                       </span>
@@ -409,20 +522,29 @@ export function Live() {
 
         <div className="live__main">
           {empty &&
-            (preopen ? (
-              <MorningStatus data={preopen} title={cardTitle()} />
+            (!noLists && mode === "archive" && latestListDay !== null ? (
+              <p className="live__empty">
+                {day ? dayLabel(day) : "그날"}은 조건에 맞는 종목이 없었습니다.
+              </p>
+            ) : preopen ? (
+              <MorningStatus data={preopen} title={morningTitle()} />
             ) : (
-              <p className="live__empty">{cardTitle()}</p>
+              <p className="live__empty">{morningTitle()}</p>
             ))}
           {member && (
             <div className="live__why">
               <div className="live__price">
-                <span className="live__big">
-                  {member.last ? member.last.price.toLocaleString("ko-KR") : "–"}
-                </span>
-                <span className={changeClass(member.last?.change_pct)}>
-                  {signed(member.last?.change_pct, 2, "%")}
-                </span>
+                {/* 현재가는 실시간일 때만 있다. 기록 모드는 차트가 그날 가격을 보여 준다. */}
+                {mode === "live" && (
+                  <>
+                    <span className="live__big">
+                      {member.last ? member.last.price.toLocaleString("ko-KR") : "–"}
+                    </span>
+                    <span className={changeClass(member.last?.change_pct)}>
+                      {signed(member.last?.change_pct, 2, "%")}
+                    </span>
+                  </>
+                )}
                 <span className="live__code">
                   {member.name} · {member.code}
                 </span>
@@ -430,7 +552,7 @@ export function Live() {
               <div className="live__reasons">
                 {member.reasons.map((r) => (
                   <span key={r} className="live__reason">
-                    {REASONS[r] ?? r}
+                    {LIST_REASON_LABEL[r] ?? r}
                   </span>
                 ))}
               </div>
@@ -443,18 +565,7 @@ export function Live() {
                   <dt>검색량</dt>
                   <dd>{member.attention_surge == null ? "–" : `${member.attention_surge.toFixed(2)}배`}</dd>
                 </div>
-                <div>
-                  <dt>국면</dt>
-                  <dd>{member.regime ? (REGIMES[member.regime] ?? member.regime) : "–"}</dd>
-                </div>
-                <div>
-                  <dt>관찰용 점수</dt>
-                  <dd>{member.total_score == null ? "–" : member.total_score.toFixed(1)}</dd>
-                </div>
               </dl>
-              {member.prefetch_status && PREFETCH[member.prefetch_status] && (
-                <p className="live__warn">{PREFETCH[member.prefetch_status]}</p>
-              )}
               {member.events && member.events.length > 0 && (
                 <section className="live__events" aria-labelledby="live-events-title">
                   <h2 id="live-events-title" className="live__eventsTitle">
@@ -490,10 +601,10 @@ export function Live() {
                   </ul>
                 </section>
               )}
-              {member.abstained_reason && <p className="live__abstain">점수 보류: {member.abstained_reason}</p>}
             </div>
           )}
-          <div ref={container} className="live__chart" hidden={empty} />
+          {chartNote && <p className="live__chartNote">{chartNote}</p>}
+          <div ref={container} className="live__chart" hidden={empty || loading} />
         </div>
       </div>
     </section>

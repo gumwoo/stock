@@ -3,11 +3,11 @@ import type {
   BacktestRunSummary,
   Candle,
   Diagnostics,
-  Instrument,
+  ListMembers,
+  ListSignalRow,
   LiveBar,
   LiveState,
   PreopenToday,
-  Signal,
   ThemeNewsDay,
 } from "./types";
 
@@ -33,17 +33,14 @@ function get<T>(path: string): Promise<T> {
   return request<T>(path, { headers: { Accept: "application/json" } });
 }
 
-function post<T>(path: string): Promise<T> {
-  return request<T>(path, { method: "POST" });
-}
-
 export const api = {
-  instruments: () => get<Instrument[]>("/api/instruments"),
-  signals: () => get<Signal[]>("/api/signals"),
-  signal: (id: number) => get<Signal>(`/api/signals/${id}`),
   candles: (id: number, limit = 250) =>
     get<Candle[]>(`/api/candles/${id}?limit=${limit}`),
-  rescore: () => post<Signal[]>("/api/signals/rescore"),
+  listDays: () => get<string[]>("/api/lists/days"),
+  listSignals: (day: string) => get<ListSignalRow[]>(`/api/lists/${day}/signals`),
+  listMembers: (day: string) => get<ListMembers>(`/api/lists/${day}/members`),
+  listBars: (day: string, instrumentId: number, interval: "1m" | "1s") =>
+    get<LiveBar[]>(`/api/lists/${day}/bars/${instrumentId}?interval=${interval}`),
   config: () => get<Diagnostics>("/health/config"),
   backtests: () => get<BacktestRunSummary[]>("/api/backtests"),
   backtest: (id: number) => get<BacktestRunDetail>(`/api/backtests/${id}`),

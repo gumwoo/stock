@@ -4,7 +4,7 @@ import { InstrumentDetail } from "./pages/InstrumentDetail";
 import { Research } from "./pages/Research";
 import { Live } from "./pages/Live";
 import { api } from "./api/client";
-import type { Diagnostics } from "./api/types";
+import type { Diagnostics, ListSignalRow } from "./api/types";
 import "./App.css";
 
 /** What each switched-off capability would add, in Korean. The API's own text stays English for its logs. */
@@ -31,8 +31,13 @@ const CAPABILITY_EFFECT: Record<string, string> = {
  */
 export function App() {
   const [config, setConfig] = useState<Diagnostics | null>(null);
-  const [detailId, setDetailId] = useState<number | null>(null);
+  // 신호 카드의 "일봉"으로 연 종목(신호 탭 안에서만).
+  const [detailRow, setDetailRow] = useState<ListSignalRow | null>(null);
   const [tab, setTab] = useState<"signals" | "live" | "research">("signals");
+  // 신호 탭에서 고른 목록 날짜. 탭을 오가도 유지한다.
+  const [listDay, setListDay] = useState<string | null>(null);
+  // 신호 카드의 "차트·뉴스"로 오늘의 관찰에 넘기는 종목. 오늘의 관찰이 한 번 쓰고 비운다.
+  const [focus, setFocus] = useState<{ day: string; code: string } | null>(null);
 
   useEffect(() => {
     api.config().then(setConfig).catch(() => setConfig(null));
@@ -47,7 +52,7 @@ export function App() {
             className={tab === "signals" ? "shell__tab shell__tab--on" : "shell__tab"}
             onClick={() => {
               setTab("signals");
-              setDetailId(null);
+              setDetailRow(null);
             }}
           >
             신호
@@ -56,7 +61,7 @@ export function App() {
             className={tab === "live" ? "shell__tab shell__tab--on" : "shell__tab"}
             onClick={() => {
               setTab("live");
-              setDetailId(null);
+              setDetailRow(null);
             }}
           >
             오늘의 관찰
@@ -65,7 +70,7 @@ export function App() {
             className={tab === "research" ? "shell__tab shell__tab--on" : "shell__tab"}
             onClick={() => {
               setTab("research");
-              setDetailId(null);
+              setDetailRow(null);
             }}
           >
             연구
@@ -80,15 +85,23 @@ export function App() {
         {tab === "research" ? (
           <Research />
         ) : tab === "live" ? (
-          <Live />
-        ) : detailId === null ? (
-          <Dashboard onOpenDetail={setDetailId} />
+          <Live focus={focus} onFocusUsed={() => setFocus(null)} />
+        ) : detailRow === null ? (
+          <Dashboard
+            day={listDay}
+            onDay={setListDay}
+            onOpenChart={(day, code) => {
+              setFocus({ day, code });
+              setTab("live");
+            }}
+            onOpenDaily={setDetailRow}
+          />
         ) : (
-          <InstrumentDetail instrumentId={detailId} onBack={() => setDetailId(null)} />
+          <InstrumentDetail row={detailRow} onBack={() => setDetailRow(null)} />
         )}
       </main>
 
-      {tab === "signals" && detailId === null && config && config.disabled.length > 0 && (
+      {tab === "signals" && detailRow === null && config && config.disabled.length > 0 && (
         <footer className="setup">
           <p className="setup__summary">
             선택 기능 {config.enabled.length}/{config.enabled.length + config.disabled.length}개가

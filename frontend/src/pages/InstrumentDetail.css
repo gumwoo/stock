@@ -58,6 +58,13 @@
   font-weight: var(--w-medium);
 }
 
+.detail__asof {
+  font-size: var(--t-micro);
+  font-weight: var(--w-regular, 400);
+  color: var(--c-text-tertiary);
+  letter-spacing: 0;
+}
+
 .detail__delta--up {
   color: var(--c-up);
 }
@@ -91,6 +98,11 @@
 
 .ranges__btn:hover {
   color: var(--c-text-secondary);
+}
+
+.ranges__btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .ranges__btn--on {

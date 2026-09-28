@@ -16,6 +16,22 @@
   color: var(--c-text-tertiary);
 }
 
+.live__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.live__day {
+  font: inherit;
+  font-size: var(--t-small);
+  color: var(--c-text);
+  background: none;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  padding: var(--s-1) var(--s-2);
+}
+
 .live__intervals {
   display: flex;
   gap: var(--s-1);
@@ -355,4 +371,10 @@ a.live__eventTitle:hover {
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+.live__chartNote {
+  margin: var(--s-3) 0 0;
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
 }

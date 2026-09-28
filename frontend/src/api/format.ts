@@ -245,3 +245,30 @@ export function shortSeoulTime(iso: string): string {
   const get = (t: string) => parts.find((x) => x.type === t)?.value ?? "";
   return `${get("month")}/${get("day")} ${get("hour")}:${get("minute")}`;
 }
+
+// --- 아침 목록 표기(오늘의 관찰과 신호 탭이 같이 쓴다) ---
+
+// 좋은·나쁜 뉴스는 색이 아니라 기호로 구분한다(한국식 상승 빨강과 부딪히지 않게).
+export const LIST_REASON_LABEL: Record<string, string> = {
+  DISCOVERY_SURGE: "뉴스 급증",
+  POSITIVE_NEWS_OVERLAY: "＋좋은 뉴스",
+  NEGATIVE_NEWS_OVERLAY: "－나쁜 뉴스",
+  DISCLOSURE_EVENT: "공시",
+  SEARCH_SURGE: "검색 급증",
+  TRACKED_HIGH_SCORE: "점수 상위",
+  TRACKED: "추적 종목",
+};
+
+export const REGIME_LABEL: Record<string, string> = {
+  RISK_ON: "상승장",
+  NEUTRAL: "중립",
+  RISK_OFF: "하락장",
+  UNKNOWN: "국면 모름",
+};
+
+/** 사전 수집 상태 중 화면에 알릴 것만. 받았거나 이미 최신이면 표시하지 않는다. */
+export const PREFETCH_WARNING: Record<string, string> = {
+  SKIPPED_CAP: "데이터 미수집 (하루 상한 초과)",
+  FAILED: "데이터 수집 실패",
+  NO_DATA: "가격 데이터 없음",
+};

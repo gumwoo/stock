@@ -252,3 +252,49 @@ export interface PreopenToday {
   pool: { status: string; pool_count: number; asof: string | null } | null;
   stages: PreopenStage[];
 }
+
+/** 08:40 채점의 상세(`score_detail`). `/api/signals`의 Signal에서 종목 정보와 id를 뺀 모양. */
+export interface ScoreDetail {
+  data_asof: string;
+  decision_at: string;
+  earliest_execution_at: string;
+  total_score: number;
+  action: Signal["action"];
+  strategy_version: string;
+  policy: string;
+  abstained_reason: string | null;
+  factors: Factor[];
+  reasons: Reason[];
+  /** 나중에 같은 입력으로 다시 계산해 채운 시각(2026-09-28 목록). */
+  backfilled_at?: string;
+}
+
+/** 그날 아침 목록 한 종목의 신호(`/api/lists/{day}/signals`). */
+export interface ListSignalRow {
+  member_id: number;
+  instrument_id: number;
+  code: string | null;
+  name: string;
+  rank: number;
+  /** 목록에 오른 이유 코드(뉴스·공시·검색 급증 등). */
+  list_reasons: string[];
+  total_score: number | null;
+  action: Signal["action"] | null;
+  technical_score: number | null;
+  fundamental_score: number | null;
+  prefetch_status: string | null;
+  abstained_reason: string | null;
+  regime: string | null;
+  overlay_points: number | null;
+  attention_surge: number | null;
+  /** 실제 채점 시각(08:40). */
+  evaluated_at: string | null;
+  detail: ScoreDetail | null;
+}
+
+/** 그날 관찰 목록(`/api/lists/{day}/members`). 시세(`last`)는 없다. */
+export interface ListMembers {
+  day: string;
+  source: string;
+  members: LiveMember[];
+}

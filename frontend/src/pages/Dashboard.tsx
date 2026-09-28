@@ -1,27 +1,26 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import { datetime, direction, marketLabel, money, percent } from "../api/format";
-import type { Instrument, Signal } from "../api/types";
+import {
+  ACTION_LABEL,
+  LIST_REASON_LABEL,
+  PREFETCH_WARNING,
+  REGIME_LABEL,
+  datetime,
+} from "../api/format";
+import { fundamentalMissing, listRowToSignal, maxScore } from "../api/listSignal";
+import type { ListSignalRow, Signal } from "../api/types";
+import { dayLabel } from "../components/MorningStatus";
 import { SignalFactorDrawer } from "../components/SignalFactorDrawer";
 import "./Dashboard.css";
 
 /**
- * Toss-flavoured information order: one large number, then a compact summary,
- * then today's signals, then a way into detail. Nothing competes with the
- * headline figure for attention.
+ * 신호: 그날 아침 목록 종목을 08:40에 전 거래일 종가·재무로 채점한 것.
  *
- * Until broker credentials exist there is no real account to value, so the
- * page says so plainly rather than inventing a portfolio. Showing a fabricated
- * balance would undermine the one thing this project is trying to be — honest
- * about what it knows.
+ * 추적 종목 매일 채점은 2026-09-28에 멈췄다. 이 화면은 날짜를 골라 그날 목록의 점수와 근거를 본다. 점수 상세는
+ * 저장된 것을 그대로 보여 주고 화면에서 다시 계산하지 않는다.
+ *
+ * 증권사 연동 전에는 실계좌가 없으므로 포트폴리오 숫자를 지어내지 않고 그렇다고 말한다.
  */
-
-const ACTION_LABEL: Record<string, string> = {
-  BUY_INTEREST: "매수 관심",
-  WATCH: "관망",
-  CAUTION: "주의",
-  ABSTAINED: "판단 보류",
-};
 
 function ScoreBar({ score }: { score: number }) {
   return (
@@ -32,67 +31,98 @@ function ScoreBar({ score }: { score: number }) {
 }
 
 function SignalCard({
-  signal,
-  instrument,
+  row,
   onOpen,
-  onOpenDetail,
+  onChart,
+  onDaily,
 }: {
-  signal: Signal;
-  instrument: Instrument | undefined;
-  onOpen: () => void;
-  onOpenDetail: () => void;
+  row: ListSignalRow;
+  onOpen: (signal: Signal) => void;
+  onChart: () => void;
+  onDaily: () => void;
 }) {
-  const change = instrument?.change_pct ?? null;
-  const dir = change === null ? "flat" : direction(change);
+  const signal = listRowToSignal(row);
+  const noFundamental = row.detail !== null && fundamentalMissing(row);
+  const warning = row.prefetch_status ? PREFETCH_WARNING[row.prefetch_status] : undefined;
 
   return (
     <article className="card">
       <header className="card__head">
         <div>
-          <h3 className="card__name">{signal.name}</h3>
+          <h3 className="card__name">{row.name}</h3>
           <p className="card__symbol">
-            {signal.symbol} · {marketLabel(signal.market)}
+            {row.code ?? "코드 없음"} · 목록 {row.rank}위
+            {row.regime ? ` · ${REGIME_LABEL[row.regime] ?? row.regime}` : ""}
           </p>
         </div>
-        <span className={`tag tag--${signal.action.toLowerCase()}`}>
-          {ACTION_LABEL[signal.action] ?? signal.action}
-        </span>
+        {row.action ? (
+          <span className={`tag tag--${row.action.toLowerCase()}`}>{ACTION_LABEL[row.action] ?? row.action}</span>
+        ) : (
+          <span className="tag tag--abstained">점수 없음</span>
+        )}
       </header>
 
-      {instrument?.last_close != null && (
-        <div className="card__price">
-          <span className="num">{money(instrument.last_close, instrument.currency)}</span>
-          {change !== null && (
-            <span className={`num delta delta--${dir}`}>{percent(change)}</span>
-          )}
+      {row.total_score !== null && (
+        <div className="card__score">
+          <div className="card__score-row">
+            <span className="card__score-label">종합점수</span>
+            <span className="card__score-num num">{row.total_score.toFixed(1)}</span>
+          </div>
+          <ScoreBar score={row.total_score} />
+          <p className="card__parts">
+            기술 {row.technical_score === null ? "–" : row.technical_score.toFixed(1)} ·{" "}
+            {noFundamental
+              ? `재무 없음 · 기술 점수만(최대 ${maxScore(row)})`
+              : `재무 ${row.fundamental_score === null ? "–" : row.fundamental_score.toFixed(1)}`}
+          </p>
         </div>
       )}
 
-      <div className="card__score">
-        <div className="card__score-row">
-          <span className="card__score-label">종합점수</span>
-          <span className="card__score-num num">{signal.total_score.toFixed(1)}</span>
-        </div>
-        <ScoreBar score={signal.total_score} />
-      </div>
+      {row.detail && row.detail.reasons.length > 0 && (
+        <ul className="card__reasons">
+          {row.detail.reasons.slice(0, 3).map((r, i) => (
+            <li key={i} className={`r--${r.status.toLowerCase()}`}>
+              {r.text}
+            </li>
+          ))}
+        </ul>
+      )}
 
-      <ul className="card__reasons">
-        {signal.reasons.slice(0, 3).map((r, i) => (
-          <li key={i} className={`r--${r.status.toLowerCase()}`}>
-            {r.text}
-          </li>
+      <p className="card__listReasons">
+        {row.list_reasons.map((r) => (
+          <span key={r} className="card__listReason">
+            {LIST_REASON_LABEL[r] ?? r}
+          </span>
         ))}
-      </ul>
+      </p>
+
+      {warning && <p className="card__warn">{warning}</p>}
+      {row.total_score === null && row.abstained_reason && (
+        <p className="card__note">{row.abstained_reason}</p>
+      )}
 
       <footer className="card__foot">
         <span className="card__timing">
-          체결 가능 {datetime(signal.earliest_execution_at)}부터
+          {row.evaluated_at ? `채점 ${datetime(row.evaluated_at)}` : "채점 기록 없음"}
         </span>
         <div className="card__actions">
-          <button className="card__more" onClick={onOpenDetail}>
-            차트
+          <button className="card__more" onClick={onDaily} aria-label={`${row.name} 일봉`}>
+            일봉
           </button>
-          <button className="card__more" onClick={onOpen}>
+          <button
+            className="card__more"
+            onClick={onChart}
+            disabled={!row.code}
+            aria-label={`${row.name} 차트·뉴스`}
+          >
+            차트·뉴스
+          </button>
+          <button
+            className="card__more"
+            onClick={() => signal && onOpen(signal)}
+            disabled={!signal}
+            aria-label={`${row.name} 분석 보기`}
+          >
             분석 보기
           </button>
         </div>
@@ -101,39 +131,60 @@ function SignalCard({
   );
 }
 
-export function Dashboard({ onOpenDetail }: { onOpenDetail: (id: number) => void }) {
-  const [signals, setSignals] = useState<Signal[]>([]);
-  const [instruments, setInstruments] = useState<Instrument[]>([]);
+export function Dashboard({
+  day,
+  onDay,
+  onOpenChart,
+  onOpenDaily,
+}: {
+  day: string | null;
+  onDay: (day: string) => void;
+  onOpenChart: (day: string, code: string) => void;
+  onOpenDaily: (row: ListSignalRow) => void;
+}) {
+  const [days, setDays] = useState<string[] | null>(null);
+  const [rows, setRows] = useState<ListSignalRow[] | null>(null);
   const [open, setOpen] = useState<Signal | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const load = () =>
-    Promise.all([api.signals(), api.instruments()])
-      .then(([s, i]) => {
-        setSignals(s);
-        setInstruments(i);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message));
 
   useEffect(() => {
-    void load();
+    api
+      .listDays()
+      .then((d) => {
+        setDays(d);
+        if (day === null && d.length > 0) onDay(d[0]);
+      })
+      .catch((e: Error) => setError(e.message));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const rescore = async () => {
-    setBusy(true);
-    try {
-      await api.rescore();
-      await load();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  useEffect(() => {
+    if (day === null) return;
+    let alive = true;
+    setRows(null);
+    api
+      .listSignals(day)
+      .then((r) => {
+        if (!alive) return;
+        setRows(r);
+        setError(null);
+      })
+      .catch((e: Error) => alive && setError(e.message));
+    return () => {
+      alive = false;
+    };
+  }, [day]);
 
-  const byId = new Map(instruments.map((i) => [i.instrument_id, i]));
+  // 점수 높은 순. 점수가 없는 종목은 뒤로(목록 순위 순).
+  const sorted = rows
+    ? [...rows].sort((a, b) => {
+        if (a.total_score === null && b.total_score === null) return a.rank - b.rank;
+        if (a.total_score === null) return 1;
+        if (b.total_score === null) return -1;
+        return b.total_score - a.total_score;
+      })
+    : [];
+  const backfilled = rows?.find((r) => r.detail?.backfilled_at)?.detail?.backfilled_at;
 
   return (
     <>
@@ -147,30 +198,45 @@ export function Dashboard({ onOpenDetail }: { onOpenDetail: (id: number) => void
 
       <section className="signals">
         <header className="signals__head">
-          <h2 className="signals__title">오늘의 신호</h2>
-          <button className="signals__action" onClick={rescore} disabled={busy}>
-            {busy ? "계산 중…" : "다시 계산"}
-          </button>
+          <h2 className="signals__title">신호</h2>
+          {days && days.length > 0 && (
+            <select
+              className="signals__day"
+              aria-label="목록 날짜"
+              value={day ?? ""}
+              onChange={(e) => onDay(e.target.value)}
+            >
+              {days.map((d) => (
+                <option key={d} value={d}>
+                  {dayLabel(d)} 목록
+                </option>
+              ))}
+            </select>
+          )}
         </header>
+        <p className="signals__lead">
+          그날 아침 목록 종목을 08:40에 전 거래일 종가·재무로 채점한 것입니다. 매매 권유가 아닙니다.
+          {backfilled ? ` 이 날의 점수 상세는 ${datetime(backfilled)}에 같은 입력으로 다시 계산해 채웠습니다.` : ""}
+        </p>
 
         {error && <p className="signals__error">{error}</p>}
 
-        {!error && signals.length === 0 && (
-          <p className="signals__empty">
-            아직 신호가 없습니다. 시세를 수집한 뒤 다시 계산해 주세요.
-          </p>
+        {!error && days !== null && days.length === 0 && (
+          <p className="signals__empty">아직 아침 목록이 없습니다. 평일 08:50에 만들어집니다.</p>
         )}
+        {!error && day !== null && rows === null && <p className="signals__empty">불러오는 중…</p>}
 
         <div className="signals__grid">
-          {signals.map((s) => (
-            <SignalCard
-              key={s.id}
-              signal={s}
-              instrument={byId.get(s.instrument_id)}
-              onOpen={() => setOpen(s)}
-              onOpenDetail={() => onOpenDetail(s.instrument_id)}
-            />
-          ))}
+          {day !== null &&
+            sorted.map((r) => (
+              <SignalCard
+                key={r.member_id}
+                row={r}
+                onOpen={setOpen}
+                onChart={() => r.code && onOpenChart(day, r.code)}
+                onDaily={() => onOpenDaily(r)}
+              />
+            ))}
         </div>
       </section>
 

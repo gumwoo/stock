@@ -36,9 +36,12 @@ function writeExpanded(value: boolean): void {
 export function ThemeNews({
   listIds,
   listDay,
+  onlyDay,
 }: {
   listIds: ReadonlySet<number> | null;
   listDay: string | null;
+  /** 이 날짜의 테마만 보인다(지난 목록을 볼 때 다른 날 테마가 붙지 않게). 없으면 늘 보인다. */
+  onlyDay?: string | null;
 }) {
   const [data, setData] = useState<ThemeNewsDay | null>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -66,6 +69,7 @@ export function ThemeNews({
 
   if (error) return <p className="themes__note">테마 뉴스를 불러오지 못했습니다 · {error}</p>;
   if (!data || data.themes.length === 0) return null;
+  if (onlyDay !== undefined && data.day !== onlyDay) return null;
 
   const first = data.themes[0];
   const selected = data.themes.find((t) => t.theme === open) ?? null;
