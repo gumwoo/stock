@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -335,9 +336,10 @@ def seconds_to_save(
 ) -> tuple[list[SecondBarRow], dict[str, int]]:
     """아직 저장하지 않은 1초봉과, 저장에 성공하면 옮길 종목별 워터마크. 순수하다(`saved`를 바꾸지 않는다).
 
-    이벤트 루프에서 부른다(체결이 dict를 바꾸는 곳과 같은 스레드라 도는 중에 바뀌지 않는다). 종목마다 뒤에서부터
-    돌다가 워터마크보다 이른 초에서 멈춘다: dict는 넣은 순서이고 KIS 체결은 종목마다 시간순으로 온다는 가정이다.
-    워터마크의 초 자체는 다시 보낸다(그 초에 늦게 온 체결을 반영하려고, 저장은 upsert).
+    워터마크는 시각이 아니라 "지난번까지 저장한 초의 개수"(dict에 들어온 순서의 위치)다. 초는 dict에서 지워지지
+    않으므로 위치가 변하지 않고, 이미 지난 초가 늦게 새로 들어와도(체결이 시간순으로 오지 않아도) 뒤에 붙으니
+    빠지지 않는다. 마지막으로 저장한 초 하나는 다시 보낸다(그 초에 늦게 온 체결을 반영하려고, 저장은 upsert).
+    이벤트 루프에서 부른다(체결이 dict를 바꾸는 곳과 같은 스레드라 도는 중에 바뀌지 않는다).
     """
     rows: list[SecondBarRow] = []
     marks: dict[str, int] = {}
@@ -345,11 +347,9 @@ def seconds_to_save(
         iid = ids.get(code)
         if iid is None:
             continue
-        since = saved.get(code, 0)
+        done = saved.get(code, 0)
         mine: list[SecondBarRow] = []
-        for t in reversed(sec):
-            if t < since:
-                break
+        for t in itertools.islice(sec, max(done - 1, 0), None):
             o, h, lo, c, v = sec[t]
             mine.append(
                 SecondBarRow(
@@ -365,7 +365,7 @@ def seconds_to_save(
             )
         if mine:
             rows.extend(mine)
-            marks[code] = int(max(r.ts for r in mine).timestamp())
+            marks[code] = len(sec)
     return rows, marks
 
 
@@ -598,10 +598,17 @@ class Gateway:
                     if seeding is not None:
                         seeding.cancel()
                     saver.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
+                    # 저장 태스크의 취소만 삼킨다. 이 태스크 자체가 취소되는 중(서버 종료)이면 마지막 저장 뒤 다시 올린다.
+                    stopping = False
+                    try:
                         await saver
+                    except asyncio.CancelledError:
+                        me = asyncio.current_task()
+                        stopping = me is not None and me.cancelling() > 0
                     # 끝나는 이유가 무엇이든(마감, 끊김, 종료) 남은 초봉을 한 번 더 저장한다.
                     await self.save_now()
+                    if stopping:
+                        raise asyncio.CancelledError
             self.status = "closed for the day"
             return True
         finally:
@@ -622,7 +629,8 @@ class Gateway:
         try:
             written = await asyncio.to_thread(self._save_seconds, rows)
         except Exception:  # 저장은 보조 기록이다. 시세 중계를 멈추지 않는다
-            logger.exception("live feed: saving %d one-second bars failed; will retry", len(rows))
+            # 장중이면 다음 주기에 같은 구간을 다시 보낸다. 세션을 끝내는 마지막 저장이면 다시 시도하지 않는다.
+            logger.exception("live feed: saving %d one-second bars failed", len(rows))
             return 0
         self._saved.update(marks)
         return written

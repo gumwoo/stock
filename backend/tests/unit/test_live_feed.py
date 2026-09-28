@@ -237,9 +237,6 @@ class Lock:
 MEMBERS = [LiveMember(1, "005930", "삼성전자", 1, ("TRACKED",), None, None, None)]
 
 
-SAVED: list[list[Any]] = []
-
-
 def gateway(
     socket: Socket,
     lock: Lock,
@@ -252,7 +249,7 @@ def gateway(
         return {"005930": [(minute_epoch(day, time(9, 0)), 1.0, 2.0, 0.5, 1.5, 10.0)]}
 
     # 1초봉 저장은 가짜로 받는다. 단위 테스트가 실제 DB에 쓰지 않게.
-    sink = saved if saved is not None else SAVED
+    sink: list[Any] = saved if saved is not None else []
 
     def save(rows: list[Any]) -> int:
         sink.append(list(rows))
@@ -390,7 +387,7 @@ class TestSavingSeconds:
         rows, marks = seconds_to_save(book, {"005930": 7}, {})
         base = minute_epoch(DAY, time(9, 35))
         assert sorted(int(r.ts.timestamp()) for r in rows) == [base + 1, base + 3]
-        assert {r.instrument_id for r in rows} == {7} and marks == {"005930": base + 3}
+        assert {r.instrument_id for r in rows} == {7} and marks == {"005930": 2}
         assert rows[0].session_date == DAY
 
     def test_the_marked_second_is_sent_again_for_late_trades(self) -> None:
@@ -398,15 +395,27 @@ class TestSavingSeconds:
         book.add(trade("093501", 100, 5))
         book.add(trade("093503", 101, 1))
         base = minute_epoch(DAY, time(9, 35))
-        saved = {"005930": base + 3}
+        saved = {"005930": 2}  # 두 초를 저장했다
         book.add(trade("093503", 99, 2))  # 저장한 뒤 같은 초에 온 체결
         book.add(trade("093504", 98, 1))
         rows, marks = seconds_to_save(book, {"005930": 7}, saved)
         assert sorted(int(r.ts.timestamp()) for r in rows) == [base + 3, base + 4]
         third = next(r for r in rows if int(r.ts.timestamp()) == base + 3)
         assert (third.low, third.close, third.volume) == (99, 99, 3)
-        assert saved == {"005930": base + 3}  # 순수: 넘긴 워터마크를 바꾸지 않는다
-        assert marks == {"005930": base + 4}
+        assert saved == {"005930": 2}  # 순수: 넘긴 워터마크를 바꾸지 않는다
+        assert marks == {"005930": 3}
+
+    def test_a_late_new_second_out_of_order_is_not_lost(self) -> None:
+        # 체결이 시간순으로 오지 않아 이미 지난 초가 새로 생겨도(dict 뒤에 붙는다) 빠지지 않는다.
+        book = LiveBook(DAY)
+        book.add(trade("093510", 100, 1))
+        base = minute_epoch(DAY, time(9, 35))
+        saved = {"005930": 1}
+        for hhmmss in ("093511", "093512", "093505"):
+            book.add(trade(hhmmss, 100, 1))
+        rows, marks = seconds_to_save(book, {"005930": 7}, saved)
+        got = sorted(int(r.ts.timestamp()) - base for r in rows)
+        assert got == [5, 10, 11, 12] and marks == {"005930": 4}
 
     def test_names_without_an_id_are_skipped(self) -> None:
         book = LiveBook(DAY)
@@ -436,7 +445,7 @@ class TestSavingSeconds:
         g._ids = {"005930": 7}
         g.book.add(trade("093501", 100, 5))
         assert asyncio.run(g.save_now()) == 1
-        assert g._saved == {"005930": minute_epoch(DAY, time(9, 35)) + 1}
+        assert g._saved == {"005930": 1}
 
 
 def test_the_session_saves_what_is_left_when_it_ends() -> None:
