@@ -45,7 +45,6 @@ from app.services import (
     intraday_service,
     preopen_service,
     regime_service,
-    scoring_service,
 )
 
 # Today's names at about four calls each, and the rest as backfill: a tenth of
@@ -89,10 +88,11 @@ def guarded(job_name: str, fn: Callable[[], None]) -> Callable[[], None]:
 # UTC in winter and 20:00 in summer. The time is margin, not precision;
 # `has_closed` does the deciding. 아침 스윕은 07:00 장전 체인 안으로 옮겼다.
 _KR_AFTER_CLOSE = CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone="Asia/Seoul")
-# The daily loop the forward test lives on (Phase 4-8). Prices for the Korean
-# session once it has closed and the 16:00 news sweep has had its ten
-# minutes; then filings, scoring with its overlay, and the record of what
-# earlier judgements turned into. One job, so the steps cannot run out of order.
+# The daily loop (Phase 4-8). Prices for the Korean session once it has closed
+# and the 16:00 news sweep has had its ten minutes; then filings and the record
+# of what earlier judgements turned into. One job, so the steps cannot run out of
+# order. 추적 종목 채점은 2026-09-28 소유자 결정으로 멈췄다. 매일 아침 목록 종목만 08:40에 채점한다.
+# 가격·재무 수집은 그대로다: 한국 추적 종목은 목록 종목 재무 순위의 비교군이다.
 _KR_DAILY_LOOP = CronTrigger(day_of_week="mon-fri", hour=16, minute=40, timezone="Asia/Seoul")
 # US prices after the NYSE close, which is early morning in Seoul the next day.
 _US_PRICES = CronTrigger(day_of_week="tue-sat", hour=7, minute=0, timezone="Asia/Seoul")
@@ -153,7 +153,7 @@ def _collect_korean_news() -> None:
 
 
 def _daily_loop() -> None:
-    """Prices, filings, scores and the forward record, after a Korean session.
+    """Prices, filings and the forward record, after a Korean session. 채점은 하지 않는다(2026-09-28부터).
 
     Holidays skip the whole loop: no session, no new bars, and a signal made
     anyway would restate yesterday's under a new row the forward test would
@@ -177,8 +177,7 @@ def _daily_loop() -> None:
         # — which is what the fundamental freshness check reads.
         run_collector(DartFundamentalCollector(years_back=2), session)
         run_collector(DartDisclosureCollector(), session)
-        scored = scoring_service.score_all(session)
-        logger.info("daily loop: scored %d", len(scored))
+        # 추적 종목 채점(`scoring_service.score_all`)은 2026-09-28에 멈췄다. 이미 있는 신호의 성과는 아래에서 계속 채운다.
         # A regime held back because the day's index bar was late is filed
         # once the bar is in, rather than waiting for a hand-run backfill.
         logger.info("daily loop: regimes filed late %d", regime_service.backfill(session))

@@ -126,6 +126,17 @@ def latest_status(
     return {(i, d): s for i, d, s in session.execute(stmt).all()}
 
 
+def second_bars_for(session: Session, instrument_id: int, day: date) -> list[LiveSecondBar]:
+    """그날 저장된 실시간 1초봉, 시간순."""
+    return list(
+        session.execute(
+            select(LiveSecondBar)
+            .where(LiveSecondBar.instrument_id == instrument_id, LiveSecondBar.session_date == day)
+            .order_by(LiveSecondBar.ts)
+        ).scalars()
+    )
+
+
 def bars_for(session: Session, instrument_id: int, day: date) -> list[MinuteBar]:
     b = MinuteBar
     stmt = select(b).where(b.instrument_id == instrument_id, b.session_date == day).order_by(b.ts)

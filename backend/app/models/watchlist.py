@@ -15,6 +15,7 @@ light of what the choice was made without.
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -137,6 +138,8 @@ class WatchlistMember(Base):
     peer_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prefetch_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     abstained_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 08:40 채점의 상세(요인 분해·근거 문장). `/api/signals`의 신호와 같은 모양. 채점하지 못했으면 None.
+    score_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("snapshot_id", "instrument_id", name="uq_watchlist_member_name"),

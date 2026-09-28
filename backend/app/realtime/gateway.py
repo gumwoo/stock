@@ -328,6 +328,36 @@ def _legacy_link(
     return news_link(naver_url, url)
 
 
+def member_dict(m: LiveMember, last: dict[str, Any] | None = None) -> dict[str, Any]:
+    """화면에 보내는 목록 종목 하나. 실시간 상태(`Gateway.state`)와 지난날 목록 API가 같은 모양을 쓴다."""
+    return {
+        "instrument_id": m.instrument_id,
+        "code": m.code,
+        "name": m.name,
+        "rank": m.rank,
+        "reasons": list(m.reasons),
+        "overlay_points": m.overlay_points,
+        "attention_surge": m.attention_surge,
+        "regime": m.regime,
+        "total_score": m.total_score,
+        "prefetch_status": m.prefetch_status,
+        "abstained_reason": m.abstained_reason,
+        "events": [
+            {
+                "event_type": e.event_type,
+                "first_at": e.first_at,
+                "title": e.title,
+                "sentiment": e.sentiment,
+                "articles": e.articles,
+                "disclosures": e.disclosures,
+                "url": e.url,
+            }
+            for e in m.events
+        ],
+        "last": last,
+    }
+
+
 SAVE_EVERY = 60  # 초. 1초봉을 DB에 옮기는 주기
 
 
@@ -700,31 +730,9 @@ class Gateway:
             "source": self.source,
             "day": self.book.day.isoformat() if self.book else None,
             "members": [
-                {
-                    "instrument_id": m.instrument_id,
-                    "code": m.code,
-                    "name": m.name,
-                    "rank": m.rank,
-                    "reasons": list(m.reasons),
-                    "overlay_points": m.overlay_points,
-                    "attention_surge": m.attention_surge,
-                    "regime": m.regime,
-                    "total_score": m.total_score,
-                    "prefetch_status": m.prefetch_status,
-                    "abstained_reason": m.abstained_reason,
-                    "events": [
-                        {
-                            "event_type": e.event_type,
-                            "first_at": e.first_at,
-                            "title": e.title,
-                            "sentiment": e.sentiment,
-                            "articles": e.articles,
-                            "disclosures": e.disclosures,
-                            "url": e.url,
-                        }
-                        for e in m.events
-                    ],
-                    "last": (
+                member_dict(
+                    m,
+                    (
                         {
                             "price": t.price,
                             "change_pct": t.change_pct,
@@ -733,7 +741,7 @@ class Gateway:
                         if self.book and (t := self.book.last.get(m.code))
                         else None
                     ),
-                }
+                )
                 for m in self.members
             ],
         }

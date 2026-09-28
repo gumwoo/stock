@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -127,6 +128,8 @@ class PreopenPoolMember(Base):
     fundamental_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     action: Mapped[str | None] = mapped_column(String(20), nullable=True)
     abstained_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 08:40 채점의 상세(요인 분해·근거 문장). `/api/signals`의 신호와 같은 모양. 채점하지 못했으면 None.
+    score_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("pool_id", "instrument_id", name="uq_preopen_pool_member_name"),

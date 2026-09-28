@@ -98,7 +98,10 @@ def _loop(monkeypatch: pytest.MonkeyPatch, *, session: bool) -> list[str]:
     monkeypatch.setattr(worker, "MarketCalendar", _Calendar(session=session))
     monkeypatch.setattr(worker, "session_scope", fake_scope)
     monkeypatch.setattr(worker, "run_collector", fake_run)
-    monkeypatch.setattr(worker.scoring_service, "score_all", lambda s: steps.append("score") or [])
+    # 추적 종목 채점은 멈췄다. 누가 다시 부르면 순서 목록에 "score"가 나타나 테스트가 잡는다.
+    from app.services import scoring_service
+
+    monkeypatch.setattr(scoring_service, "score_all", lambda s: steps.append("score") or [])
     monkeypatch.setattr(
         worker.regime_service, "backfill", lambda s: steps.append("regime_backfill") or 0
     )
@@ -116,7 +119,7 @@ def test_the_daily_loop_runs_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
         # year, and this year's annual report is not filed until next March.
         "dart:2",
         "DartDisclosureCollector",
-        "score",
+        # 추적 종목 채점은 2026-09-28에 멈췄다(아침 목록 종목만 08:40에 채점).
         "regime_backfill",
         "evaluate_signals",
         "snapshot_candidates",

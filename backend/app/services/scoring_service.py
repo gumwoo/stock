@@ -326,6 +326,63 @@ def _score_fundamental(
     )
 
 
+def _reason_dicts(signal: ScoredSignal) -> list[dict[str, str]]:
+    return [
+        {
+            "status": r.status.value,
+            "text": r.text,
+            "engine": r.engine.value,
+            "metric_name": r.metric_name or "",
+        }
+        for r in signal.reasons
+    ]
+
+
+def _metric_dicts(factor: Factor) -> list[dict[str, Any]]:
+    return [
+        {"name": m.name, "raw": m.raw, "normalized": m.normalized, "detail": m.detail}
+        for m in factor.metrics
+    ]
+
+
+def _iso(t: datetime | None) -> str | None:
+    return t.isoformat() if t is not None else None
+
+
+def detail_of(signal: ScoredSignal) -> dict[str, Any]:
+    """채점 결과를 `/api/signals`의 신호와 같은 모양의 JSON으로. 아침 목록 종목의 점수 상세로 저장한다.
+
+    `persist_signal`과 같은 필드를 같은 함수(`_reason_dicts`, `_metric_dicts`)로 옮겨 두 벌이 갈라지지 않게 한다.
+    """
+    return {
+        "data_asof": _iso(signal.data_asof),
+        "decision_at": _iso(signal.decision_at),
+        "earliest_execution_at": _iso(signal.earliest_execution_at),
+        "total_score": signal.total_score,
+        "action": signal.action.value,
+        "strategy_version": signal.strategy_version,
+        "policy": signal.policy.value,
+        "abstained_reason": signal.abstained_reason,
+        "reasons": _reason_dicts(signal),
+        "factors": [
+            {
+                "engine": f.engine.value,
+                "score": f.score,
+                "metrics": _metric_dicts(f),
+                "requested_weight": f.requested_weight,
+                "effective_weight": f.effective_weight,
+                "contribution": f.contribution,
+                "availability": f.availability.value,
+                "availability_reason": f.availability_reason,
+                "source_asof": _iso(f.provenance.source_asof),
+                "source_checked_at": _iso(f.provenance.source_checked_at),
+                "freshness_status": f.provenance.freshness.value,
+            }
+            for f in signal.factors
+        ],
+    }
+
+
 def persist_signal(session: Session, signal: ScoredSignal) -> Signal:
     """Write a signal and its factor decomposition.
 
@@ -342,15 +399,7 @@ def persist_signal(session: Session, signal: ScoredSignal) -> Signal:
         action=signal.action,
         policy=signal.policy,
         abstained_reason=signal.abstained_reason,
-        reasons=[
-            {
-                "status": r.status.value,
-                "text": r.text,
-                "engine": r.engine.value,
-                "metric_name": r.metric_name or "",
-            }
-            for r in signal.reasons
-        ],
+        reasons=_reason_dicts(signal),
         strategy_version=signal.strategy_version,
     )
     session.add(row)
@@ -362,15 +411,7 @@ def persist_signal(session: Session, signal: ScoredSignal) -> Signal:
                 signal_id=row.id,
                 engine=factor.engine,
                 score=factor.score,
-                metrics=[
-                    {
-                        "name": m.name,
-                        "raw": m.raw,
-                        "normalized": m.normalized,
-                        "detail": m.detail,
-                    }
-                    for m in factor.metrics
-                ],
+                metrics=_metric_dicts(factor),
                 requested_weight=factor.requested_weight,
                 effective_weight=factor.effective_weight,
                 contribution=factor.contribution,

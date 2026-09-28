@@ -113,7 +113,8 @@ LIST_AT = time(8, 50)
 POLL = timedelta(seconds=60)
 
 DISCOVERY_TOP = 30
-PREFETCH_CAP = 20
+# 풀 전체를 덮는 안전 상한(풀은 보통 80~100). DART 호출은 QuotaGuard가 따로 막는다(2026-09-28, 20에서 올림).
+PREFETCH_CAP = 150
 LLM_MORNING_BUDGET = 100
 LLM_SUPPLEMENT_BUDGET = 30
 # 재무를 다시 받는 간격. 기존 재무 신선도 기준과 같은 값을 쓴다.
@@ -410,8 +411,8 @@ def tracked_fundamentals_checked(session: Session) -> datetime | None:
     기존 `last_success("DART")`는 이름을 `LIKE 'DART%'`로 찾아 공시 수집
     (`DART_DISCLOSURE`)까지 센다. 07:00 체인이 매일 아침 공시를 받으므로, 그걸로
     읽으면 추적 종목의 재무가 늘 "오늘 확인함"으로 보인다(2026-09-25 확인: 공시
-    수집 06:33Z가 답이었고, 실제 마지막 재무 실행은 9/22). 16:40 채점은 아직 그
-    함수를 쓴다. 여기서는 정확한 이름으로만 본다.
+    수집 06:33Z가 답이었고, 실제 마지막 재무 실행은 9/22). 16:40 추적 종목 채점은
+    2026-09-28에 멈췄다(`scoring_service.score_all`은 수동 재채점에만 남음). 여기서는 정확한 이름으로만 본다.
     """
     return session.execute(
         select(func.max(CollectorRun.finished_at)).where(
@@ -575,6 +576,8 @@ def score_pool(session: Session, pool: PreopenPool, *, now: datetime) -> tuple[s
     for m in members_of(session, pool):
         inst = session.get(Instrument, m.instrument_id)
         assert inst is not None
+        # 다시 돌릴 때 앞선 실행의 상세가 남지 않게(채점 실패·일봉 없음 경로도 비운다).
+        m.score_detail = None
         m.evaluated_at = now
         m.peer_count = len(peer_ids)
         m.peer_hash = peer_hash
@@ -600,6 +603,7 @@ def score_pool(session: Session, pool: PreopenPool, *, now: datetime) -> tuple[s
         technical = by_engine.get(Engine.TECHNICAL)
         fundamental = by_engine.get(Engine.FUNDAMENTAL)
         m.total_score = scored.total_score
+        m.score_detail = scoring_service.detail_of(scored)
         m.technical_score = technical.score if technical else None
         m.fundamental_score = fundamental.score if fundamental else None
         m.action = scored.action.value
@@ -1035,6 +1039,7 @@ def take_snapshot(
                 peer_hash=m.peer_hash,
                 prefetch_status=m.prefetch_status,
                 abstained_reason=m.abstained_reason,
+                score_detail=m.score_detail,
             )
         )
     session.commit()

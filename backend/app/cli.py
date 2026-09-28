@@ -472,6 +472,10 @@ def _stat(d: DayStats) -> str:
     )
 
 
+# 추적 종목(한국·미국) 매일 채점을 멈춘 날. 이후 신호는 아침 목록 종목의 08:40 채점뿐이다(docs/history.md).
+TRACKED_SCORING_STOPPED = "2026-09-28"
+
+
 def cmd_review() -> int:
     """The forward record against its review gates, and the overlay decision rule. Reads only."""
     with session_scope() as session:
@@ -481,11 +485,14 @@ def cmd_review() -> int:
         "Excess returns in %, averaged within each entry day first."
     )
     print(f"first entry: {rev.first_entry or 'none yet'}")
+    # 추적 종목 채점은 소유자 결정으로 멈췄다. 새 진입일이 생기지 않으니 아직 닿지 않은 관문은 닿을 수 없다.
+    print(
+        f"Tracked-name scoring stopped on {TRACKED_SCORING_STOPPED} (owner's decision): "
+        "no new entry days, so a gate not yet reached never will be; the overlay has no verdict."
+    )
     for g in rev.gates:
         when = (
-            "reached"
-            if g.reached
-            else f"earliest {g.earliest:%Y-%m-%d} if every session is recorded"
+            "reached" if g.reached else f"not reachable (scoring stopped {TRACKED_SCORING_STOPPED})"
         )
         print(
             f"  {g.gate.name:<13} {g.days:>3}/{g.gate.days} entry days at {g.gate.horizon}d — {when}"
