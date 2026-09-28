@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import { strategyKindLabel, strategyVersionLabel } from "../api/format";
+import { strategyLabel, strategyVersionLabel } from "../api/format";
 import type { BacktestRunDetail, BacktestRunSummary, BacktestWindow } from "../api/types";
 import { RunInfoDrawer } from "../components/RunInfoDrawer";
 import "./Backtest.css";
@@ -113,7 +113,7 @@ function RunDetail({
             {run.name} <span className="bt__symbol">{run.symbol}</span>
           </h2>
           <p className="bt__sub">
-            {strategyKindLabel(run.strategy_kind)} {strategyVersionLabel(run.strategy_version)} ·{" "}
+            {strategyLabel(run.strategy_kind, run.strategy_version)} ·{" "}
             {run.period_start} — {run.period_end} · 학습 {run.train_sessions} /
             평가 {run.eval_sessions}세션 · {run.anchored ? "시작 고정" : "이동 창"}
           </p>

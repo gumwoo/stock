@@ -165,10 +165,6 @@
   word-break: break-word;
 }
 
-.rs__source code {
-  font-family: var(--font-mono);
-}
-
 .rs__list {
   padding-left: var(--s-4);
   display: grid;

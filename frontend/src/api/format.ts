@@ -136,13 +136,24 @@ const STRATEGY_VERSION_LABEL: Record<string, string> = {
 
 /** 버전 키를 화면 이름으로. 백테스트는 끝에 "+매수관심/주의" 기준을 붙인다(backtest/strategies.py). */
 export function strategyVersionLabel(version: string): string {
-  const [base, thresholds] = version.split("+", 2);
+  // 첫 "+"에서만 자른다. 뒤가 정확히 "숫자/숫자"가 아니면(임의 --version 값) 원래 키를 그대로 보여 서로 다른 키가
+  // 화면에서 같아지지 않게 한다.
+  const plus = version.indexOf("+");
+  const base = plus < 0 ? version : version.slice(0, plus);
+  const thresholds = plus < 0 ? null : version.slice(plus + 1);
   const ma = /^ma-(\d+)-(\d+)@(v\d+)$/.exec(base);
-  const name = ma ? `이동평균 ${ma[1]}/${ma[2]}일 ${ma[3]}` : STRATEGY_VERSION_LABEL[base];
+  const name = ma ? `이동평균 교차 ${ma[1]}/${ma[2]}일 ${ma[3]}` : STRATEGY_VERSION_LABEL[base];
   if (name === undefined) return version;
-  const cut = thresholds ? /^([\d.]+)\/([\d.]+)$/.exec(thresholds) : null;
-  if (thresholds && !cut) return version;
-  return cut ? `${name} · 매수 관심 ${cut[1]} / 주의 ${cut[2]}` : name;
+  if (thresholds === null) return name;
+  const cut = /^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)$/.exec(thresholds);
+  return cut ? `${name} · 매수 관심 ${cut[1]} / 주의 ${cut[2]}` : version;
+}
+
+/** 종류와 버전을 한 줄로. 버전 이름이 이미 종류로 시작하면(단순 보유, 이동평균 교차) 종류를 되풀이하지 않는다. */
+export function strategyLabel(kind: string, version: string): string {
+  const k = strategyKindLabel(kind);
+  const v = strategyVersionLabel(version);
+  return v.startsWith(k) ? v : `${k} ${v}`;
 }
 
 const PARAM_LABEL: Record<string, string> = {
