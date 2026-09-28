@@ -98,7 +98,7 @@ def list_members(day: date, session: SessionDep) -> dict[str, Any]:
 @router.get("/{day}/bars/{instrument_id}")
 def list_bars(
     day: date, instrument_id: int, session: SessionDep, interval: str = "1m"
-) -> list[dict[str, float]]:
+) -> list[dict[str, Any]]:
     """그날 저장된 봉. 1m은 장 마감 뒤 REST로 받은 1분봉(16:20 전에는 비어 있다), 1s는 실시간 연결로 저장한 1초봉."""
     if interval not in ("1m", "1s"):
         raise HTTPException(status_code=400, detail="interval is 1m or 1s")

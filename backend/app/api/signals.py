@@ -224,5 +224,8 @@ def rescore(session: SessionDep) -> list[SignalOut]:
     Safe to call repeatedly: it writes new signal rows rather than mutating
     old ones, so the history of what was judged when stays intact.
     """
-    scoring_service.score_all(session)
-    return list_signals(session)
+    # 추적 종목 채점은 2026-09-28 소유자 결정으로 멈췄다. 누르면 닫힌 포워드 기록에 새 신호가 섞이므로 거절한다.
+    raise HTTPException(
+        status_code=410,
+        detail="추적 종목 채점은 2026-09-28에 멈췄습니다. 신호는 그날 아침 목록 종목의 08:40 채점입니다.",
+    )

@@ -78,3 +78,5 @@ def test_bad_interval_and_bad_day_are_refused(monkeypatch: pytest.MonkeyPatch) -
     with TestClient(create_app()) as client:
         assert client.get("/api/lists/2026-09-28/bars/1?interval=5m").status_code == 400
         assert client.get("/api/lists/not-a-day/signals").status_code == 422
+        # 추적 종목 채점은 멈췄다. 수동 재채점도 닫힌 기록에 신호를 섞지 않게 거절한다.
+        assert client.post("/api/signals/rescore").status_code == 410

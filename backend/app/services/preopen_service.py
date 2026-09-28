@@ -576,7 +576,8 @@ def score_pool(session: Session, pool: PreopenPool, *, now: datetime) -> tuple[s
     for m in members_of(session, pool):
         inst = session.get(Instrument, m.instrument_id)
         assert inst is not None
-        # 다시 돌릴 때 앞선 실행의 상세가 남지 않게(채점 실패·일봉 없음 경로도 비운다).
+        # 다시 돌릴 때 앞선 실행의 상세가 남지 않게(일봉 없음 경로도 비운다). 예외 경로는 rollback이 되돌리므로
+        # 앞선 값이 남는다 — total_score 등 다른 칸과 같은 동작이라 서로 어긋나지는 않는다.
         m.score_detail = None
         m.evaluated_at = now
         m.peer_count = len(peer_ids)
