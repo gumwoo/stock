@@ -253,7 +253,7 @@ class TestAbsenceIsCarried:
 
         factor, _ = run(snap)
 
-        assert factor.availability_reason == "재무: 받아 둔 재무 자료가 없음 (매출)"
+        assert factor.availability_reason == "재무: 이 시점의 재무 자료를 받아 두지 않음 (매출)"
 
     def test_the_first_missing_item_leads_and_the_rest_are_counted(self) -> None:
         not_filed = ReportedValue(

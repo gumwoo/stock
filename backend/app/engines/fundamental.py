@@ -78,9 +78,10 @@ CONCEPT_LABEL: Mapping[str, str] = {
 }
 
 # 값이 없는 이유(`FactOutcome`)별 화면 문장. 세 경우를 한 문장으로 뭉치지 않는다 — 앞의 둘은 발표가 없었다는
-# 뜻이 아니고, 마지막만 그렇다. 영어 원문(`ReportedValue.explanation`)은 감사용으로 그대로 둔다.
+# 뜻이 아니고, 마지막만 그렇다. 첫째는 자료가 전혀 없는 경우와 자료가 이 시점까지 거슬러 가지 못하는 경우를 함께
+# 덮으므로 둘 다에 맞는 말로 쓴다. 영어 원문(`ReportedValue.explanation`)은 감사용으로 그대로 둔다.
 ABSENCE_LABEL: Mapping[str, str] = {
-    "SOURCE_COVERAGE_UNAVAILABLE": "받아 둔 재무 자료가 없음",
+    "SOURCE_COVERAGE_UNAVAILABLE": "이 시점의 재무 자료를 받아 두지 않음",
     "NO_OBSERVATION_IN_SOURCE": "받은 재무 자료에 이 값이 없음",
     "NOT_YET_FILED": "이 시점까지 해당 기간 보고서가 제출되지 않음",
 }
