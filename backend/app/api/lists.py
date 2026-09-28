@@ -17,6 +17,7 @@ from app.db import get_db
 from app.models import Instrument, WatchlistMember, WatchlistSnapshot
 from app.realtime.gateway import load_members, member_dict
 from app.repositories import instrument_repo, minute_repo
+from app.scoring.policy import THRESHOLDS
 from app.scoring.watchlist import STRATEGY_VERSION_V2
 
 router = APIRouter(prefix="/api/lists", tags=["lists"])
@@ -49,7 +50,19 @@ def list_days(session: SessionDep) -> list[str]:
 
 
 def signal_row(m: WatchlistMember, name: str, code: str | None) -> dict[str, Any]:
-    """목록 행 하나를 신호 탭의 행으로. 순수하다."""
+    """목록 행 하나를 신호 탭의 행으로. 순수하다.
+
+    `weight_total`(참여한 요인 가중치 합)과 `thresholds`(판단 기준)를 함께 준다. 판단은 합계를 가중치 합으로 나눈 값을
+    기준에 대는 것과 같다(`Thresholds.action_for`) — 재무가 없으면 기술 점수 하나로 판단한다. 화면이 기준값을 상수로
+    들고 있지 않게 여기서 준다. 기준값은 지금 규칙의 것이다(전략 버전이 하나뿐인 동안은 행의 채점 당시와 같다).
+    """
+    detail = m.score_detail
+    factors = detail.get("factors") if isinstance(detail, dict) else None
+    weight_total = (
+        sum(float(f.get("effective_weight") or 0.0) for f in factors if isinstance(f, dict))
+        if isinstance(factors, list)
+        else None
+    )
     return {
         "member_id": m.id,
         "instrument_id": m.instrument_id,
@@ -68,6 +81,8 @@ def signal_row(m: WatchlistMember, name: str, code: str | None) -> dict[str, Any
         "attention_surge": m.attention_surge,
         "evaluated_at": m.evaluated_at.isoformat() if m.evaluated_at else None,
         "detail": m.score_detail,
+        "weight_total": weight_total,
+        "thresholds": {"buy_interest": THRESHOLDS.buy_interest, "caution": THRESHOLDS.caution},
     }
 
 

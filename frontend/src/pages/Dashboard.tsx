@@ -7,7 +7,7 @@ import {
   REGIME_LABEL,
   datetime,
 } from "../api/format";
-import { fundamentalMissing, listRowToSignal, maxScore } from "../api/listSignal";
+import { fundamentalMissing, judgedScore, listRowToSignal, maxScore, shrunk } from "../api/listSignal";
 import type { ListSignalRow, Signal } from "../api/types";
 import { dayLabel } from "../components/MorningStatus";
 import { SignalFactorDrawer } from "../components/SignalFactorDrawer";
@@ -42,7 +42,8 @@ function SignalCard({
   onDaily: () => void;
 }) {
   const signal = listRowToSignal(row);
-  const noFundamental = row.detail !== null && fundamentalMissing(row);
+  const judged = judgedScore(row);
+  const noFundamental = row.detail !== null && row.action !== "ABSTAINED" && fundamentalMissing(row);
   const warning = row.prefetch_status ? PREFETCH_WARNING[row.prefetch_status] : undefined;
 
   return (
@@ -62,18 +63,19 @@ function SignalCard({
         )}
       </header>
 
-      {row.total_score !== null && (
+      {judged !== null && row.total_score !== null && (
         <div className="card__score">
           <div className="card__score-row">
-            <span className="card__score-label">종합점수</span>
-            <span className="card__score-num num">{row.total_score.toFixed(1)}</span>
+            <span className="card__score-label">판단 점수</span>
+            <span className="card__score-num num">{judged.toFixed(1)}</span>
           </div>
-          <ScoreBar score={row.total_score} />
+          <ScoreBar score={judged} />
           <p className="card__parts">
-            기술 {row.technical_score === null ? "–" : row.technical_score.toFixed(1)} ·{" "}
-            {noFundamental
-              ? `재무 없음 · 기술 점수만(최대 ${maxScore(row)})`
-              : `재무 ${row.fundamental_score === null ? "–" : row.fundamental_score.toFixed(1)}`}
+            {noFundamental && shrunk(row)
+              ? `재무 자료 없음 → 기술 점수 ${judged.toFixed(1)} 하나로 판단 (합계 ${row.total_score.toFixed(1)} / 최대 ${maxScore(row)})`
+              : `기술 ${row.technical_score === null ? "–" : row.technical_score.toFixed(1)} · 재무 ${
+                  row.fundamental_score === null ? "–" : row.fundamental_score.toFixed(1)
+                }`}
           </p>
         </div>
       )}
@@ -97,9 +99,7 @@ function SignalCard({
       </p>
 
       {warning && <p className="card__warn">{warning}</p>}
-      {row.total_score === null && row.abstained_reason && (
-        <p className="card__note">{row.abstained_reason}</p>
-      )}
+      {judged === null && row.abstained_reason && <p className="card__note">{row.abstained_reason}</p>}
 
       <footer className="card__foot">
         <span className="card__timing">
@@ -176,13 +176,15 @@ export function Dashboard({
     };
   }, [day]);
 
-  // 점수 높은 순. 점수가 없는 종목은 뒤로(목록 순위 순).
+  // 판단 점수 높은 순(재무가 빠진 종목도 판단에 실제로 쓴 점수로 같은 줄에 선다). 판단 보류·점수 없음은 뒤로(목록 순위 순).
   const sorted = rows
     ? [...rows].sort((a, b) => {
-        if (a.total_score === null && b.total_score === null) return a.rank - b.rank;
-        if (a.total_score === null) return 1;
-        if (b.total_score === null) return -1;
-        return b.total_score - a.total_score;
+        const x = judgedScore(a);
+        const y = judgedScore(b);
+        if (x === null && y === null) return a.rank - b.rank;
+        if (x === null) return 1;
+        if (y === null) return -1;
+        return y - x;
       })
     : [];
   const backfilled = rows?.find((r) => r.detail?.backfilled_at)?.detail?.backfilled_at;

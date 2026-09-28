@@ -51,6 +51,8 @@ export interface Signal {
   abstained_reason: string | null;
   factors: Factor[];
   reasons: Reason[];
+  /** 요인이 빠져 가중치 합이 1보다 작을 때, 판단에 실제로 쓴 점수와 기준(목록 신호만). */
+  scale?: { weight: number; score: number; buy: number; caution: number };
 }
 
 export interface Candle {
@@ -278,6 +280,10 @@ export interface ListSignalRow {
   /** 실제 채점 시각(08:40). */
   evaluated_at: string | null;
   detail: ScoreDetail | null;
+  /** 참여한 요인 가중치 합(상세가 없으면 null). 판단은 합계를 이것으로 나눈 값을 기준에 댄 것과 같다. */
+  weight_total: number | null;
+  /** 판단 기준(지금 규칙). */
+  thresholds: { buy_interest: number; caution: number };
 }
 
 /** 그날 관찰 목록(`/api/lists/{day}/members`). 시세(`last`)는 없다. */

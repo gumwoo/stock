@@ -25,6 +25,14 @@ export function listRowToSignal(row: ListSignalRow): Signal | null {
     abstained_reason: row.abstained_reason,
     factors: d.factors,
     reasons: d.reasons,
+    scale: shrunk(row)
+      ? {
+          weight: row.weight_total ?? 1,
+          score: judgedScore(row) ?? d.total_score,
+          buy: row.thresholds.buy_interest,
+          caution: row.thresholds.caution,
+        }
+      : undefined,
   };
 }
 
@@ -34,8 +42,23 @@ export function fundamentalMissing(row: ListSignalRow): boolean {
   return !f || f.availability === "UNAVAILABLE" || f.effective_weight === 0;
 }
 
-/** 쓸 수 있던 요인 가중치로 낼 수 있는 최고 점수(재무가 빠지면 기술 가중치만큼). */
+/** 쓸 수 있던 요인 가중치로 낼 수 있는 최고 점수(재무가 빠지면 기술 가중치만큼). 가중치 합은 서버가 준다. */
 export function maxScore(row: ListSignalRow): number {
-  const w = row.detail?.factors.reduce((sum, f) => sum + f.effective_weight, 0) ?? 1;
-  return Math.round(w * 100);
+  return Math.round((row.weight_total ?? 1) * 100);
+}
+
+/** 요인이 빠져 가중치 합이 1보다 작은가(부동소수 허용 오차). 판단 보류는 제외. */
+export function shrunk(row: ListSignalRow): boolean {
+  return row.action !== "ABSTAINED" && row.weight_total !== null && row.weight_total < 0.999;
+}
+
+/**
+ * 판단에 실제로 쓴 점수: 합계를 참여한 가중치 합으로 나눈 값(`Thresholds.action_for`와 같은 비교). 가중치가 다 있으면
+ * 종합점수 그대로, 재무가 빠지면 기술 점수와 같다. 판단 보류·점수 없음·가중치 0이면 null.
+ */
+export function judgedScore(row: ListSignalRow): number | null {
+  if (row.total_score === null || row.action === "ABSTAINED" || row.action === null) return null;
+  const w = row.weight_total ?? 1;
+  if (w <= 0) return null;
+  return row.total_score / w;
 }

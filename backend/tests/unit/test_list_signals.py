@@ -71,6 +71,32 @@ def test_a_list_row_becomes_a_signal_row() -> None:
     assert row["list_reasons"] == ["POSITIVE_NEWS_OVERLAY", "DISCLOSURE_EVENT"]
     assert (row["code"], row["action"], row["detail"]) == ("272210", "WATCH", None)
     assert row["evaluated_at"] == "2026-09-27T23:40:00+00:00"
+    # 상세가 없으면 가중치 합도 없다. 기준값은 지금 규칙의 것.
+    assert row["weight_total"] is None
+    assert row["thresholds"] == {"buy_interest": 70.0, "caution": 35.0}
+
+
+def test_the_weight_total_is_the_sum_of_effective_weights() -> None:
+    detail = detail_of(TestZeroPolicyTrap.build())
+    m: Any = SimpleNamespace(
+        id=1,
+        instrument_id=2,
+        rank=1,
+        reasons=[],
+        total_score=detail["total_score"],
+        last_action=detail["action"],
+        technical_score=None,
+        fundamental_score=None,
+        prefetch_status=None,
+        abstained_reason=None,
+        regime=None,
+        overlay_points=None,
+        attention_surge=None,
+        evaluated_at=None,
+        score_detail=detail,
+    )
+    # 0.40 + 0.30 + 0 + 0.10 (빠진 심리 요인은 0)
+    assert signal_row(m, "x", "1")["weight_total"] == pytest.approx(0.80)
 
 
 def test_bad_interval_and_bad_day_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:

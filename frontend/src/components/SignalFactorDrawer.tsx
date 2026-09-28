@@ -5,7 +5,6 @@ import {
   engineLabel,
   freshnessLabel,
   metricLabel,
-  percent,
   policyLabel,
   signed,
   strategyVersionLabel,
@@ -162,11 +161,21 @@ export function SignalFactorDrawer({ signal, onClose }: Props) {
           <strong className="num">= {signal.total_score.toFixed(1)}</strong>
         </div>
 
-        {shrunk && (
+        {signal.action === "ABSTAINED" ? (
+          <p className="drawer__shrunk">필수 요인이 없어 판단하지 않았습니다.</p>
+        ) : signal.scale ? (
           <p className="drawer__shrunk">
-            실제 가중치 합이 {percent(weightTotal * 100, 0)}라서 점수의 최대치가 줄어든 상태입니다.
-            빠진 요인이 있습니다.
+            쓸 수 있던 가중치 합이 {Math.round(signal.scale.weight * 100)}%라, 판단은 합계를{" "}
+            {Math.round(signal.scale.weight * 100)}%로 나눈 {signal.scale.score.toFixed(1)}점을 기준(매수 관심{" "}
+            {signal.scale.buy} 이상, 주의 {signal.scale.caution} 이하)에 댔습니다.
           </p>
+        ) : (
+          shrunk && (
+            <p className="drawer__shrunk">
+              실제 가중치 합이 {Math.round(weightTotal * 100)}%라서 점수의 최대치가 줄어든 상태입니다.
+              빠진 요인이 있습니다.
+            </p>
+          )
         )}
 
         {signal.reasons.length > 0 && (
