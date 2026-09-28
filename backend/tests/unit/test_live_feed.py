@@ -15,6 +15,7 @@ from app.realtime.kis_feed import (
     TRADE_FIELDS,
     LiveBook,
     Trade,
+    downsample,
     minute_epoch,
     parse_control,
     parse_trades,
@@ -130,6 +131,56 @@ class TestBook:
             datetime(2026, 9, 23, 0, 0, tzinfo=UTC).timestamp()
         )
 
+    def test_seconds_are_built_for_every_name_with_the_broadcast_time(self) -> None:
+        book = LiveBook(DAY)
+        book.add(trade("093501", 100, 5))
+        book.add(trade("093501", 102, 1))  # 같은 초는 합친다
+        book.add(trade("093502", 99, 2))
+        base = minute_epoch(DAY, time(9, 35))
+        secs = book.series("005930", "1s")
+        assert [b["time"] for b in secs] == [base + 1, base + 2]
+        assert secs[0] == {
+            "time": base + 1,
+            "open": 100,
+            "high": 102,
+            "low": 100,
+            "close": 102,
+            "volume": 6,
+        }
+        other = Trade("000660", time(9, 35, 3), 50.0, 1, 0, 0.0)
+        book.add(other)  # 선택 여부와 무관하게 모든 종목의 초봉이 쌓인다
+        assert [b["time"] for b in book.series("000660", "1s")] == [base + 3]
+
+    def test_the_second_just_changed_is_the_whole_second_so_far(self) -> None:
+        # 방송에 싣는 초봉은 그 체결 하나가 아니라 서버가 그 초에 쌓은 전부다(브라우저가 놓친 체결도 담긴다).
+        book = LiveBook(DAY)
+        book.add(trade("093501", 100, 5))
+        book.add(trade("093501", 97, 1))
+        base = minute_epoch(DAY, time(9, 35))
+        assert book.last_second == {
+            "time": base + 1,
+            "open": 100,
+            "high": 100,
+            "low": 97,
+            "close": 97,
+            "volume": 6,
+        }
+        assert book.last_second == book.series("005930", "1s")[-1]
+
+    def test_seeded_minutes_have_no_seconds(self) -> None:
+        book = LiveBook(DAY)
+        t = minute_epoch(DAY, time(9, 0))
+        book.seed("005930", [(t, 1, 1, 1, 1, 1)])
+        assert book.series("005930", "1s") == [] and len(book.series("005930")) == 1
+
+    def test_closes_for_the_sparkline_are_thinned_keeping_both_ends(self) -> None:
+        book = LiveBook(DAY)
+        for m in range(100):
+            book.add(Trade("005930", time(9 + m // 60, m % 60, 0), float(m), 1, 0, 0.0))
+        closes = book.closes("005930", 60)
+        assert len(closes) == 60 and closes[0] == 0.0 and closes[-1] == 99.0
+        assert downsample([1.0, 2.0], 60) == [1.0, 2.0]
+
     def test_seeded_minutes_do_not_overwrite_what_trades_built(self) -> None:
         book = LiveBook(DAY)
         book.add(trade("093501", 100, 5))
@@ -227,11 +278,35 @@ def test_a_session_subscribes_relays_and_answers_pings() -> None:
     assert [json.loads(s)["body"]["input"]["tr_key"] for s in socket.sent] == ["005930"]
     first = heard.get_nowait()
     assert (first["type"], first["code"], first["price"]) == ("trade", "005930", 284500)
+    # 초봉은 방송 시각과 같은 초의 서버 봉이다.
+    assert first["sbar"]["time"] == first["time"] and first["sbar"]["close"] == 284500
     assert socket.pongs and b"PINGPONG" in socket.pongs[0]
     assert lock.events == ["acquire", "release"]
     assert g.status == "closed for the day"
     # The refused subscription is kept, so the page can say so.
     assert g.refused == {"005930"}
+
+
+def test_a_reconnect_the_same_day_keeps_the_seconds_built_so_far() -> None:
+    # 초봉은 REST로 다시 채울 수 없으므로, 끊겼다 다시 붙어도 그날 쌓은 봉을 버리지 않는다.
+    clock = [datetime(2026, 9, 23, 1, 0, tzinfo=UTC)]  # 10:00 in Seoul
+    g = gateway(Socket([], clock), Lock(), clock, [])
+    _count_fills(g)
+    earlier = LiveBook(date(2026, 9, 23))
+    earlier.add(Trade("005930", time(9, 30, 5), 1.0, 1, 0, 0.0))
+    g.book = earlier
+    assert asyncio.run(g.session_once()) is True
+    assert g.book is earlier and len(earlier.series("005930", "1s")) == 1
+
+
+def test_a_new_day_starts_a_new_book() -> None:
+    clock = [datetime(2026, 9, 23, 1, 0, tzinfo=UTC)]
+    g = gateway(Socket([], clock), Lock(), clock, [])
+    _count_fills(g)
+    yesterday = LiveBook(date(2026, 9, 22))
+    g.book = yesterday
+    assert asyncio.run(g.session_once()) is True
+    assert g.book is not yesterday and g.book is not None and g.book.day == date(2026, 9, 23)
 
 
 def test_outside_the_session_nothing_opens() -> None:

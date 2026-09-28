@@ -116,17 +116,30 @@ export function useLiveChart(height = 420) {
     [],
   );
 
+  // 마지막으로 그린 봉의 시각. 차트는 그보다 이른 봉을 update하면 예외를 낸다. HTTP로 받은 봉과 웹소켓 체결은
+  // 다른 연결이라 순서가 뒤바뀔 수 있으므로 이른 봉은 건너뛴다.
+  const lastTime = useRef(-Infinity);
+
   const reset = useCallback(
-    (bars: LiveBar[]) => {
+    (bars: LiveBar[], recent?: number) => {
       price.current?.setData(bars.map((b) => ({ ...b, time: b.time as Time })));
       volume.current?.setData(bars.map(toVolume));
-      chart.current?.timeScale().fitContent();
+      lastTime.current = bars.length ? bars[bars.length - 1].time : -Infinity;
+      const scale = chart.current?.timeScale();
+      if (recent && bars.length > recent) {
+        // 1초봉 수천 개를 다 맞추면 읽을 수 없어 최근 구간만 보인다(스크롤로 앞을 볼 수 있다).
+        scale?.setVisibleLogicalRange({ from: bars.length - recent, to: bars.length });
+      } else {
+        scale?.fitContent();
+      }
     },
     [toVolume],
   );
 
   const push = useCallback(
     (bar: LiveBar) => {
+      if (bar.time < lastTime.current) return;
+      lastTime.current = bar.time;
       price.current?.update({ ...bar, time: bar.time as Time });
       volume.current?.update(toVolume(bar));
     },

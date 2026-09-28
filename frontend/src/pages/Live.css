@@ -93,7 +93,7 @@
 
 .live__row {
   display: grid;
-  grid-template-columns: 24px 1fr auto;
+  grid-template-columns: 24px 1fr 64px auto;
   align-items: baseline;
   gap: var(--s-2);
 }
@@ -268,4 +268,14 @@
   margin: 6px 0 0;
   font-size: var(--t-micro);
   color: var(--c-text-tertiary);
+}
+
+.spark {
+  display: block;
+  align-self: center;
+}
+
+.spark--empty {
+  width: 64px;
+  height: 18px;
 }

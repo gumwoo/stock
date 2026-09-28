@@ -133,13 +133,29 @@ def minute_epoch(day: date, at: time) -> int:
     return int(start.astimezone(UTC).timestamp())
 
 
+def downsample(values: list[float], n: int) -> list[float]:
+    """고르게 `n`개로 줄인다. 첫 점과 마지막 점은 항상 남긴다. 짧으면 그대로."""
+    if n < 2 or len(values) <= n:
+        return list(values)
+    step = (len(values) - 1) / (n - 1)
+    return [values[round(i * step)] for i in range(n)]
+
+
 @dataclass
 class LiveBook:
-    """Each name's one-minute bars for today, built from what has arrived."""
+    """Each name's one-minute and one-second bars for today, built from what has arrived.
+
+    초봉은 분봉과 같은 체결로 함께 쌓는다. 클릭한 종목만이 아니라 목록 전부를, 서버가 실시간 연결을 시작한 때부터.
+    과거 초봉은 받을 곳이 없어 REST로 채우지 못한다(분봉만 `seed`로 채운다). 저장하지 않는 화면용이다.
+    메모리(예측, 실측 아님): 초봉 하나가 dict 항목·int 키·float 5개 리스트로 약 300바이트라, 40종목이 장중 매초
+    체결되는 최악이면 약 94만 봉, 곧 280MB 안팎이다. 실제로는 체결 없는 초가 많아 그보다 작다. 상한은 두지 않는다.
+    """
 
     day: date
     bars: dict[str, dict[int, list[float]]] = field(default_factory=dict)
+    seconds: dict[str, dict[int, list[float]]] = field(default_factory=dict)
     last: dict[str, Trade] = field(default_factory=dict)
+    last_second: dict[str, Any] = field(default_factory=dict)
 
     def seed(self, code: str, bars: list[tuple[int, float, float, float, float, float]]) -> None:
         """Earlier minutes fetched by REST. A minute already built from trades is kept."""
@@ -148,7 +164,8 @@ class LiveBook:
             mine.setdefault(t, [o, h, lo, c, v])
 
     def add(self, trade: Trade) -> dict[str, Any]:
-        """Fold a trade in; returns the minute it changed, as the chart wants it."""
+        """Fold a trade in; returns the minute it changed, as the chart wants it. The second it changed is
+        `last_second` (방송에 함께 실어 브라우저가 서버의 완성된 초봉을 그대로 그리게 한다)."""
         t = minute_epoch(self.day, trade.at)
         mine = self.bars.setdefault(trade.code, {})
         bar = mine.get(t)
@@ -158,6 +175,24 @@ class LiveBook:
         bar[2] = min(bar[2], trade.price)
         bar[3] = trade.price
         bar[4] += trade.volume
+        # 초 키는 게이트웨이가 방송하는 `time`과 같다(분 시작 + 초).
+        sec = self.seconds.setdefault(trade.code, {})
+        s = t + trade.at.second
+        tick = sec.get(s)
+        if tick is None:
+            tick = sec[s] = [trade.price, trade.price, trade.price, trade.price, 0.0]
+        tick[1] = max(tick[1], trade.price)
+        tick[2] = min(tick[2], trade.price)
+        tick[3] = trade.price
+        tick[4] += trade.volume
+        self.last_second = {
+            "time": s,
+            "open": tick[0],
+            "high": tick[1],
+            "low": tick[2],
+            "close": tick[3],
+            "volume": tick[4],
+        }
         self.last[trade.code] = trade
         return {
             "time": t,
@@ -168,8 +203,16 @@ class LiveBook:
             "volume": bar[4],
         }
 
-    def series(self, code: str) -> list[dict[str, float]]:
+    def series(self, code: str, interval: str = "1m") -> list[dict[str, float]]:
+        """오늘의 봉, 시간순. API 스레드가 읽는 동안 체결이 들어와도 되게 먼저 복사한다(C 수준 한 번의 복사)."""
+        source = self.seconds if interval == "1s" else self.bars
+        mine = source.get(code, {}).copy()
         return [
             {"time": t, "open": b[0], "high": b[1], "low": b[2], "close": b[3], "volume": b[4]}
-            for t, b in sorted(self.bars.get(code, {}).items())
+            for t, b in sorted(mine.items())
         ]
+
+    def closes(self, code: str, points: int = 60) -> list[float]:
+        """목록 추세선용: 오늘 1분봉 종가를 시간순으로, 최대 `points`개가 되게 고르게 솎는다."""
+        mine = self.bars.get(code, {}).copy()
+        return downsample([b[3] for _, b in sorted(mine.items())], points)

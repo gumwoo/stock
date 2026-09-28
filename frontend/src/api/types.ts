@@ -194,6 +194,8 @@ export type LiveMessage =
       volume: number;
       change_pct: number;
       bar: LiveBar;
+      /** 서버가 쌓은 그 초의 봉(1초봉 차트용). */
+      sbar: LiveBar;
     }
   | { type: "seeded"; codes: string[] };
 

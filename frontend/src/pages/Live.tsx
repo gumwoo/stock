@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { MorningStatus, dayLabel } from "../components/MorningStatus";
+import { Sparkline } from "../components/Sparkline";
 import { ThemeNews } from "../components/ThemeNews";
-import type { LiveBar, LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
+import type { LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
 import { useLiveChart } from "../hooks/useLiveChart";
 import "./Live.css";
 
@@ -80,6 +81,7 @@ const PREFETCH: Record<string, string> = {
 };
 
 type Interval = "1m" | "1s";
+type TradeMessage = Extract<LiveMessage, { type: "trade" }>;
 
 function signed(value: number | null | undefined, digits = 1, suffix = ""): string {
   if (value == null) return "–";
@@ -92,17 +94,29 @@ export function Live() {
   const [interval, setInterval_] = useState<Interval>("1m");
   const [error, setError] = useState<string | null>(null);
   const [preopen, setPreopen] = useState<PreopenToday | null>(null);
+  const [sparks, setSparks] = useState<Record<string, number[]>>({});
   const [preopenError, setPreopenError] = useState(false);
   const [stepsOpen, setStepsOpen] = useState(false);
   const { container, reset, push } = useLiveChart(440);
-  const seconds = useRef<Map<number, LiveBar>>(new Map());
   const selectedRef = useRef<string | null>(null);
   const intervalRef = useRef<Interval>("1m");
   // False while a new name or interval is being loaded: a live update then
   // could be older than the series about to be set, which the chart refuses.
   const ready = useRef(false);
+  // 봉을 받는 동안 들어온 선택 종목의 체결.
+  const pending = useRef<TradeMessage[]>([]);
   selectedRef.current = selected;
   intervalRef.current = interval;
+
+  // 체결 한 건을 차트에 반영한다. 1분봉도 1초봉도 서버가 쌓은 완성된 봉을 그대로 그린다(브라우저에서 더하지 않아
+  // 받는 사이에 빠진 체결이 있어도 다음 체결 때 서버 값으로 바로잡힌다). `after`보다 이른 봉은 이미 받은 봉에 있다.
+  const apply = useCallback(
+    (message: TradeMessage, after: number) => {
+      const bar = intervalRef.current === "1m" ? message.bar : message.sbar;
+      if (bar && bar.time >= after) push(bar);
+    },
+    [push],
+  );
 
   // The list and each name's last trade, refreshed now and then.
   useEffect(() => {
@@ -121,8 +135,20 @@ export function Live() {
           }
         })
         .catch((e: Error) => alive && setError(e.message));
+    // 목록 행의 추세선. 목록과 같은 주기로 한 번에 받는다.
+    const loadSparks = () =>
+      api
+        .liveSparks()
+        .then((sp) => {
+          if (alive) setSparks(sp);
+        })
+        .catch(() => undefined);
     load();
-    const timer = window.setInterval(load, 15_000);
+    loadSparks();
+    const timer = window.setInterval(() => {
+      load();
+      loadSparks();
+    }, 15_000);
     return () => {
       alive = false;
       window.clearInterval(timer);
@@ -151,29 +177,28 @@ export function Live() {
     };
   }, []);
 
-  // A new name or interval: start the chart from what is already known.
+  // A new name or interval: start the chart from what the server already built (1분봉도 1초봉도).
+  // 받는 사이에 들어온 체결은 버리지 않고 모아 두었다가, 받은 봉보다 새것만 이어 붙인다.
   useEffect(() => {
-    seconds.current = new Map();
     ready.current = false;
+    pending.current = [];
     if (selected === null) return;
-    if (interval === "1s") {
-      reset([]);
-      ready.current = true;
-      return;
-    }
     let current = true;
     api
-      .liveBars(selected)
+      .liveBars(selected, interval)
       .catch(() => [])
       .then((bars) => {
         if (!current) return;
-        reset(bars);
+        reset(bars, interval === "1s" ? 300 : undefined);
+        const last = bars.length ? bars[bars.length - 1].time : -Infinity;
         ready.current = true;
+        for (const m of pending.current) apply(m, last);
+        pending.current = [];
       });
     return () => {
       current = false;
     };
-  }, [selected, interval, reset]);
+  }, [selected, interval, reset, apply]);
 
   // Trades as they happen. A dropped socket is opened again a few seconds later.
   useEffect(() => {
@@ -200,7 +225,13 @@ export function Live() {
       if (message.type === "seeded") {
         const code = selectedRef.current;
         if (code && message.codes.includes(code) && intervalRef.current === "1m") {
-          api.liveBars(code).then(reset).catch(() => undefined);
+          api
+            .liveBars(code)
+            .then((bars) => {
+              // 받는 사이 종목이나 봉 간격을 바꿨으면 이 1분봉은 버린다.
+              if (selectedRef.current === code && intervalRef.current === "1m") reset(bars);
+            })
+            .catch(() => undefined);
         }
         return;
       }
@@ -223,24 +254,12 @@ export function Live() {
             }
           : prev,
       );
-      if (message.code !== selectedRef.current || !ready.current) return;
-      if (intervalRef.current === "1m") {
-        push(message.bar);
+      if (message.code !== selectedRef.current) return;
+      if (!ready.current) {
+        pending.current.push(message);
         return;
       }
-      const t = message.time;
-      const bar = seconds.current.get(t);
-      const next: LiveBar = bar
-        ? {
-            ...bar,
-            high: Math.max(bar.high, message.price),
-            low: Math.min(bar.low, message.price),
-            close: message.price,
-            volume: bar.volume + message.volume,
-          }
-        : { time: t, open: message.price, high: message.price, low: message.price, close: message.price, volume: message.volume };
-      seconds.current.set(t, next);
-      push(next);
+      apply(message, -Infinity);
     };
     open();
     return () => {
@@ -248,7 +267,7 @@ export function Live() {
       window.clearTimeout(retry);
       socket?.close();
     };
-  }, [push, reset]);
+  }, [reset, apply]);
 
   const member: LiveMember | undefined = useMemo(
     () => state?.members.find((m) => m.code === selected),
@@ -351,6 +370,7 @@ export function Live() {
                     <span className="live__row">
                       <span className="live__rank">{m.rank}</span>
                       <span className="live__name">{m.name}</span>
+                      <Sparkline values={sparks[m.code]} change={m.last?.change_pct} />
                       <span className={changeClass(m.last?.change_pct)}>
                         {signed(m.last?.change_pct, 2, "%")}
                       </span>
@@ -425,7 +445,8 @@ export function Live() {
           {!empty && (
             <p className="live__note">
               들어오는 체결로 그린 화면용 차트이고 기록이 아닙니다. 분석에 쓰는 기록은 장 마감 뒤 받는
-              1분봉입니다.{interval === "1s" ? " 1초봉은 이 화면을 연 때부터 그립니다." : ""}
+              1분봉입니다. 1분봉과 1초봉은 서버가 목록 전 종목을 계속 쌓고 있어, 종목을 바꿔도 이어서 보입니다.
+              {interval === "1s" ? " 1초봉은 서버가 실시간 연결을 시작한 때부터 있습니다(과거 1초봉은 받을 곳이 없습니다)." : ""}
             </p>
           )}
         </div>

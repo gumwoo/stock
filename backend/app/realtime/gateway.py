@@ -310,7 +310,10 @@ class Gateway:
             return False
         try:
             self.source, self.members = await asyncio.to_thread(self._members, day)
-            self.book = LiveBook(day)
+            # 같은 날 다시 연결할 때는 쌓아 둔 봉을 유지한다. 분봉은 REST로 다시 채울 수 있지만 초봉은 그럴 수 없어,
+            # 새로 만들면 끊길 때마다 그날 1초봉이 사라진다. seed는 setdefault라 기존 봉을 덮지 않는다.
+            if self.book is None or self.book.day != day:
+                self.book = LiveBook(day)
             if not self.members:
                 self.status = "no names to watch today"
                 return False
@@ -365,6 +368,7 @@ class Gateway:
                             "volume": trade.volume,
                             "change_pct": trade.change_pct,
                             "bar": bar,
+                            "sbar": dict(self.book.last_second),
                         }
                     )
                 continue

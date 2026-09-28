@@ -38,7 +38,9 @@ export const api = {
   backtests: () => get<BacktestRunSummary[]>("/api/backtests"),
   backtest: (id: number) => get<BacktestRunDetail>(`/api/backtests/${id}`),
   live: () => get<LiveState>("/api/live"),
-  liveBars: (code: string) => get<LiveBar[]>(`/api/live/${code}/bars`),
+  liveBars: (code: string, interval: "1m" | "1s" = "1m") =>
+    get<LiveBar[]>(`/api/live/${code}/bars?interval=${interval}`),
+  liveSparks: () => get<Record<string, number[]>>("/api/live/sparks"),
   themes: () => get<ThemeNewsDay>("/api/themes/today"),
   preopenToday: () => get<PreopenToday>("/api/preopen/today"),
 };

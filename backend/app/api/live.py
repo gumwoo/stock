@@ -34,12 +34,23 @@ def live_state(request: Request) -> dict[str, Any]:
     return state
 
 
+@router.get("/api/live/sparks")
+def live_sparks(request: Request) -> dict[str, list[float]]:
+    """목록 종목마다 오늘 1분봉 종가(최대 60점). 목록 행의 작은 추세선용."""
+    gateway = _gateway(request)
+    if gateway is None or gateway.book is None:
+        return {}
+    return {m.code: gateway.book.closes(m.code) for m in gateway.members}
+
+
 @router.get("/api/live/{code}/bars")
-def live_bars(code: str, request: Request) -> list[dict[str, float]]:
+def live_bars(code: str, request: Request, interval: str = "1m") -> list[dict[str, float]]:
+    if interval not in ("1m", "1s"):
+        raise HTTPException(status_code=400, detail="interval is 1m or 1s")
     gateway = _gateway(request)
     if gateway is None or gateway.book is None:
         raise HTTPException(status_code=404, detail="the live feed is not running")
-    bars: list[dict[str, float]] = gateway.book.series(code)
+    bars: list[dict[str, float]] = gateway.book.series(code, interval)
     return bars
 
 

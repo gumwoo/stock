@@ -42,6 +42,10 @@ def test_state_and_bars_from_the_gateways_book(monkeypatch: pytest.MonkeyPatch) 
         }
         bars = client.get("/api/live/005930/bars").json()
         assert len(bars) == 1 and bars[0]["close"] == 100.0
+        secs = client.get("/api/live/005930/bars?interval=1s").json()
+        assert len(secs) == 1 and secs[0]["time"] == bars[0]["time"] + 5
+        assert client.get("/api/live/005930/bars?interval=5m").status_code == 400
+        assert client.get("/api/live/sparks").json() == {"005930": [100.0]}
 
 
 def test_a_browser_leaving_is_noticed_without_waiting_for_a_trade() -> None:
