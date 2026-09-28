@@ -237,12 +237,6 @@
   width: 100%;
 }
 
-.live__note {
-  margin-top: var(--s-3);
-  font-size: var(--t-micro);
-  color: var(--c-text-tertiary);
-}
-
 @media (max-width: 760px) {
   .live__body {
     grid-template-columns: 1fr;

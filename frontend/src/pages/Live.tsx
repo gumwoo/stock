@@ -450,15 +450,6 @@ export function Live() {
             </div>
           )}
           <div ref={container} className="live__chart" hidden={empty} />
-          {!empty && (
-            <p className="live__note">
-              들어오는 체결로 그린 화면용 차트이고 기록이 아닙니다. 분석에 쓰는 기록은 장 마감 뒤 받는
-              1분봉입니다. 1분봉과 1초봉은 서버가 목록 전 종목을 계속 쌓고 있어, 종목을 바꿔도 이어서 보입니다.
-              {interval === "1s"
-                ? " 1초봉은 서버가 실시간 연결을 시작한 때부터 있고, 서버와 증권사 연결이 끊겼던 동안은 비어 있습니다(과거 1초봉은 받을 곳이 없습니다)."
-                : ""}
-            </p>
-          )}
         </div>
       </div>
     </section>
