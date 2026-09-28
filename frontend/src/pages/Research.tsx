@@ -34,7 +34,6 @@ interface Study {
   section: string;
   limits: string;
   commit: string;
-  cli: string;
   rows: StudyRow[];
 }
 
@@ -118,9 +117,7 @@ function StudyBody({ study }: { study: Study }) {
       <p className="rs__limits">
         <span className="rs__label">한계</span> {study.limits}
       </p>
-      <p className="rs__source">
-        자세한 내용: {study.doc} · 질문을 고정한 커밋 {study.commit} · <code>{study.cli}</code>
-      </p>
+      <p className="rs__source">질문을 고정한 커밋 {study.commit}</p>
     </>
   );
 }
@@ -140,7 +137,7 @@ export function Research() {
           v2는 비용 전으로 쟀고, 비용 전에도 9시에 사서 10시 전에 파는 평균이 0보다 크다는 근거(F1)를 찾지
           못했습니다. 성립한 질문(공시 v1의 D3·D4, v2의 F3)은 갭의 방향이나 움직임의 크기에 관한 것이지 사서
           남는지에 관한 것이 아닙니다. 모두 미리 고정한 규칙으로 판정했고 기간은 3개월~2년입니다. 다만 표본
-          규칙 일부(예: 공시 ±30% 제외, 밤사이 9/22·휴장일 처리, 트럼프 NaN 처리)는 결과를 본 뒤 정했고, 공시 v2·v3와 NXT는 이미 본 표본을 다른
+          규칙 일부(예: 공시 ±30% 제외, 밤사이 9/22·휴장일 처리, 트럼프 빈 가격 처리)는 결과를 본 뒤 정했고, 공시 v2·v3와 NXT는 이미 본 표본을 다른
           방식으로 다시 본 것이라 독립된 확인이 아닙니다(각 문서에 적었습니다).
         </p>
       </header>
@@ -181,7 +178,6 @@ export function Research() {
             아닙니다.
           </li>
         </ul>
-        <p className="rs__source">자세한 내용: README.md "무엇을 쟀고, 아직 모르는가", docs/design/intraday.md</p>
       </Card>
 
       <Card
@@ -195,14 +191,13 @@ export function Research() {
           "주가가 오르면 재무 점수가 떨어져 매수를 멈춘다"는 가설은 반증됐습니다(상승폭과 재무 점수 변화의 순위 상관
           +0.050). 이 숫자를 보고 가중치를 바꾸지는 않았습니다. 홀드아웃을 떼어 둔 바로 그 종목들이기 때문입니다.
         </p>
-        <p className="rs__source">자세한 내용: docs/studies/backtest.md</p>
         <button className="rs__runs" aria-expanded={showRuns} onClick={() => setShowRuns(!showRuns)}>
           {showRuns ? "저장된 실행 접기" : "저장된 실행 보기"}
         </button>
         {showRuns && (
           <>
             <p className="rs__meta">
-              아래 실행은 DB에 저장된 런이라 위 요약(v0.2)과 규칙 버전이 다를 수 있습니다.
+              아래 실행은 저장해 둔 기록이라 위 요약(v0.2)과 규칙 버전이 다를 수 있습니다.
             </p>
             <div className="rs__backtest">
               <Backtest />

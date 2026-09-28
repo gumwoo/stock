@@ -1,3 +1,12 @@
+import {
+  bpsLabel,
+  executionModelLabel,
+  fullDatetime,
+  intervalLabel,
+  paramsLabel,
+  strategyKindLabel,
+  strategyVersionLabel,
+} from "../api/format";
 import type { BacktestRunDetail } from "../api/types";
 import "./RunInfoDrawer.css";
 
@@ -33,9 +42,9 @@ export function RunInfoDrawer({
       </div>
 
       <Section title="전략">
-        <Row label="종류" value={run.strategy_kind} />
-        <Row label="버전" value={run.strategy_version} />
-        <Row label="파라미터" value={describeParams(run.strategy_params)} mono />
+        <Row label="종류" value={strategyKindLabel(run.strategy_kind)} />
+        <Row label="버전" value={strategyVersionLabel(run.strategy_version)} />
+        <Row label="파라미터" value={paramsLabel(run.strategy_params)} />
         <Row label="지문" value={run.strategy_fingerprint} mono />
         {run.fitter_version ? (
           <Row label="학습기" value={run.fitter_version} />
@@ -54,9 +63,9 @@ export function RunInfoDrawer({
       </Section>
 
       <Section title="데이터">
-        <Row label="스냅샷" value={run.data_snapshot_at} mono />
+        <Row label="스냅샷" value={fullDatetime(run.data_snapshot_at)} />
         <Row label="기간" value={`${run.period_start} — ${run.period_end}`} />
-        <Row label="봉 간격" value={run.interval} />
+        <Row label="봉 간격" value={intervalLabel(run.interval)} />
         <Row
           label="빠진 거래일"
           value={
@@ -76,10 +85,10 @@ export function RunInfoDrawer({
       </Section>
 
       <Section title="체결 가정">
-        <Row label="모델" value={run.execution_model} />
+        <Row label="모델" value={executionModelLabel(run.execution_model)} />
         <Row label="시작 자금" value={run.starting_cash.toLocaleString("ko-KR")} />
-        <Row label="수수료" value={`${run.commission_bps} bp`} />
-        <Row label="슬리피지" value={`${run.slippage_bps} bp`} />
+        <Row label="수수료" value={bpsLabel(run.commission_bps)} />
+        <Row label="슬리피지" value={bpsLabel(run.slippage_bps)} />
         <Row label="최소 수수료" value={String(run.min_commission)} />
       </Section>
 
@@ -107,11 +116,8 @@ export function RunInfoDrawer({
 
       <Section title="재현">
         <p className="runinfo__note">
-          구간마다 저장된 전략을 이 스냅샷 그대로 다시 돌리고, 다르게 나온 숫자를 모두 보고합니다.
+          이 실행은 저장된 설정과 이 스냅샷 그대로 다시 돌려 숫자를 대조할 수 있습니다(실행 #{run.id}).
         </p>
-        <code className="runinfo__cmd">
-          python -m app.cli backtest reproduce --run {run.id}
-        </code>
       </Section>
     </div>
   );
@@ -145,11 +151,3 @@ function Row({
   );
 }
 
-function describeParams(params: Record<string, unknown>): string {
-  const entries = Object.entries(params);
-  if (entries.length === 0) return "없음";
-  return entries
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, value]) => `${key}=${String(value)}`)
-    .join("  ");
-}

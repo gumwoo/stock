@@ -17,7 +17,6 @@
     "section": "v3: 언제 사고 언제 파느냐 (진입·청산 규칙)",
     "limits": "3개월, 사건 공시 종목만. 1분봉 안의 순서와 체결 수량을 모른다. R3의 폭은 기준 매매의 분포를 본 뒤 골랐다.",
     "commit": "df51a1d",
-    "cli": "python -m app.cli entry-rules --minutes <분봉 파일>",
     "rows": [
       {
         "key": "E1",
@@ -73,7 +72,7 @@
     "question": "사건 공시 종목을 9시 시가에 사서 10시 전에 팔면 평균이 0보다 큰가.",
     "conclusion": "이 3개월에서는 사건 공시 종목을 9시에 사서 10시 전에 파는 매매의 평균이 비용 전에도 0보다 크다는 근거를 찾지 못했다. 공시가 강할수록 첫 1시간에 위아래로 크게 흔들렸다(F3).",
     "badge": "근거 못 찾음",
-    "note": "성립 1/4 · F3는 움직임의 크기(MFE − MAE)",
+    "note": "성립 1/4 · F3는 위아래로 움직인 폭",
     "columns": [
       "연구 42일 평균",
       "t",
@@ -84,7 +83,6 @@
     "section": "v2: 9시 시가에 사서 10시 전에 파는 시간대",
     "limits": "3개월, 지수 대비 아님, 비용 전. 09:00 봉이 없는(가장 크게 반응한) 종목일이 빠졌다.",
     "commit": "1517359",
-    "cli": "python -m app.cli disclosure-first-hour --data <공시 파일> --minutes <분봉 파일> --first 2026-06-30 --last 2026-09-23",
     "rows": [
       {
         "key": "F1",
@@ -106,7 +104,7 @@
       },
       {
         "key": "F3",
-        "question": "강한 공시가 약한 공시보다 첫 1시간에 크게 움직인다(MFE − MAE)",
+        "question": "강한 공시가 약한 공시보다 첫 1시간에 크게 움직인다(위아래로 움직인 폭)",
         "value": "+1.33%p",
         "t": "6.63",
         "halves": "+1.75 / +0.91",
@@ -142,7 +140,6 @@
     "section": "공시 이벤트 분석 (2026-09-26)",
     "limits": "3개월, 한 가지 시장 분위기, 비용 전, 지금 상장된 종목만(생존 편향).",
     "commit": "bb33416",
-    "cli": "python -m app.cli disclosure-study --data <공시 파일> --first 2026-06-30 --last 2026-09-23",
     "rows": [
       {
         "key": "D1",
@@ -200,7 +197,6 @@
     "section": "밤사이 미국 업종 연구 (2026-09-26)",
     "limits": "관측 26일·1년, 한 가지 시장 분위기. O1은 t 1.97로 문턱 바로 아래이고, 전날 종가가 빠진 9/22를 60분봉으로 메우면 성립한다(탐색, 판정 아님).",
     "commit": "f2de757",
-    "cli": "python -m app.cli overnight-study --dir data/overnight_study --kis-minutes <KIS 첫 1시간 파일> [--fetch]",
     "rows": [
       {
         "key": "O1",
@@ -258,7 +254,6 @@
     "section": "NXT 8시 진입으로 다시 잰 것",
     "limits": "비교군이 신호 쪽보다 작고 한산하다. 5분 거래량가중 가격은 실제 체결가의 근사다. 홀드아웃 종목이 가장 많이 빠졌다.",
     "commit": "09706e3",
-    "cli": "python -m app.cli overnight-nxt --dir data/overnight_study --kis-minutes <KIS 첫 1시간 파일> [--fetch] [--counts-only]",
     "rows": [
       {
         "key": "N1",
@@ -316,7 +311,6 @@
     "section": "트럼프 관세 글 연구 (2026-09-26)",
     "limits": "T2의 −0.49%는 대부분 비용(−0.30%)과 평소 첫 1시간(−0.14%)이고, 관세 글 날에 더해진 몫은 −0.06%p 안팎이다. 관세 글을 단어 하나로 골랐고 위협·완화를 나누지 않았다. 이미지로만 올라온 발표는 잡히지 않는다. 결과가 0이어도 관세 위협이 영향이 없다는 뜻은 아니다.",
     "commit": "6d66674",
-    "cli": "python -m app.cli trump-study --dir data/overnight_study --archive data/trump/truth_archive.csv",
     "rows": [
       {
         "key": "T1",

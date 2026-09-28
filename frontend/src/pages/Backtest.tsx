@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { strategyKindLabel, strategyVersionLabel } from "../api/format";
 import type { BacktestRunDetail, BacktestRunSummary, BacktestWindow } from "../api/types";
 import { RunInfoDrawer } from "../components/RunInfoDrawer";
 import "./Backtest.css";
@@ -54,7 +55,6 @@ export function Backtest() {
     return (
       <div className="bt__empty">
         <p>저장된 백테스트가 아직 없습니다.</p>
-        <code className="bt__cmd">python -m app.cli backtest run --symbol 005930</code>
       </div>
     );
   }
@@ -71,7 +71,7 @@ export function Backtest() {
             onClick={() => void open(run.id)}
           >
             <span className="bt__runName">
-              {run.name} · {run.strategy_version}
+              {run.name} · {strategyVersionLabel(run.strategy_version)}
             </span>
             <span className="bt__runMeta">
               #{run.id} · {run.period_start} — {run.period_end}
@@ -113,7 +113,7 @@ function RunDetail({
             {run.name} <span className="bt__symbol">{run.symbol}</span>
           </h2>
           <p className="bt__sub">
-            {run.strategy_kind}@{run.strategy_version} ·{" "}
+            {strategyKindLabel(run.strategy_kind)} {strategyVersionLabel(run.strategy_version)} ·{" "}
             {run.period_start} — {run.period_end} · 학습 {run.train_sessions} /
             평가 {run.eval_sessions}세션 · {run.anchored ? "시작 고정" : "이동 창"}
           </p>

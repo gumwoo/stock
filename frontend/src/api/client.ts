@@ -11,20 +11,30 @@ import type {
   ThemeNewsDay,
 } from "./types";
 
-async function get<T>(path: string): Promise<T> {
-  const res = await fetch(path, { headers: { Accept: "application/json" } });
-  if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText} on ${path}`);
+// 오류 문구는 화면에 그대로 나오므로 한국어로 만든다. 경로는 개발자 도구의 네트워크 탭에서 볼 수 있다.
+async function request<T>(path: string, init: RequestInit): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(path, init);
+  } catch {
+    throw new Error("서버에 연결하지 못했습니다");
   }
-  return (await res.json()) as T;
+  if (!res.ok) {
+    throw new Error(`서버 응답 오류 (${res.status})`);
+  }
+  try {
+    return (await res.json()) as T;
+  } catch {
+    throw new Error("서버 응답을 읽지 못했습니다");
+  }
 }
 
-async function post<T>(path: string): Promise<T> {
-  const res = await fetch(path, { method: "POST" });
-  if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText} on ${path}`);
-  }
-  return (await res.json()) as T;
+function get<T>(path: string): Promise<T> {
+  return request<T>(path, { headers: { Accept: "application/json" } });
+}
+
+function post<T>(path: string): Promise<T> {
+  return request<T>(path, { method: "POST" });
 }
 
 export const api = {

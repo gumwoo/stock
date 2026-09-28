@@ -8,6 +8,7 @@ import {
   percent,
   policyLabel,
   signed,
+  strategyVersionLabel,
 } from "../api/format";
 import "./SignalFactorDrawer.css";
 
@@ -211,7 +212,7 @@ export function SignalFactorDrawer({ signal, onClose }: Props) {
         </section>
 
         <footer className="drawer__foot">
-          전략 {signal.strategy_version} · 결측 처리: {policyLabel(signal.policy)}
+          전략 {strategyVersionLabel(signal.strategy_version)} · 결측 처리: {policyLabel(signal.policy)}
         </footer>
       </aside>
     </div>
