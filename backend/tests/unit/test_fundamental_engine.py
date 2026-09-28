@@ -23,11 +23,15 @@ import pytest
 
 from app.core.types import Availability, DataProvenance, Engine, Freshness
 from app.engines.fundamental import (
+    ABSENCE_LABEL,
+    CONCEPT_LABEL,
+    REQUIRED_MONTHS,
     FundamentalEngine,
     FundamentalParams,
     FundamentalSnapshot,
     ReportedValue,
 )
+from app.repositories.fundamental_repo import FactOutcome
 
 ASOF = datetime(2026, 9, 18, 20, 0, tzinfo=UTC)
 PERIOD = date(2025, 9, 27)
@@ -230,8 +234,8 @@ class TestAbsenceIsCarried:
         assert factor.score == 0.0
         assert reasons == ()
 
-    def test_the_reason_comes_from_the_lookup_not_the_engine(self) -> None:
-        """So the wording a user sees is the one the repository produced."""
+    def test_the_reason_follows_the_lookup_outcome_in_korean(self) -> None:
+        """조회 결과(outcome)가 이유를 정한다. 화면에는 영어 원문 대신 한국어 문장이 간다."""
         snap = FundamentalSnapshot(
             instrument_id=1,
             asof=ASOF,
@@ -249,8 +253,31 @@ class TestAbsenceIsCarried:
 
         factor, _ = run(snap)
 
-        assert factor.availability_reason is not None
-        assert "holds no data at all" in factor.availability_reason
+        assert factor.availability_reason == "재무: 받아 둔 재무 자료가 없음 (매출)"
+
+    def test_the_first_missing_item_leads_and_the_rest_are_counted(self) -> None:
+        not_filed = ReportedValue(
+            concept="NetIncomeLoss", value=None, outcome="NOT_YET_FILED", explanation="x"
+        )
+        other = ReportedValue(
+            concept="Assets", value=None, outcome="NO_OBSERVATION_IN_SOURCE", explanation="y"
+        )
+        snap = FundamentalSnapshot(
+            instrument_id=1,
+            asof=ASOF,
+            price=100.0,
+            currency="KRW",
+            values={"NetIncomeLoss": not_filed, "Assets": other},
+        )
+        factor, _ = run(snap)
+        assert factor.availability_reason == (
+            "재무: 이 시점까지 해당 기간 보고서가 제출되지 않음 (순이익 외 1개)"
+        )
+
+    def test_every_concept_and_absence_has_a_korean_label(self) -> None:
+        # 새 개념이나 새 결과가 생기면 영어가 화면에 새지 않게 여기서 걸린다.
+        assert set(REQUIRED_MONTHS) <= set(CONCEPT_LABEL)
+        assert {o.value for o in FactOutcome if o is not FactOutcome.FOUND} == set(ABSENCE_LABEL)
 
     def test_a_partial_snapshot_still_scores_what_it_can(self) -> None:
         """Missing one input must not discard the others."""

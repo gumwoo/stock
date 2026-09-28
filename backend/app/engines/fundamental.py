@@ -63,6 +63,29 @@ REQUIRED_MONTHS: Mapping[str, int | None] = {
 }
 
 
+# 화면에 보일 항목 이름. 키는 조회에 쓰는 개념 이름 그대로다.
+CONCEPT_LABEL: Mapping[str, str] = {
+    "Revenues": "매출",
+    "RevenueFromContractWithCustomerExcludingAssessedTax": "매출",
+    "NetIncomeLoss": "순이익",
+    "OperatingIncomeLoss": "영업이익",
+    "EarningsPerShareBasic": "주당순이익",
+    "EarningsPerShareDiluted": "희석 주당순이익",
+    "Assets": "자산",
+    "Liabilities": "부채",
+    "StockholdersEquity": "자본",
+    "CashAndCashEquivalentsAtCarryingValue": "현금성자산",
+}
+
+# 값이 없는 이유(`FactOutcome`)별 화면 문장. 세 경우를 한 문장으로 뭉치지 않는다 — 앞의 둘은 발표가 없었다는
+# 뜻이 아니고, 마지막만 그렇다. 영어 원문(`ReportedValue.explanation`)은 감사용으로 그대로 둔다.
+ABSENCE_LABEL: Mapping[str, str] = {
+    "SOURCE_COVERAGE_UNAVAILABLE": "받아 둔 재무 자료가 없음",
+    "NO_OBSERVATION_IN_SOURCE": "받은 재무 자료에 이 값이 없음",
+    "NOT_YET_FILED": "이 시점까지 해당 기간 보고서가 제출되지 않음",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ReportedValue:
     """One resolved financial figure, or a reasoned absence.
@@ -784,8 +807,10 @@ class FundamentalEngine:
             # One representative explanation, plus a count. Listing ten
             # near-identical sentences helps nobody.
             lead = absent[0]
-            extra = f" (외 {len(absent) - 1}개)" if len(absent) > 1 else ""
-            reason = f"{lead.concept}: {lead.explanation}{extra}"
+            label = CONCEPT_LABEL.get(lead.concept, lead.concept)
+            extra = f" 외 {len(absent) - 1}개" if len(absent) > 1 else ""
+            why = ABSENCE_LABEL.get(lead.outcome, lead.explanation)
+            reason = f"재무: {why} ({label}{extra})"
         elif snapshot.price is None:
             reason = "가치 비율을 계산할 주가가 없습니다"
         else:
