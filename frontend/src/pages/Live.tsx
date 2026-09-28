@@ -236,7 +236,8 @@ export function Live({
   const latest = days?.[0] ?? (liveHasList ? (state?.day ?? null) : null);
   useEffect(() => {
     if (focus) {
-      userPicked.current = true;
+      // 최신 날짜의 종목으로 들어왔으면 고정하지 않는다(다음 날 목록이 생기면 따라간다). 지난 날짜면 고정한다.
+      userPicked.current = focus.day !== latest;
       setDay(focus.day);
       setSelected(focus.code);
       onFocusUsed();
@@ -254,7 +255,8 @@ export function Live({
     if (archiveDay.current === day) return;
     archiveDay.current = day;
     let alive = true;
-    setArchive(null);
+    // 실패한 날을 다시 시도하는 동안은 실패 문구를 그대로 두어 깜박이지 않게 한다.
+    setArchive((a) => (a?.day === day && a.failed ? a : null));
     archiveFailed.current = false;
     api
       .listMembers(day)
