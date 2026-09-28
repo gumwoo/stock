@@ -34,8 +34,9 @@ export function App() {
   // 신호 카드의 "일봉"으로 연 종목(신호 탭 안에서만).
   const [detailRow, setDetailRow] = useState<ListSignalRow | null>(null);
   const [tab, setTab] = useState<"signals" | "live" | "research">("signals");
-  // 신호 탭에서 고른 목록 날짜. 탭을 오가도 유지한다.
+  // 신호 탭에서 고른 목록 날짜. 사용자가 직접 고른 날은 탭을 오가도 유지하고, 아니면 최신을 따라간다.
   const [listDay, setListDay] = useState<string | null>(null);
+  const [listDayPicked, setListDayPicked] = useState(false);
   // 신호 카드의 "차트·뉴스"로 오늘의 관찰에 넘기는 종목. 오늘의 관찰이 한 번 쓰고 비운다.
   const [focus, setFocus] = useState<{ day: string; code: string } | null>(null);
 
@@ -89,7 +90,10 @@ export function App() {
         ) : detailRow === null ? (
           <Dashboard
             day={listDay}
-            onDay={setListDay}
+            onDay={(d, byUser) => {
+              if (byUser) setListDayPicked(true);
+              if (byUser || !listDayPicked) setListDay(d);
+            }}
             onOpenChart={(day, code) => {
               setFocus({ day, code });
               setTab("live");

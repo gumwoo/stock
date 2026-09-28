@@ -64,7 +64,7 @@ function sourceLabel(source: string | null): string {
  * 1초봉을 1분봉으로 합친다(장 마감 뒤 REST 1분봉을 받기 전의 당일용). 순수하다.
  * 봉 시각은 UTC epoch 초이고 한국 시각의 분 경계도 60의 배수라(오프셋 32,400초) 60으로 내리면 그 분의 시작이다.
  */
-export function secondsToMinutes(bars: LiveBar[]): LiveBar[] {
+function secondsToMinutes(bars: LiveBar[]): LiveBar[] {
   const out: LiveBar[] = [];
   for (const b of bars) {
     const t = Math.floor(b.time / 60) * 60;
@@ -99,9 +99,19 @@ export function Live({
   onFocusUsed: () => void;
 }) {
   const [state, setState] = useState<LiveState | null>(null);
+  // /api/live를 받지 못했으면(서버 오류) 실시간 없이 기록으로 본다.
+  const [liveFailed, setLiveFailed] = useState(false);
   const [days, setDays] = useState<string[] | null>(null);
+  // 사용자가 날짜를 직접 골랐는가. 고르지 않았으면 새 목록(다음 날 08:50)이 생길 때 최신으로 따라간다.
+  const userPicked = useRef(false);
   const [day, setDay] = useState<string | null>(null);
-  const [archive, setArchive] = useState<{ day: string; members: LiveMember[] } | null>(null);
+  const [archive, setArchive] = useState<{ day: string; members: LiveMember[]; failed?: boolean } | null>(
+    null,
+  );
+  const archiveDay = useRef<string | null>(null);
+  // 그날 목록을 못 받았으면 60초마다 다시 시도한다(날짜 폴링이 올린다).
+  const archiveFailed = useRef(false);
+  const [archiveRetry, setArchiveRetry] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   // 브라우저 소켓이 다시 붙을 때마다 올린다. 끊긴 동안 놓친 체결을 서버 봉으로 다시 받게 한다.
   const [reconnects, setReconnects] = useState(0);
@@ -116,7 +126,11 @@ export function Live({
 
   const liveHasList = !!state && !!state.day && state.members.length > 0;
   const mode: Mode =
-    state === null || day === null ? "pending" : day === state.day && liveHasList ? "live" : "archive";
+    day === null || (state === null && !liveFailed)
+      ? "pending"
+      : state !== null && day === state.day && liveHasList
+        ? "live"
+        : "archive";
 
   const selectedRef = useRef<string | null>(null);
   const intervalRef = useRef<Interval>("1m");
@@ -151,9 +165,14 @@ export function Live({
         .then((s) => {
           if (!alive) return;
           setState(s);
+          setLiveFailed(false);
           setError(null);
         })
-        .catch((e: Error) => alive && setError(e.message));
+        .catch((e: Error) => {
+          if (!alive) return;
+          setLiveFailed(true);
+          setError(e.message);
+        });
     const loadSparks = () =>
       api
         .liveSparks()
@@ -189,7 +208,12 @@ export function Live({
         });
       api
         .listDays()
-        .then((d) => alive && setDays(d))
+        .then((d) => {
+          if (!alive) return;
+          setDays(d);
+          // 목록을 못 받았던 날이면 다시 받게 한다.
+          if (archiveFailed.current) setArchiveRetry((n) => n + 1);
+        })
         .catch(() => alive && setDays((prev) => prev ?? []));
     };
     load();
@@ -207,34 +231,45 @@ export function Live({
     return out;
   }, [days, liveHasList, state?.day]);
 
-  // 기본 날짜는 목록 날짜의 최신(없으면 실시간 날). 신호 탭에서 넘어온 날짜가 있으면 그날.
+  // 기본 날짜는 목록 날짜의 최신(없으면 실시간 날). 사용자가 직접 고르지 않았으면 새 목록이 생길 때(다음 날
+  // 08:50) 최신으로 따라간다. 신호 탭에서 넘어온 날짜가 있으면 그날(사용자가 고른 것으로 친다).
+  const latest = days?.[0] ?? (liveHasList ? (state?.day ?? null) : null);
   useEffect(() => {
     if (focus) {
+      userPicked.current = true;
       setDay(focus.day);
       setSelected(focus.code);
       onFocusUsed();
       return;
     }
-    if (day === null && days !== null) {
-      const first = days[0] ?? (liveHasList ? (state?.day ?? null) : null);
-      if (first) setDay(first);
+    if (!userPicked.current && latest && latest !== day) {
+      setDay(latest);
+      setSelected(null);
     }
-  }, [focus, onFocusUsed, day, days, liveHasList, state?.day]);
+  }, [focus, onFocusUsed, day, latest]);
 
   // 기록 모드의 목록. 날짜가 바뀌면 다시 받는다.
   useEffect(() => {
     if (mode !== "archive" || day === null) return;
-    if (archive?.day === day) return;
+    if (archiveDay.current === day) return;
+    archiveDay.current = day;
     let alive = true;
     setArchive(null);
+    archiveFailed.current = false;
     api
       .listMembers(day)
       .then((r) => alive && setArchive({ day, members: r.members }))
-      .catch(() => alive && setArchive({ day, members: [] }));
+      .catch(() => {
+        if (!alive) return;
+        archiveDay.current = null; // 다음 시도 때 다시 받게
+        archiveFailed.current = true;
+        setArchive({ day, members: [], failed: true });
+      });
     return () => {
       alive = false;
+      if (archiveDay.current === day) archiveDay.current = null;
     };
-  }, [mode, day, archive?.day]);
+  }, [mode, day, archiveRetry]);
 
   const shown: LiveMember[] =
     mode === "live" ? (state?.members ?? []) : mode === "archive" && archive?.day === day ? archive.members : [];
@@ -435,6 +470,7 @@ export function Live({
               aria-label="목록 날짜"
               value={day ?? ""}
               onChange={(e) => {
+                userPicked.current = true;
                 setDay(e.target.value);
                 setSelected(null);
               }}
@@ -522,7 +558,9 @@ export function Live({
 
         <div className="live__main">
           {empty &&
-            (!noLists && mode === "archive" && latestListDay !== null ? (
+            (!noLists && mode === "archive" && archive?.failed ? (
+              <p className="live__empty">그날 목록을 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.</p>
+            ) : !noLists && mode === "archive" && latestListDay !== null ? (
               <p className="live__empty">
                 {day ? dayLabel(day) : "그날"}은 조건에 맞는 종목이 없었습니다.
               </p>

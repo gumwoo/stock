@@ -62,18 +62,6 @@ export interface Candle {
   volume: number;
 }
 
-export interface Instrument {
-  instrument_id: number;
-  symbol: string;
-  name: string;
-  market: string;
-  sector: string | null;
-  currency: string;
-  last_close: number | null;
-  last_close_date: string | null;
-  change_pct: number | null;
-}
-
 export interface DisabledCapability {
   name: string;
   set_to_enable: string[];

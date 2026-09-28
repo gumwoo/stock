@@ -52,7 +52,7 @@ function SignalCard({
           <h3 className="card__name">{row.name}</h3>
           <p className="card__symbol">
             {row.code ?? "코드 없음"} · 목록 {row.rank}위
-            {row.regime ? ` · ${REGIME_LABEL[row.regime] ?? row.regime}` : ""}
+            {row.regime ? ` · 국면 ${REGIME_LABEL[row.regime] ?? row.regime}` : ""}
           </p>
         </div>
         {row.action ? (
@@ -138,7 +138,8 @@ export function Dashboard({
   onOpenDaily,
 }: {
   day: string | null;
-  onDay: (day: string) => void;
+  /** byUser: 사용자가 직접 골랐는가(고르지 않았으면 탭에 들어올 때 최신 날짜로 따라간다). */
+  onDay: (day: string, byUser: boolean) => void;
   onOpenChart: (day: string, code: string) => void;
   onOpenDaily: (row: ListSignalRow) => void;
 }) {
@@ -152,7 +153,7 @@ export function Dashboard({
       .listDays()
       .then((d) => {
         setDays(d);
-        if (day === null && d.length > 0) onDay(d[0]);
+        if (d.length > 0) onDay(d[0], false);
       })
       .catch((e: Error) => setError(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -204,7 +205,7 @@ export function Dashboard({
               className="signals__day"
               aria-label="목록 날짜"
               value={day ?? ""}
-              onChange={(e) => onDay(e.target.value)}
+              onChange={(e) => onDay(e.target.value, true)}
             >
               {days.map((d) => (
                 <option key={d} value={d}>

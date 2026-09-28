@@ -219,11 +219,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.live__warn {
-  margin-top: var(--s-2);
-  font-size: var(--t-micro);
-  color: var(--c-warn);
-}
 
 .live__stale {
   border: 1px solid var(--c-border);
@@ -274,11 +269,6 @@
 }
 
 
-.live__abstain {
-  margin: 6px 0 0;
-  font-size: var(--t-micro);
-  color: var(--c-text-tertiary);
-}
 
 .spark {
   display: block;
