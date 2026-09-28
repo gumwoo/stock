@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import backtests, health, lists, live, preopen, signals, themes
+from app.api import backtests, health, lists, live, overnight, preopen, signals, themes
 from app.config import get_settings
 from app.core import logging as logging_setup
 
@@ -89,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(themes.router)
     app.include_router(preopen.router)
     app.include_router(lists.router)
+    app.include_router(overnight.router)
     return app
 
 

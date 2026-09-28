@@ -7,6 +7,7 @@ import type {
   ListSignalRow,
   LiveBar,
   LiveState,
+  OvernightSemis,
   PreopenToday,
   ThemeNewsDay,
 } from "./types";
@@ -50,4 +51,5 @@ export const api = {
   liveSparks: () => get<Record<string, number[]>>("/api/live/sparks"),
   themes: () => get<ThemeNewsDay>("/api/themes/today"),
   preopenToday: () => get<PreopenToday>("/api/preopen/today"),
+  overnightSemis: (day: string) => get<OvernightSemis>(`/api/overnight/us-semis?day=${day}`),
 };

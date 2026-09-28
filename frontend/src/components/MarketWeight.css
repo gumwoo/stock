@@ -1,0 +1,36 @@
+/* 지수 대형주 표시: 판단 태그와 헷갈리지 않게 중립색 테두리만. */
+.mw__badge {
+  display: inline-block;
+  font-size: var(--t-micro);
+  color: var(--c-text-secondary);
+  border: 1px dashed var(--c-border-strong);
+  border-radius: 4px;
+  padding: 0 var(--s-2);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.mw__note {
+  margin: 0;
+  font-size: var(--t-micro);
+  color: var(--c-text-secondary);
+}
+
+.mw__overnight {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-small, var(--t-micro));
+  color: var(--c-text-secondary);
+}
+
+.mw__overnightHead {
+  color: var(--c-text-tertiary);
+  margin-right: var(--s-2);
+}
+
+.mw__up {
+  color: var(--c-up);
+}
+
+.mw__down {
+  color: var(--c-down);
+}

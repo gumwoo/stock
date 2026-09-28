@@ -22,7 +22,8 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -33,7 +34,7 @@ from app.collectors.dart_fundamental import MAX_YEARS_BACK, DartFundamentalColle
 from app.collectors.kis_market_cap import KisMarketCapCollector
 from app.collectors.kis_minute import KisIndexMinuteCollector, KisMinuteCollector
 from app.collectors.krx_master import KrxMasterCollector
-from app.collectors.market_index import INDEXES, MarketIndexCollector
+from app.collectors.market_index import INDEXES, MarketIndexCollector, UsSemiReferenceCollector
 from app.collectors.naver_datalab import NaverDataLabCollector
 from app.collectors.naver_news import RULE_VERSION as NEWS_RULE_VERSION
 from app.collectors.naver_news import NaverNewsCollector, rejudge_hits
@@ -55,6 +56,7 @@ from app.services import (
     discovery_service,
     forward_service,
     intraday_service,
+    list_review_service,
     llm_service,
     overlay_service,
     preopen_service,
@@ -79,6 +81,7 @@ COLLECTORS = {
     "index_minute": KisIndexMinuteCollector,
     "theme": ThemeNewsCollector,
     "kis_market_cap": KisMarketCapCollector,
+    "us_semis": UsSemiReferenceCollector,
 }
 
 # How far back a collection reaches, in one vocabulary for every source that
@@ -948,6 +951,60 @@ def cmd_entry_rules(minutes: str) -> int:
     return 0
 
 
+def cmd_list_review(day: date) -> int:
+    """목록 하루의 사후 기술 통계. 지수 대형주는 따로. 읽기만 한다."""
+    with session_scope() as session:
+        rev = list_review_service.review(session, day)
+    if rev is None:
+        print(f"no V2 morning list on {day}")
+        return 1
+    print(f"{day} morning list: descriptive stats only, NOT a verdict on the pre-registered H1-H7")
+    print(
+        "(groups without heavyweights differ from the pre-registered sample; max rise is hindsight)"
+    )
+    if rev.rank_day is not None:
+        note = " (after the fact: no earlier ranking)" if rev.after_the_fact else ""
+        print(f"heavyweights: >= 5% of their market's cap, ranking of {rev.rank_day}{note}")
+    else:
+        print("heavyweights: no list name is in a usable market-cap ranking, none separated")
+    if rev.missing:
+        print(f"no complete minute summary: {', '.join(rev.missing)}")
+
+    def pct(v: float | None) -> str:
+        return "     -" if v is None else f"{v:+6.2f}"
+
+    print(
+        f"\n{'group':<34}{'n':>4}{'1st hour':>9}{'open->close':>12}{'vs index':>9}{'up':>5}{'max rise med':>13}"
+    )
+    for g in list_review_service.groups(rev.rows):
+        print(
+            f"{g.label:<34}{g.n:>4}{pct(g.first_hour):>9}{pct(g.open_close):>12}{pct(g.vs_market):>9}"
+            f"{g.up_close:>3}/{g.n:<2}{pct(g.mfe_median):>11}"
+        )
+    heavy = [r for r in rev.rows if r.heavyweight]
+    if heavy:
+        print(
+            "\nheavyweights (compare with the index and last night's US semis, not the index excess):"
+        )
+        for r in heavy:
+            print(
+                f"  {r.name:<12} weight {r.weight_pct:5.2f}%  open->close {pct(r.open_close)}  "
+                f"index {pct(r.market)}"
+            )
+    if rev.semis and any(x["change_pct"] is not None for x in rev.semis["refs"]):
+
+        def ref(x: dict[str, Any]) -> str:
+            if x["split_suspect"]:
+                return f"{x['code']} hidden (split?)"
+            if x["change_pct"] is None:
+                return f"{x['code']} -"
+            return f"{x['code']} {x['change_pct']:+.2f}%"
+
+        refs = ", ".join(ref(x) for x in rev.semis["refs"])
+        print(f"overnight US semis before {rev.semis['day']} open: {refs}")
+    return 0
+
+
 def cmd_intraday(analyze: bool) -> int:
     """What the minute bars say: the usual day, and the morning lists against their questions."""
     with session_scope() as session:
@@ -1233,6 +1290,12 @@ def main(argv: list[str] | None = None) -> int:
     intra = sub.add_parser("intraday", help="what the minute bars say; reads only unless --analyze")
     intra.add_argument("--analyze", action="store_true", help="summarise days not yet summarised")
 
+    lr = sub.add_parser(
+        "list-review",
+        help="one morning list's after-the-fact stats, index heavyweights apart; reads only",
+    )
+    lr.add_argument("--day", required=True, help="list day, YYYY-MM-DD")
+
     sub.add_parser("forward", help="the forward-test record so far; reads only")
     sub.add_parser(
         "review", help="the forward record against its review gates and decision rule; reads only"
@@ -1304,6 +1367,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_preopen(args.action, args.asof)
         case "intraday":
             return cmd_intraday(args.analyze)
+        case "list-review":
+            return cmd_list_review(date.fromisoformat(args.day))
         case "forward":
             return cmd_forward()
         case "forward-run":

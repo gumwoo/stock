@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Annotated, Any
 
@@ -19,10 +20,13 @@ from app.realtime.gateway import load_members, member_dict
 from app.repositories import instrument_repo, minute_repo
 from app.scoring.policy import THRESHOLDS
 from app.scoring.watchlist import STRATEGY_VERSION_V2
+from app.services import heavyweight_service
+from app.services.heavyweight_service import Weight
 
 router = APIRouter(prefix="/api/lists", tags=["lists"])
 SessionDep = Annotated[Session, Depends(get_db)]
 DAYS_SHOWN = 60
+logger = logging.getLogger(__name__)
 
 
 def _snapshot(session: Session, day: date) -> WatchlistSnapshot:
@@ -49,7 +53,9 @@ def list_days(session: SessionDep) -> list[str]:
     return [d.isoformat() for d in rows]
 
 
-def signal_row(m: WatchlistMember, name: str, code: str | None) -> dict[str, Any]:
+def signal_row(
+    m: WatchlistMember, name: str, code: str | None, weight: Weight | None = None
+) -> dict[str, Any]:
     """목록 행 하나를 신호 탭의 행으로. 순수하다.
 
     `weight_total`(참여한 요인 가중치 합)과 `thresholds`(판단 기준)를 함께 준다. 판단은 합계를 가중치 합으로 나눈 값을
@@ -83,6 +89,27 @@ def signal_row(m: WatchlistMember, name: str, code: str | None) -> dict[str, Any
         "detail": m.score_detail,
         "weight_total": weight_total,
         "thresholds": {"buy_interest": THRESHOLDS.buy_interest, "caution": THRESHOLDS.caution},
+        # 지수 대형주(표시 전용): 목록 날 이전 순위표 기준. 목록 선정·채점에는 쓰지 않는다.
+        **weight_fields(weight),
+    }
+
+
+def _weights(session: Session, day: date, ids: list[int]) -> dict[int, Weight]:
+    """대형주 표시는 보조다. 읽다 실패하면 표시 없이 신호를 그대로 보인다(세이브포인트로 트랜잭션을 지킨다)."""
+    try:
+        with session.begin_nested():
+            return heavyweight_service.weights_for(session, day, ids)
+    except Exception:
+        logger.exception("list signals: market weights failed; no heavyweight labels")
+        return {}
+
+
+def weight_fields(weight: Weight | None) -> dict[str, Any]:
+    return {
+        "market_weight_pct": weight.weight_pct if weight else None,
+        "market_listing": weight.listing if weight else None,
+        "heavyweight": bool(weight and weight.heavyweight),
+        "sector": weight.sector if weight else None,
     }
 
 
@@ -96,8 +123,14 @@ def list_signals(day: date, session: SessionDep) -> list[dict[str, Any]]:
         .where(WatchlistMember.snapshot_id == snap.id)
         .order_by(WatchlistMember.rank)
     ).all()
+    weights = _weights(session, day, [m.instrument_id for m, _ in rows])
     return [
-        signal_row(m, name, instrument_repo.current_symbol(session, m.instrument_id))
+        signal_row(
+            m,
+            name,
+            instrument_repo.current_symbol(session, m.instrument_id),
+            weights.get(m.instrument_id),
+        )
         for m, name in rows
     ]
 

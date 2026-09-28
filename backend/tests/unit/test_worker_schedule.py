@@ -124,6 +124,31 @@ def test_the_daily_loop_runs_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
         "evaluate_signals",
         "snapshot_candidates",
         "evaluate_candidates",
+        # 밤사이 미국 반도체(화면 참고용)는 맨 끝: 실패해도 앞의 평가를 막지 않는다.
+        "UsSemiReferenceCollector",
+    ]
+
+
+def test_the_us_morning_job_also_fetches_the_semiconductor_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+
+    import app.worker as worker
+
+    steps: list[str] = []
+
+    @contextmanager
+    def fake_scope():  # type: ignore[no-untyped-def]
+        yield None
+
+    monkeypatch.setattr(worker, "session_scope", fake_scope)
+    monkeypatch.setattr(worker, "run_collector", lambda c, _s: steps.append(type(c).__name__))
+    worker._us_prices()
+    assert steps == [
+        "YFinanceHistoryCollector",
+        "MarketIndexCollector",
+        "UsSemiReferenceCollector",
     ]
 
 

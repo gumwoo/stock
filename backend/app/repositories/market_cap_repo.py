@@ -64,13 +64,15 @@ def latest_day(
     return session.execute(q).scalar_one_or_none()
 
 
-def weights_on(session: Session, day: date, instrument_ids: Collection[int]) -> dict[int, float]:
-    """그 세션 순위표에서 종목별 비중(순위표에 없는 종목은 빠진다 — 상위 30 밖이면 대형주가 아니다)."""
+def weights_on(
+    session: Session, day: date, instrument_ids: Collection[int]
+) -> dict[int, tuple[float, Listing]]:
+    """그 세션 순위표에서 종목별 (비중, 시장). 순위표에 없는 종목은 빠진다 — 상위 30 밖이면 대형주가 아니다."""
     if not instrument_ids:
         return {}
     rows = session.execute(
-        select(MarketCapRank.instrument_id, MarketCapRank.weight_pct).where(
+        select(MarketCapRank.instrument_id, MarketCapRank.weight_pct, MarketCapRank.listing).where(
             MarketCapRank.session_date == day, MarketCapRank.instrument_id.in_(list(instrument_ids))
         )
     ).all()
-    return {i: w for i, w in rows if i is not None}
+    return {i: (w, listing) for i, w, listing in rows if i is not None}

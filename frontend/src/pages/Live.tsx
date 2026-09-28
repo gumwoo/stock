@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { LIST_REASON_LABEL, eventTypeLabel, shortSeoulTime } from "../api/format";
 import { MorningStatus, dayLabel } from "../components/MorningStatus";
 import { Sparkline } from "../components/Sparkline";
+import { HeavyweightBadge, OvernightSemis, heavyweightNote } from "../components/MarketWeight";
 import { ThemeNews } from "../components/ThemeNews";
 import type { LiveBar, LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
 import { useLiveChart } from "../hooks/useLiveChart";
@@ -511,6 +512,7 @@ export function Live({
         </div>
       )}
 
+      <OvernightSemis day={day} />
       <ThemeNews listIds={listIds} listDay={day} onlyDay={day} />
 
       <div className="live__body">
@@ -544,6 +546,7 @@ export function Live({
                       </span>
                     </span>
                     <span className="live__tags">
+                      <HeavyweightBadge row={m} />
                       {reasons.slice(0, 3).map((r) => (
                         <span key={r} className="live__tag">
                           {r}
@@ -590,12 +593,14 @@ export function Live({
                 </span>
               </div>
               <div className="live__reasons">
+                <HeavyweightBadge row={member} />
                 {member.reasons.map((r) => (
                   <span key={r} className="live__reason">
                     {LIST_REASON_LABEL[r] ?? r}
                   </span>
                 ))}
               </div>
+              {heavyweightNote(member) && <p className="mw__note">{heavyweightNote(member)}</p>}
               <dl className="live__facts">
                 <div>
                   <dt>뉴스 점수</dt>

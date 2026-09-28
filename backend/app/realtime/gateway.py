@@ -54,7 +54,7 @@ from app.realtime.kis_feed import LiveBook, parse_control, parse_trades, subscri
 from app.repositories import instrument_repo, minute_repo
 from app.repositories.minute_repo import SecondBarRow
 from app.scoring.watchlist import MAX_MEMBERS, STRATEGY_VERSION_V2
-from app.services import overlay_service
+from app.services import heavyweight_service, overlay_service
 
 logger = logging.getLogger(__name__)
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -94,6 +94,11 @@ class LiveMember:
     prefetch_status: str | None = None
     abstained_reason: str | None = None
     events: tuple[LiveEvent, ...] = ()
+    # 지수 대형주(표시 전용). 목록 날 이전 시가총액 순위표 기준.
+    market_weight_pct: float | None = None
+    market_listing: str | None = None
+    heavyweight: bool = False
+    sector: str | None = None
 
 
 # 게이트웨이가 알리는 목록 출처. 화면이 이 코드로 문구를 고른다.
@@ -158,7 +163,7 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
             return TRACKED_FALLBACK, found
     # 링크는 멤버를 읽은 세션을 닫은 뒤 따로 찾는다. 링크 조회의 SQL 오류가 같은 트랜잭션을 망가뜨려 목록·구독까지
     # 막지 않게 하려는 것이다(화면 보조 기능이 시세 피드를 멈추면 안 된다).
-    return source, attach_links(found, asof)
+    return source, attach_weights(attach_links(found, asof), day)
 
 
 def to_events(raw: object) -> tuple[LiveEvent, ...]:
@@ -224,6 +229,35 @@ def attach_links(
             replace(e, url=links.get((m.instrument_id, i))) for i, e in enumerate(m.events)
         )
         out.append(replace(m, events=events))
+    return out
+
+
+def attach_weights(members: list[LiveMember], day: date) -> list[LiveMember]:
+    """지수 대형주 표시를 붙인다. 새 세션에서 읽고, 실패하면 표시 없이 그대로(목록·구독을 막지 않게)."""
+    if not members:
+        return members
+    try:
+        with session_scope() as session:
+            weights = heavyweight_service.weights_for(
+                session, day, [m.instrument_id for m in members]
+            )
+    except Exception:  # 표시는 보조다
+        logger.exception("live feed: market weights failed; no heavyweight labels")
+        return members
+    out = []
+    for m in members:
+        w = weights.get(m.instrument_id)
+        out.append(
+            m
+            if w is None
+            else replace(
+                m,
+                market_weight_pct=w.weight_pct,
+                market_listing=w.listing,
+                heavyweight=w.heavyweight,
+                sector=w.sector,
+            )
+        )
     return out
 
 
@@ -354,6 +388,10 @@ def member_dict(m: LiveMember, last: dict[str, Any] | None = None) -> dict[str, 
             }
             for e in m.events
         ],
+        "market_weight_pct": m.market_weight_pct,
+        "market_listing": m.market_listing,
+        "heavyweight": m.heavyweight,
+        "sector": m.sector,
         "last": last,
     }
 

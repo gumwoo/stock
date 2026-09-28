@@ -4,7 +4,7 @@
 부르는 순간의 값을 준다. 그래서 세션 날짜는 "마지막으로 끝난 한국 세션"으로 정하고, 장중에는 받지 않는다(장중 값을 그날
 종가로 적지 않게). 평일 16:10에 받는다 — 15:40 지수 분봉 뒤, 16:20 분봉 수집 앞이라 KIS 한 번에 하나 잠금이 비어 있다.
 
-2026-09-28 장 마감 뒤 첫 호출: 거래소 30행, 연속 조회 없음. 삼성전자 25.69%, SK하이닉스 20.91%.
+2026-09-28 장 마감 뒤 첫 호출: 거래소 30행, 연속 조회 없음. 삼성전자 25.69%(장 마감 확정 뒤 다시 받은 값은 25.67%), SK하이닉스 20.91%.
 """
 
 from __future__ import annotations
@@ -134,6 +134,7 @@ class KisMarketCapCollector(BaseCollector):
         client = self._client or KisClient()
         read = saved = 0
         warnings: list[str] = []
+        pending: list[market_cap_repo.MarketCapRow] = []
 
         def resolve(code: str) -> int | None:
             inst = instrument_repo.resolve_symbol(session, code, Market.KR, asof=day)
@@ -167,12 +168,17 @@ class KisMarketCapCollector(BaseCollector):
                     rows, warn = to_rows(output, listing, day, resolve)
                     read += len(output)
                     warnings += warn
-                    saved += market_cap_repo.save_ranks(session, rows)
+                    pending += rows
                     if cont not in ("M", "F"):
                         break
         finally:
             if self._client is None:
                 client.close()
+        # 두 시장을 다 받은 뒤에만 쓴다. KOSDAQ에서 실패했는데 KOSPI만 있는 날이 남으면 그날 KOSDAQ 종목은
+        # 이전 표로 돌아가지 못하고 표시 없이 나온다.
+        # 한 문장 upsert라 같은 키가 두 번 들어가면 안 된다(페이지가 겹치면 뒤의 행을 쓴다).
+        unique = {(r.listing, r.code): r for r in pending}
+        saved = market_cap_repo.save_ranks(session, list(unique.values()))
         session.commit()
         detail = f"{day}: {saved} rows"
         if warnings:

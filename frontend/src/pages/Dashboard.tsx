@@ -9,6 +9,7 @@ import {
 } from "../api/format";
 import { fundamentalMissing, judgedScore, listRowToSignal, maxScore, shrunk } from "../api/listSignal";
 import type { ListSignalRow, Signal } from "../api/types";
+import { HeavyweightBadge, OvernightSemis, heavyweightNote } from "../components/MarketWeight";
 import { dayLabel } from "../components/MorningStatus";
 import { SignalFactorDrawer } from "../components/SignalFactorDrawer";
 import "./Dashboard.css";
@@ -50,7 +51,9 @@ function SignalCard({
     <article className="card">
       <header className="card__head">
         <div>
-          <h3 className="card__name">{row.name}</h3>
+          <h3 className="card__name">
+            {row.name} <HeavyweightBadge row={row} />
+          </h3>
           <p className="card__symbol">
             {row.code ?? "코드 없음"} · 목록 {row.rank}위
             {row.regime ? ` · 국면 ${REGIME_LABEL[row.regime] ?? row.regime}` : ""}
@@ -98,6 +101,7 @@ function SignalCard({
         ))}
       </p>
 
+      {heavyweightNote(row) && <p className="mw__note">{heavyweightNote(row)}</p>}
       {warning && <p className="card__warn">{warning}</p>}
       {judged === null && row.abstained_reason && <p className="card__note">{row.abstained_reason}</p>}
 
@@ -221,6 +225,8 @@ export function Dashboard({
           그날 아침 목록 종목을 08:40에 전 거래일 종가·재무로 채점한 것입니다. 매매 권유가 아닙니다.
           {backfilled ? ` 이 날의 점수 상세는 ${datetime(backfilled)}에 같은 입력으로 다시 계산해 채웠습니다.` : ""}
         </p>
+
+        <OvernightSemis day={day} />
 
         {error && <p className="signals__error">{error}</p>}
 

@@ -32,7 +32,7 @@ from app.collectors.kis_minute import (
     KisIndexMinuteCollector,
     KisMinuteCollector,
 )
-from app.collectors.market_index import MarketIndexCollector
+from app.collectors.market_index import MarketIndexCollector, UsSemiReferenceCollector
 from app.collectors.naver_news import NaverNewsCollector
 from app.collectors.quota import QuotaGuard
 from app.collectors.sec_edgar import SecEdgarCollector
@@ -193,6 +193,9 @@ def _daily_loop() -> None:
             forward_service.snapshot_candidates(session),
             forward_service.evaluate_candidates(session),
         )
+        # 밤사이 미국 반도체(화면 참고용). 맨 끝에 둔다: 여기서 난 오류가 앞 단계를 막지 않게. 07:00 미국 작업을
+        # 놓친 날은 여기서 뒤늦게 채운다(그날 아침 화면에는 늦다. 토요일을 놓치면 월요일 아침 줄은 비어 있다).
+        run_collector(UsSemiReferenceCollector(), session)
 
 
 def _kr_market_cap() -> None:
@@ -258,6 +261,7 @@ def _us_prices() -> None:
     with session_scope() as session:
         run_collector(YFinanceHistoryCollector(period="1mo"), session)
         run_collector(MarketIndexCollector(period="3mo"), session)
+        run_collector(UsSemiReferenceCollector(), session)
 
 
 def _sec_weekly() -> None:

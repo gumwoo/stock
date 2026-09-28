@@ -86,3 +86,26 @@ class TestFinishedSession:
 def test_heavyweight_threshold() -> None:
     assert is_heavyweight(25.69) and is_heavyweight(5.0)
     assert not is_heavyweight(2.34) and not is_heavyweight(None)
+
+
+class _Client:
+    """KOSPI는 성공, KOSDAQ은 거절."""
+
+    def get(self, _path: str, **kw: object) -> tuple[dict[str, object], str]:
+        params = kw["params"]
+        assert isinstance(params, dict)
+        if params["fid_input_iscd"] == "0001":
+            return {"rt_cd": "0", "output": [SAMSUNG, HYNIX]}, ""
+        return {"rt_cd": "1", "msg1": "busy"}, ""
+
+
+def test_one_market_failing_saves_neither(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.collectors import kis_market_cap as mod
+
+    saved: list[object] = []
+    monkeypatch.setattr(mod.market_cap_repo, "save_ranks", lambda _s, rows: saved.append(rows) or 0)
+    monkeypatch.setattr(mod.instrument_repo, "resolve_symbol", lambda *a, **k: None)
+    collector = mod.KisMarketCapCollector(client=_Client())  # type: ignore[arg-type]
+    with pytest.raises(UpstreamUnavailableError):
+        collector._collect(None, DAY)  # type: ignore[arg-type]
+    assert saved == []  # KOSPI만 있는 날을 남기지 않는다

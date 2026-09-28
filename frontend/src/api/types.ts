@@ -141,7 +141,7 @@ export interface BacktestRunDetail extends BacktestRunSummary {
 }
 
 /** One name on today's morning list, as the live feed holds it. */
-export interface LiveMember {
+export interface LiveMember extends MarketWeightFields {
   instrument_id: number;
   code: string;
   name: string;
@@ -259,8 +259,32 @@ export interface ScoreDetail {
   backfilled_at?: string;
 }
 
+/** 지수 대형주 표시(참고용). 목록 날 이전 시가총액 순위표 기준. 옛 서버는 보내지 않는다. */
+export interface MarketWeightFields {
+  /** 그 시장(KOSPI/KOSDAQ) 시가총액에서 차지하는 비중(%). 순위표 30위 밖이거나 표가 없으면 null. */
+  market_weight_pct?: number | null;
+  market_listing?: string | null;
+  /** 비중 5% 이상. */
+  heavyweight?: boolean;
+  sector?: string | null;
+}
+
+/** 한국 거래일 개장 전에 끝난 미국 반도체 등락(`/api/overnight/us-semis`). */
+export interface OvernightSemis {
+  day: string;
+  refs: {
+    code: string;
+    label: string;
+    /** % 단위. 새 미국 세션이 없거나 분할 의심이면 null. */
+    change_pct: number | null;
+    split_suspect: boolean;
+    /** 합친 미국 세션 날짜(뉴욕). 한국 연휴 뒤에는 여럿. */
+    us_sessions: string[];
+  }[];
+}
+
 /** 그날 아침 목록 한 종목의 신호(`/api/lists/{day}/signals`). */
-export interface ListSignalRow {
+export interface ListSignalRow extends MarketWeightFields {
   member_id: number;
   instrument_id: number;
   code: string | null;
