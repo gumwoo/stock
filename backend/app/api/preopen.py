@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Annotated, Any
@@ -41,6 +42,140 @@ SLOW_AFTER = timedelta(minutes=60)
 NOTE_CHARS = 120
 NOTED = frozenset({preopen_service.FAILED, preopen_service.SKIPPED, preopen_service.PARTIAL})
 
+# --- 단계 메모를 화면용 한국어로 -------------------------------------------------------------------
+# 풀의 `stages[..].detail`은 로그·진단용 영어 원문이고 DB에 그대로 남는다. 화면에는 알려진 형식만 한국어로 풀고,
+# 모르는 형식(수집기 자유 문구, 예외 메시지)은 원문을 늘어놓지 않고 어디에 남아 있는지만 말한다.
+# 형식은 preopen_service.py·llm_service.py·collectors/theme_news.py의 f-string을 그대로 옮긴 것이다.
+
+UNKNOWN_NOTE = "원문은 아침 단계 기록(DB)에 남아 있습니다"
+ERROR_NOTE = "예상하지 못한 오류로 멈춤 · " + UNKNOWN_NOTE
+RUN_STATUS = {"SUCCESS": "완료", "PARTIAL": "일부만", "SKIPPED": "건너뜀", "FAILED": "실패"}
+PREFETCH_KEY = {
+    preopen_service.FETCHED: "새로 받음",
+    preopen_service.FRESH: "이미 최신",
+    preopen_service.NO_DATA: "데이터 없음",
+    preopen_service.SKIPPED_CAP: "하루 상한으로 못 받음",
+    preopen_service.FAILED: "실패",
+}
+SKIP_REASON = {
+    "pool was not frozen": "후보 풀이 확정되지 않아 건너뜀",
+    "the list is already frozen": "목록이 이미 확정되어 건너뜀",
+    "past the open": "장이 이미 열려 건너뜀",
+}
+
+
+def _kst(hour: str, minute: str) -> str:
+    """원문의 "HH:MMZ"(UTC)를 서울 시각으로. 자정을 넘으면 24로 나눈 나머지."""
+    return f"{(int(hour) + 9) % 24:02d}:{minute}"
+
+
+def _stopped(reason: str) -> str:
+    """LLM 배치가 멈춘 이유(llm_service.py의 report.stopped). 공급자 문구 같은 뒷부분은 버린다."""
+    if reason.startswith("another LLM run is in progress"):
+        return "다른 해석 작업이 돌고 있어 멈춤"
+    usage = re.match(r"(five-hour|seven-day) usage at (\d+)%", reason)
+    if usage:
+        window = "5시간" if usage[1] == "five-hour" else "7일"
+        if "not starting" in reason:
+            return f"{window} 사용량 {usage[2]}%라 시작하지 않음"
+        return f"{window} 사용량 {usage[2]}%에서 멈춤"
+    if reason.startswith("call quota:"):
+        return "호출 한도로 멈춤"
+    if reason.startswith("subscription refused:"):
+        return "구독에서 거절되어 멈춤"
+    if reason.startswith("unavailable:"):
+        return "LLM을 쓸 수 없어 멈춤"
+    return "도중에 멈춤"
+
+
+def _llm(detail: str) -> str | None:
+    if detail == "LLM_SCHEDULE_ENABLED is off":
+        return "예약 해석이 꺼져 있음"
+    m = re.fullmatch(r"(\d+) of (\d+) items(?:; stopped: (.*))?", detail, re.DOTALL)
+    if not m:
+        return None
+    # items는 판정·해석을 합쳐 모델에 보낸 기사 수다(형식이 틀린 답이 온 묶음 포함). "해석한 건수"가 아니다.
+    text = f"모델에 보낸 기사 {m[1]}/{m[2]}건"
+    return f"{text} · {_stopped(m[3])}" if m[3] is not None else text
+
+
+def _prefetch(detail: str) -> str | None:
+    parts = []
+    for item in detail.split(", "):
+        m = re.fullmatch(r"(\w+) (\d+)", item)
+        if not m or m[1] not in PREFETCH_KEY:
+            return None  # 모르는 키가 하나라도 있으면 원문 대신 폴백
+        parts.append(f"{PREFETCH_KEY[m[1]]} {m[2]}")
+    return " · ".join(parts)
+
+
+def _theme(detail: str) -> str | None:
+    m = re.fullmatch(
+        r"(\d+)/(\d+) themes since \d{4}-\d{2}-\d{2} \d{2}:\d{2}Z for \d{4}-\d{2}-\d{2}"
+        r"(; capped at 1,000: .*?)?(; stopped: .*)?",
+        detail,
+        re.DOTALL,
+    )
+    if not m:
+        return None
+    text = f"테마 {m[2]}개 중 {m[1]}개 수집"
+    if m[3]:
+        text += " · 일부 테마는 1,000건 상한에 걸림"
+    if m[4]:
+        text += " · 도중에 멈춤"
+    return text
+
+
+def _for_stage(name: str, detail: str) -> str | None:
+    s = preopen_service
+    if name == s.SWEEP:
+        m = re.fullmatch(r"news (\w+), disclosures (\w+)", detail)
+        if m and m[1] in RUN_STATUS and m[2] in RUN_STATUS:
+            return f"뉴스 {RUN_STATUS[m[1]]}, 공시 {RUN_STATUS[m[2]]}"
+    elif name == s.POOL:
+        m = re.fullmatch(r"already frozen at (\d{2}):(\d{2})Z", detail)
+        if m:
+            return f"이미 {_kst(m[1], m[2])}에 확정됨"
+    elif name == s.SEARCH_TRENDS:
+        m = re.fullmatch(r"(\d+) names, (\w+)", detail)
+        if m and m[2] in RUN_STATUS:
+            return f"{m[1]}종목, {RUN_STATUS[m[2]]}"
+    elif name == s.PREFETCH:
+        return _prefetch(detail)
+    elif name in (s.LLM, s.SUPPLEMENT_LLM):
+        return _llm(detail)
+    elif name in (s.THEME_NEWS, s.THEME_REFRESH):
+        return RUN_STATUS.get(detail) or _theme(detail)
+    elif name == s.SUPPLEMENT:
+        m = re.fullmatch(r"(\d+) names since (\d{2}):(\d{2})Z, (\w+)", detail)
+        if m and m[4] in RUN_STATUS:
+            return f"{m[1]}종목, {_kst(m[2], m[3])} 이후 기사, {RUN_STATUS[m[4]]}"
+    elif name == s.SCORE:
+        m = re.fullmatch(r"(\d+) scored, (\d+) without bars, (\d+) failed; (\d+) peers", detail)
+        if m:
+            return f"점수 {m[1]} · 일봉 없음 {m[2]} · 실패 {m[3]} · 비교군 {m[4]}"
+    return None
+
+
+def korean_note(name: str, detail: str) -> str:
+    """단계 `name`의 원문 메모를 화면용 한국어로. 알려진 형식이 아니면 폴백 문구."""
+    known = _for_stage(name, detail)
+    if known is not None:
+        return known
+    if detail in SKIP_REASON:
+        return SKIP_REASON[detail]
+    m = re.fullmatch(r"prerequisite not finished by (\d{2}:\d{2}): (.+)", detail)
+    if m:
+        labels = {n: label for n, label, _ in STAGES}
+        names = m[2].split(", ")
+        if all(n in labels for n in names):
+            return f"{m[1]}까지 앞 단계가 끝나지 않아 건너뜀: {', '.join(labels[n] for n in names)}"
+        return UNKNOWN_NOTE
+    # _step이 남기는 예외 "{Type}: {msg}". 예외 문구는 화면에 늘어놓지 않는다(원문은 DB에 있다).
+    if re.match(r"[A-Z][A-Za-z0-9_.]*: ", detail):
+        return ERROR_NOTE
+    return UNKNOWN_NOTE
+
 
 def _parse(value: object) -> datetime | None:
     """단계 기록의 시각. 읽을 수 없거나 시간대가 없으면 None(화면 하나 때문에 API 전체가 실패하지 않게)."""
@@ -60,7 +195,8 @@ def stage_rows(
     07:00 LLM처럼 정상적으로 오래 걸리는 단계도 있어 "멈춤"이라고 단정하지 않는다.
     장이 열렸는데 목록 단계 기록이 없으면 "MISSING". 목록은 다 만든 뒤에만 기록되고 개장 뒤에는 만들지 않으므로,
     08:50이 아니라 개장 시각부터 실패가 확정된다(그 전에는 만드는 중일 수 있다).
-    note는 실패·건너뜀·일부일 때만 앞 120자(예외 문자열을 화면에 그대로 늘어놓지 않는다).
+    note는 실패·건너뜀·일부일 때만, `korean_note`로 한국어로 바꾼 앞 120자(예외 문자열을 화면에 그대로
+    늘어놓지 않는다).
     """
     rows = []
     for name, label, at in STAGES:
@@ -68,7 +204,7 @@ def stage_rows(
         status = entry.get("status") if isinstance(entry, dict) else None
         note = None
         if isinstance(entry, dict) and status in NOTED and entry.get("detail"):
-            note = str(entry["detail"])[:NOTE_CHARS]
+            note = korean_note(name, str(entry["detail"]))[:NOTE_CHARS]
         if status == preopen_service.RUNNING and isinstance(entry, dict):
             started = _parse(entry.get("started_at"))
             if started is not None and now - started > SLOW_AFTER:

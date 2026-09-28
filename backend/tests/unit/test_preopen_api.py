@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 
-from app.api.preopen import NOTE_CHARS, STAGES, stage_rows
+import pytest
+
+from app.api.preopen import ERROR_NOTE, STAGES, UNKNOWN_NOTE, korean_note, stage_rows
 
 NOW = datetime(2026, 9, 28, 0, 0, tzinfo=UTC)  # 09:00 KST
 
@@ -50,9 +53,10 @@ def test_notes_only_for_failures_and_are_cut() -> None:
         opened=False,
     )
     by = {r["name"]: r["note"] for r in rows}
-    assert by["prefetch"] is not None and len(by["prefetch"]) == NOTE_CHARS
+    # 모르는 형식의 긴 원문은 늘어놓지 않고 폴백 문구로, 알려진 형식은 한국어로.
+    assert by["prefetch"] == UNKNOWN_NOTE
     assert by["sweep"] is None
-    assert by["score"] == "prerequisite not finished by 08:45: llm"
+    assert by["score"] == "08:45까지 앞 단계가 끝나지 않아 건너뜀: 기사 판정·해석(LLM)"
 
 
 def test_unreadable_or_naive_start_times_do_not_break_the_rows() -> None:
@@ -77,3 +81,69 @@ def test_the_list_time_matches_the_worker_cron() -> None:
     assert time(8, 50) == preopen_service.LIST_AT
     fields = {f.name: str(f) for f in worker._KR_WATCHLIST.fields}
     assert (fields["hour"], fields["minute"]) == ("8", "50")
+
+
+@pytest.mark.parametrize(
+    ("name", "detail", "expected"),
+    [
+        # 2026-09-28 실제 기록
+        ("sweep", "news PARTIAL, disclosures SUCCESS", "뉴스 일부만, 공시 완료"),
+        (
+            "prefetch",
+            "FETCHED 19, FRESH 15, NO_DATA 1, SKIPPED_CAP 49",
+            "새로 받음 19 · 이미 최신 15 · 데이터 없음 1 · 하루 상한으로 못 받음 49",
+        ),
+        ("prefetch", "FAILED 2, FETCHED 3", "실패 2 · 새로 받음 3"),
+        ("pool", "already frozen at 22:08Z", "이미 07:08에 확정됨"),
+        ("search_trends", "84 names, PARTIAL", "84종목, 일부만"),
+        ("llm", "37 of 100 items", "모델에 보낸 기사 37/100건"),
+        (
+            "llm",
+            "37 of 100 items; stopped: five-hour usage at 91%",
+            "모델에 보낸 기사 37/100건 · 5시간 사용량 91%에서 멈춤",
+        ),
+        (
+            "supplement_llm",
+            "0 of 30 items; stopped: seven-day usage at 88% by the last call; not starting",
+            "모델에 보낸 기사 0/30건 · 7일 사용량 88%라 시작하지 않음",
+        ),
+        (
+            "llm",
+            "5 of 100 items; stopped: unavailable: provider said\nsomething long",
+            "모델에 보낸 기사 5/100건 · LLM을 쓸 수 없어 멈춤",
+        ),
+        ("llm", "2 of 100 items; stopped: something new", "모델에 보낸 기사 2/100건 · 도중에 멈춤"),
+        ("llm", "LLM_SCHEDULE_ENABLED is off", "예약 해석이 꺼져 있음"),
+        ("theme_news", "FAILED", "실패"),
+        (
+            "theme_refresh",
+            "12/14 themes since 2026-09-25 06:30Z for 2026-09-28; capped at 1,000: ai; stopped: 429",
+            "테마 14개 중 12개 수집 · 일부 테마는 1,000건 상한에 걸림 · 도중에 멈춤",
+        ),
+        ("supplement", "84 names since 22:00Z, PARTIAL", "84종목, 07:00 이후 기사, 일부만"),
+        (
+            "score",
+            "71 scored, 13 without bars, 0 failed; 18 peers",
+            "점수 71 · 일봉 없음 13 · 실패 0 · 비교군 18",
+        ),
+        ("prefetch", "pool was not frozen", "후보 풀이 확정되지 않아 건너뜀"),
+        ("score", "past the open", "장이 이미 열려 건너뜀"),
+        ("supplement", "the list is already frozen", "목록이 이미 확정되어 건너뜀"),
+        (
+            "score",
+            "prerequisite not finished by 08:45: pool, prefetch",
+            "08:45까지 앞 단계가 끝나지 않아 건너뜀: 후보 풀 확정, 가격·재무 사전 수집",
+        ),
+        ("score", "prerequisite not finished by 08:45: somewhere", UNKNOWN_NOTE),
+        ("pool", "OperationalError: connection refused", ERROR_NOTE),
+        ("prefetch", "FETCHED 3, WHATEVER 1", UNKNOWN_NOTE),
+        ("theme_news", "a free-form collector message", UNKNOWN_NOTE),
+        # 다른 단계의 형식이 엉뚱한 단계에서 풀리지 않는다(단계별로 좁힌다).
+        ("sweep", "71 scored, 13 without bars, 0 failed; 18 peers", UNKNOWN_NOTE),
+    ],
+)
+def test_stage_notes_are_korean_or_a_fallback(name: str, detail: str, expected: str) -> None:
+    got = korean_note(name, detail)
+    assert got == expected
+    # 화면에 영어가 새지 않는다(LLM만 약어로 둔다).
+    assert not [w for w in re.findall(r"[A-Za-z]+", got) if w not in ("LLM", "DB")]
