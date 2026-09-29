@@ -3,7 +3,13 @@ import { api } from "../api/client";
 import { LIST_REASON_LABEL, eventTypeLabel, shortSeoulTime } from "../api/format";
 import { MorningStatus, dayLabel } from "../components/MorningStatus";
 import { Sparkline } from "../components/Sparkline";
-import { HeavyweightBadge, OvernightSemis, heavyweightNote } from "../components/MarketWeight";
+import {
+  HeavyweightBadge,
+  OvernightSemis,
+  PrevLimitBadge,
+  heavyweightNote,
+  prevLimitNote,
+} from "../components/MarketWeight";
 import { ThemeNews } from "../components/ThemeNews";
 import type { LiveBar, LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
 import { useLiveChart } from "../hooks/useLiveChart";
@@ -547,6 +553,7 @@ export function Live({
                     </span>
                     <span className="live__tags">
                       <HeavyweightBadge row={m} />
+                      <PrevLimitBadge row={m} />
                       {reasons.slice(0, 3).map((r) => (
                         <span key={r} className="live__tag">
                           {r}
@@ -594,6 +601,7 @@ export function Live({
               </div>
               <div className="live__reasons">
                 <HeavyweightBadge row={member} />
+                <PrevLimitBadge row={member} />
                 {member.reasons.map((r) => (
                   <span key={r} className="live__reason">
                     {LIST_REASON_LABEL[r] ?? r}
@@ -601,6 +609,7 @@ export function Live({
                 ))}
               </div>
               {heavyweightNote(member) && <p className="mw__note">{heavyweightNote(member)}</p>}
+              {prevLimitNote(member) && <p className="mw__note">{prevLimitNote(member)}</p>}
               <dl className="live__facts">
                 <div>
                   <dt>뉴스 점수</dt>

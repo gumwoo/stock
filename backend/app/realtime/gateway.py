@@ -54,7 +54,7 @@ from app.realtime.kis_feed import LiveBook, parse_control, parse_trades, subscri
 from app.repositories import instrument_repo, minute_repo
 from app.repositories.minute_repo import SecondBarRow
 from app.scoring.watchlist import MAX_MEMBERS, STRATEGY_VERSION_V2
-from app.services import heavyweight_service, overlay_service
+from app.services import heavyweight_service, overlay_service, price_limit_service
 
 logger = logging.getLogger(__name__)
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -99,6 +99,9 @@ class LiveMember:
     market_listing: str | None = None
     heavyweight: bool = False
     sector: str | None = None
+    # 전일 상한가(표시 전용): LOCKED / CLOSED / TOUCHED. 전 거래일 등락(%)과 함께.
+    prev_limit: str | None = None
+    prev_change_pct: float | None = None
 
 
 # 게이트웨이가 알리는 목록 출처. 화면이 이 코드로 문구를 고른다.
@@ -123,6 +126,7 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
             .limit(1)
         ).scalar_one_or_none()
         asof = snap.asof if snap is not None else None
+        created = snap.created_at if snap is not None else None
         if snap is not None:
             rows = session.execute(
                 select(WatchlistMember, Instrument.name)
@@ -163,7 +167,7 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
             return TRACKED_FALLBACK, found
     # 링크는 멤버를 읽은 세션을 닫은 뒤 따로 찾는다. 링크 조회의 SQL 오류가 같은 트랜잭션을 망가뜨려 목록·구독까지
     # 막지 않게 하려는 것이다(화면 보조 기능이 시세 피드를 멈추면 안 된다).
-    return source, attach_weights(attach_links(found, asof), day)
+    return source, attach_limits(attach_weights(attach_links(found, asof), day), day, created)
 
 
 def to_events(raw: object) -> tuple[LiveEvent, ...]:
@@ -258,6 +262,27 @@ def attach_weights(members: list[LiveMember], day: date) -> list[LiveMember]:
                 sector=w.sector,
             )
         )
+    return out
+
+
+def attach_limits(
+    members: list[LiveMember], day: date, created: datetime | None
+) -> list[LiveMember]:
+    """전일 상한가 표시를 붙인다. 목록을 얼린 시각까지 들어온 봉만 읽고, 실패하면 표시 없이 그대로."""
+    if not members or created is None:
+        return members
+    try:
+        with session_scope() as session:
+            limits = price_limit_service.prev_limits(
+                session, day, [m.instrument_id for m in members], ingested_before=created
+            )
+    except Exception:  # 표시는 보조다
+        logger.exception("live feed: prior-day limits failed; no limit labels")
+        return members
+    out = []
+    for m in members:
+        x = limits.get(m.instrument_id)
+        out.append(m if x is None else replace(m, prev_limit=x.state, prev_change_pct=x.change_pct))
     return out
 
 
@@ -392,6 +417,8 @@ def member_dict(m: LiveMember, last: dict[str, Any] | None = None) -> dict[str, 
         "market_listing": m.market_listing,
         "heavyweight": m.heavyweight,
         "sector": m.sector,
+        "prev_limit": m.prev_limit,
+        "prev_change_pct": m.prev_change_pct,
         "last": last,
     }
 

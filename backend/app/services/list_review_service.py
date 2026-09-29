@@ -13,18 +13,20 @@ import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Instrument
-from app.models.intraday import IntradaySummary
+from app.models.intraday import IntradaySummary, MinuteBar
 from app.models.watchlist import WatchlistMember, WatchlistSnapshot
 from app.repositories import minute_repo
+from app.scoring import price_limit
 from app.scoring.intraday import ANALYSIS_VERSION
 from app.scoring.watchlist import SELECTION_VERSION_V2, STRATEGY_VERSION_V2
-from app.services import heavyweight_service, overnight_service
+from app.services import heavyweight_service, overnight_service, price_limit_service
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +40,10 @@ class Row:
     open_close: float
     market: float | None
     mfe: float | None
+    prev_limit: str | None = None
+    """전 거래일 상한가 상태(LOCKED / CLOSED / TOUCHED)."""
+    gap: float | None = None
+    """그날 첫 1분봉 시가 / 전 거래일 종가 - 1(%)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +76,13 @@ def stats(label: str, rows: Sequence[Row]) -> Stats:
     )
 
 
+LIMIT_LABELS = {
+    price_limit.LOCKED: "전일 점상한가",
+    price_limit.CLOSED: "전일 상한가 마감(장중 거래)",
+    price_limit.TOUCHED: "전일 상한가 터치",
+}
+
+
 def groups(rows: Sequence[Row]) -> list[Stats]:
     """대형주를 뺀 묶음(전체·판단별·이유별)과 대형주 묶음. 순수."""
     rest = [r for r in rows if not r.heavyweight]
@@ -80,6 +93,10 @@ def groups(rows: Sequence[Row]) -> list[Stats]:
             out.append(stats(f"판단 {action}", g))
     for reason in sorted({x for r in rest for x in r.reasons}):
         out.append(stats(f"이유 {reason}", [r for r in rest if reason in r.reasons]))
+    for code, label in LIMIT_LABELS.items():
+        g = [r for r in rest if r.prev_limit == code]
+        if g:
+            out.append(stats(label, g))
     heavy = [r for r in rows if r.heavyweight]
     if heavy:
         out.append(stats("지수 대형주", heavy))
@@ -126,6 +143,14 @@ def review(session: Session, day: date) -> Review | None:
     }
     # 사후 분석이므로 이전 순위표가 없으면 그날(또는 뒤) 표로 뗀다 — 출력에 "사후 판정"으로 적는다.
     weights = heavyweight_service.weights_for(session, day, ids, allow_after=True)
+    limits = price_limit_service.prev_limits(session, day, ids)
+    first_bars = session.execute(
+        select(MinuteBar.instrument_id, MinuteBar.open)
+        .where(MinuteBar.session_date == day, MinuteBar.instrument_id.in_(ids))
+        .order_by(MinuteBar.instrument_id, MinuteBar.ts)
+        .distinct(MinuteBar.instrument_id)
+    ).all()
+    opens: dict[int, Decimal] = {row[0]: row[1] for row in first_bars}
     out = Review(day=day)
     for m, name in members:
         s = summaries.get(m.instrument_id)
@@ -133,6 +158,9 @@ def review(session: Session, day: date) -> Review | None:
             out.missing.append(name)
             continue
         w = weights.get(m.instrument_id)
+        lim = limits.get(m.instrument_id)
+        first = opens.get(m.instrument_id)
+        gap = (float(first) / lim.close - 1) * 100 if lim and first else None
         out.rows.append(
             Row(
                 name=name,
@@ -144,6 +172,8 @@ def review(session: Session, day: date) -> Review | None:
                 open_close=s.return_pct,
                 market=s.market_return_pct,
                 mfe=s.mfe_pct,
+                prev_limit=lim.state if lim else None,
+                gap=gap,
             )
         )
     any_w = next(iter(weights.values()), None)

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,8 +20,9 @@ from app.realtime.gateway import load_members, member_dict
 from app.repositories import instrument_repo, minute_repo
 from app.scoring.policy import THRESHOLDS
 from app.scoring.watchlist import STRATEGY_VERSION_V2
-from app.services import heavyweight_service
+from app.services import heavyweight_service, price_limit_service
 from app.services.heavyweight_service import Weight
+from app.services.price_limit_service import PrevLimit
 
 router = APIRouter(prefix="/api/lists", tags=["lists"])
 SessionDep = Annotated[Session, Depends(get_db)]
@@ -54,7 +55,11 @@ def list_days(session: SessionDep) -> list[str]:
 
 
 def signal_row(
-    m: WatchlistMember, name: str, code: str | None, weight: Weight | None = None
+    m: WatchlistMember,
+    name: str,
+    code: str | None,
+    weight: Weight | None = None,
+    limit: PrevLimit | None = None,
 ) -> dict[str, Any]:
     """목록 행 하나를 신호 탭의 행으로. 순수하다.
 
@@ -91,6 +96,8 @@ def signal_row(
         "thresholds": {"buy_interest": THRESHOLDS.buy_interest, "caution": THRESHOLDS.caution},
         # 지수 대형주(표시 전용): 목록 날 이전 순위표 기준. 목록 선정·채점에는 쓰지 않는다.
         **weight_fields(weight),
+        # 전일 상한가(표시 전용): 전 거래일 일봉 기준. 목록 선정·채점에는 쓰지 않는다.
+        **limit_fields(limit),
     }
 
 
@@ -101,6 +108,25 @@ def _weights(session: Session, day: date, ids: list[int]) -> dict[int, Weight]:
             return heavyweight_service.weights_for(session, day, ids)
     except Exception:
         logger.exception("list signals: market weights failed; no heavyweight labels")
+        return {}
+
+
+def limit_fields(limit: PrevLimit | None) -> dict[str, Any]:
+    return {
+        "prev_limit": limit.state if limit else None,
+        "prev_change_pct": limit.change_pct if limit else None,
+    }
+
+
+def _limits(
+    session: Session, day: date, ids: list[int], asof: datetime | None
+) -> dict[int, PrevLimit]:
+    """전일 상한가 표시는 보조다. 읽다 실패하면 표시 없이 신호를 그대로 보인다."""
+    try:
+        with session.begin_nested():
+            return price_limit_service.prev_limits(session, day, ids, ingested_before=asof)
+    except Exception:
+        logger.exception("list signals: prior-day limits failed; no limit labels")
         return {}
 
 
@@ -123,13 +149,17 @@ def list_signals(day: date, session: SessionDep) -> list[dict[str, Any]]:
         .where(WatchlistMember.snapshot_id == snap.id)
         .order_by(WatchlistMember.rank)
     ).all()
-    weights = _weights(session, day, [m.instrument_id for m, _ in rows])
+    ids = [m.instrument_id for m, _ in rows]
+    weights = _weights(session, day, ids)
+    # 목록을 얼린 시각까지 들어온 봉만(나중에 받은 봉으로 지난 화면을 바꾸지 않게).
+    limits = _limits(session, day, ids, snap.created_at)
     return [
         signal_row(
             m,
             name,
             instrument_repo.current_symbol(session, m.instrument_id),
             weights.get(m.instrument_id),
+            limits.get(m.instrument_id),
         )
         for m, name in rows
     ]

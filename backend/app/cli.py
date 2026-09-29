@@ -991,6 +991,15 @@ def cmd_list_review(day: date) -> int:
                 f"  {r.name:<12} weight {r.weight_pct:5.2f}%  open->close {pct(r.open_close)}  "
                 f"index {pct(r.market)}"
             )
+    limited = [r for r in rev.rows if r.prev_limit]
+    if limited:
+        print("\nprior-day limit-up names (gap = first minute open vs prior close; minute bars):")
+        for r in limited:
+            label = list_review_service.LIMIT_LABELS.get(r.prev_limit or "", "")
+            print(
+                f"  {r.name:<12} {label:<16} gap {pct(r.gap)}  1st hour {pct(r.first_hour)}  "
+                f"open->close {pct(r.open_close)}"
+            )
     if rev.semis and any(x["change_pct"] is not None for x in rev.semis["refs"]):
 
         def ref(x: dict[str, Any]) -> str:

@@ -25,6 +25,30 @@ export function heavyweightNote(row: MarketWeightFields): string | null {
   return `${row.market_listing ?? "시장"} 비중 ${row.market_weight_pct.toFixed(1)}% · 개별 뉴스보다 ${drivers}의 영향이 큽니다`;
 }
 
+const LIMIT_BADGE: Record<string, string> = {
+  LOCKED: "전일 점상한가",
+  CLOSED: "전일 상한가",
+  TOUCHED: "전일 상한가 터치",
+};
+
+/** 전 거래일 상한가 표시. 사실만 적는다(다음 날 흐름을 예고하지 않는다). */
+export function PrevLimitBadge({ row }: { row: MarketWeightFields }) {
+  if (!row.prev_limit) return null;
+  return (
+    <span className="mw__badge" title={prevLimitNote(row) ?? undefined}>
+      {LIMIT_BADGE[row.prev_limit] ?? row.prev_limit}
+    </span>
+  );
+}
+
+export function prevLimitNote(row: MarketWeightFields): string | null {
+  if (!row.prev_limit || row.prev_change_pct == null) return null;
+  const change = `전일 ${row.prev_change_pct > 0 ? "+" : ""}${row.prev_change_pct.toFixed(1)}%`;
+  if (row.prev_limit === "LOCKED") return `${change} · 시가부터 종가까지 상한가(점상)`;
+  if (row.prev_limit === "CLOSED") return `${change} · 상한가 마감, 장중 상한가 아래 거래 있음`;
+  return `${change} · 장중 상한가에 닿은 뒤 그 아래에서 마감`;
+}
+
 function shortDay(iso: string): string {
   const [, m, d] = iso.split("-");
   return `${Number(m)}/${Number(d)}`;

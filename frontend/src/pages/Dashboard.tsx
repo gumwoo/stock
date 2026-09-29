@@ -9,7 +9,13 @@ import {
 } from "../api/format";
 import { fundamentalMissing, judgedScore, listRowToSignal, maxScore, shrunk } from "../api/listSignal";
 import type { ListSignalRow, Signal } from "../api/types";
-import { HeavyweightBadge, OvernightSemis, heavyweightNote } from "../components/MarketWeight";
+import {
+  HeavyweightBadge,
+  OvernightSemis,
+  PrevLimitBadge,
+  heavyweightNote,
+  prevLimitNote,
+} from "../components/MarketWeight";
 import { dayLabel } from "../components/MorningStatus";
 import { SignalFactorDrawer } from "../components/SignalFactorDrawer";
 import "./Dashboard.css";
@@ -52,7 +58,7 @@ function SignalCard({
       <header className="card__head">
         <div>
           <h3 className="card__name">
-            {row.name} <HeavyweightBadge row={row} />
+            {row.name} <HeavyweightBadge row={row} /> <PrevLimitBadge row={row} />
           </h3>
           <p className="card__symbol">
             {row.code ?? "코드 없음"} · 목록 {row.rank}위
@@ -102,6 +108,7 @@ function SignalCard({
       </p>
 
       {heavyweightNote(row) && <p className="mw__note">{heavyweightNote(row)}</p>}
+      {prevLimitNote(row) && <p className="mw__note">{prevLimitNote(row)}</p>}
       {warning && <p className="card__warn">{warning}</p>}
       {judged === null && row.abstained_reason && <p className="card__note">{row.abstained_reason}</p>}
 

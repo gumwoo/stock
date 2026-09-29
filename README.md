@@ -187,7 +187,7 @@ npm --prefix ../frontend run dev     # 화면. "오늘의 관찰" 탭이 아침 
 python -m app.cli preopen status     # 오늘 후보 풀과 아침 단계별 상태. 읽기만 한다
 python -m app.cli watchlist          # 가장 최근 아침 목록. 읽기만 한다
 python -m app.cli intraday           # 1분봉 누적 보고서. 읽기만 한다
-python -m app.cli list-review --day 2026-09-28  # 목록 하루의 사후 기술 통계(지수 대형주는 따로). 읽기만 한다
+python -m app.cli list-review --day 2026-09-28  # 목록 하루의 사후 기술 통계(지수 대형주는 따로, 전일 상한가 종목 묶음). 읽기만 한다
 python -m app.cli review             # 포워드 기록의 검토 관문. 읽기만 한다
 ```
 

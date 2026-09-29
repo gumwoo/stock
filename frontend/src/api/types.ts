@@ -267,6 +267,10 @@ export interface MarketWeightFields {
   /** 비중 5% 이상. */
   heavyweight?: boolean;
   sector?: string | null;
+  /** 전 거래일 상한가(참고용): LOCKED 점상, CLOSED 상한가 마감(장중 거래), TOUCHED 장중 터치. 옛 서버는 보내지 않는다. */
+  prev_limit?: "LOCKED" | "CLOSED" | "TOUCHED" | null;
+  /** 전 거래일 등락(%). */
+  prev_change_pct?: number | null;
 }
 
 /** 한국 거래일 개장 전에 끝난 미국 반도체 등락(`/api/overnight/us-semis`). */
