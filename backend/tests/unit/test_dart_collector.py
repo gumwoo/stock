@@ -1041,6 +1041,7 @@ class TestSeparateStatementTotals:
             "sj_div": "IS",
             "rcept_no": "20260318000123",
             "thstrm_amount": "-2,963,388,471",
+            "frmtrm_amount": "-4,263,808,173",
         },
         {
             "account_id": "ifrs-full_ProfitLoss",
@@ -1052,13 +1053,14 @@ class TestSeparateStatementTotals:
             "account_id": "ifrs-full_Equity",
             "sj_div": "BS",
             "rcept_no": "20260318000123",
-            "thstrm_amount": "21,316,085,568",
+            "thstrm_amount": "44,800,604,681",
+            "frmtrm_amount": "38,808,970,916",
         },
         {
             "account_id": "ifrs-full_Equity",
             "sj_div": "SCE",
             "rcept_no": "20260318000123",
-            "thstrm_amount": "5",
+            "thstrm_amount": "21,316,085,568",
         },
     ]
 
@@ -1082,8 +1084,21 @@ class TestSeparateStatementTotals:
         found = self.rows("OFS")
         assert found == {
             "NetIncomeLoss": [Decimal("-2963388471")],
-            "StockholdersEquity": [Decimal("21316085568")],
+            "StockholdersEquity": [Decimal("44800604681")],
         }
+
+    def test_separate_totals_skip_the_comparative_columns(self) -> None:
+        # 전환 해의 비교기 열은 연결 수치일 수 있다(비지배지분 포함 총액). 2024 값은 남기지 않는다.
+        c = DartFundamentalCollector()
+        out, _ = c._to_rows(
+            self.ROWS,
+            instrument_id=1,
+            business_year=2025,
+            fiscal_end_month=12,
+            calendar=MarketCalendar(Market.KR),
+            basis="OFS",
+        )
+        assert {r.fiscal_year for r in out} == {2025}
 
     def test_consolidated_totals_stay_unmapped(self) -> None:
         # 연결의 총액은 비지배지분을 포함하므로 지배주주 몫 자리에 넣지 않는다(기존 규칙).

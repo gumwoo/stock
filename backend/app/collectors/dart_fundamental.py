@@ -501,7 +501,7 @@ class DartFundamentalCollector(BaseCollector):
                 )
 
     def _accounts(
-        self, client: httpx.Client, *, corp_code: str, year: int, fs_div: str = "CFS"
+        self, client: httpx.Client, *, corp_code: str, year: int, fs_div: str = CONSOLIDATED
     ) -> list[Any]:
         """One year of account rows for one company.
 
@@ -604,9 +604,11 @@ class DartFundamentalCollector(BaseCollector):
         for item in items:
             account_id = as_text(item, "account_id")
             concept = ACCOUNT_MAP.get(account_id)
+            separate_total = False
             if concept is None and basis == SEPARATE and account_id in OFS_ACCOUNT_MAP:
                 target, statements = OFS_ACCOUNT_MAP[account_id]
                 concept = target if as_text(item, "sj_div") in statements else None
+                separate_total = concept is not None
             if concept is None:
                 continue
 
@@ -625,6 +627,10 @@ class DartFundamentalCollector(BaseCollector):
                 continue
 
             for column, years_back in PERIOD_COLUMNS:
+                # 별도 총액은 당기 열만. 연결에서 별도로 바뀐 해의 보고서는 비교기 열이 연결 수치라서, 그 총액은
+                # 비지배지분을 포함한다(모비스·삼일씨엔에스 2023: 자산·부채·EPS가 연결과 원 단위로 같고 순이익·자본만 달랐다).
+                if separate_total and years_back:
+                    continue
                 seen += 1
                 amount = _parse_amount(item.get(column))
                 if amount is None:
