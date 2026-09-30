@@ -159,7 +159,11 @@ def weight_fields(weight: Weight | None) -> dict[str, Any]:
 @router.get("/{day}/signals")
 def list_signals(day: date, session: SessionDep) -> list[dict[str, Any]]:
     """그날 목록 종목의 08:40 점수와 상세. 목록 순위 순(정렬은 화면이 한다)."""
-    snap = _snapshot(session, day)
+    return signal_rows(session, day, _snapshot(session, day))
+
+
+def signal_rows(session: Session, day: date, snap: WatchlistSnapshot) -> list[dict[str, Any]]:
+    """신호 탭의 행들. 아침 브리핑(`app/api/briefing.py`)도 같은 행을 쓴다."""
     rows = session.execute(
         select(WatchlistMember, Instrument.name)
         .join(Instrument, Instrument.instrument_id == WatchlistMember.instrument_id)
