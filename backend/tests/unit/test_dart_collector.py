@@ -1041,7 +1041,7 @@ class TestSeparateStatementTotals:
             "sj_div": "IS",
             "rcept_no": "20260318000123",
             "thstrm_amount": "-2,963,388,471",
-            "frmtrm_amount": "-4,263,808,173",
+            "frmtrm_amount": "-2,206,307,623",
         },
         {
             "account_id": "ifrs-full_ProfitLoss",
@@ -1054,7 +1054,7 @@ class TestSeparateStatementTotals:
             "sj_div": "BS",
             "rcept_no": "20260318000123",
             "thstrm_amount": "44,800,604,681",
-            "frmtrm_amount": "38,808,970,916",
+            "frmtrm_amount": "47,550,626,152",
         },
         {
             "account_id": "ifrs-full_Equity",
