@@ -985,17 +985,46 @@ def cmd_opinion_backfill(days: list[date]) -> int:
     return 0 if run.status.value in ("SUCCESS", "PARTIAL") else 1
 
 
-def cmd_list_review(day: date) -> int:
-    """목록 하루의 사후 기술 통계. 지수 대형주는 따로. 읽기만 한다."""
+def _pct(v: float | None) -> str:
+    return "     -" if v is None else f"{v:+6.2f}"
+
+
+def _review_table(rows: list[list_review_service.Row]) -> None:
+    print(
+        f"\n{'group':<34}{'n':>4}{'1st hour':>9}{'open->close':>12}{'vs index':>9}{'up':>6}"
+        f"{'max rise med':>13}{'9:30 max avg':>13}{'>=2%':>7}"
+    )
+    for g in list_review_service.groups(rows):
+        print(
+            f"{g.label:<34}{g.n:>4}{_pct(g.first_hour):>9}{_pct(g.open_close):>12}"
+            f"{_pct(g.vs_market):>9}{g.up_close:>3}/{g.n:<2}{_pct(g.mfe_median):>11}"
+            f"{_pct(g.peak_930):>13}{g.peak_930_2pct:>4}/{g.n:<2}"
+        )
+
+
+def _review_header() -> None:
+    print("descriptive stats only, NOT a verdict on the pre-registered H1-H7")
+    print(
+        "(groups without heavyweights differ from the pre-registered sample. 'max rise' and 'max to 9:30'"
+        " are hindsight highs, not prices anyone could count on selling at. TOP3 = the current briefing"
+        " ranking rule applied after the fact to the 08:40 scores, heavyweights included)"
+    )
+
+
+def cmd_list_review(day: date | None, start: date | None = None, end: date | None = None) -> int:
+    """목록 하루(또는 기간)의 사후 기술 통계. 지수 대형주는 따로. 읽기만 한다."""
+    if (day is None) == (start is None and end is None) or (start is None) != (end is None):
+        print("give either --day, or both --from and --to")
+        return 2
+    if day is None:
+        return _list_review_range(start, end)  # type: ignore[arg-type]
     with session_scope() as session:
         rev = list_review_service.review(session, day)
     if rev is None:
         print(f"no V2 morning list on {day}")
         return 1
-    print(f"{day} morning list: descriptive stats only, NOT a verdict on the pre-registered H1-H7")
-    print(
-        "(groups without heavyweights differ from the pre-registered sample; max rise is hindsight)"
-    )
+    print(f"{day} morning list:", end=" ")
+    _review_header()
     if rev.rank_day is not None:
         note = " (after the fact: no earlier ranking)" if rev.after_the_fact else ""
         print(f"heavyweights: >= 5% of their market's cap, ranking of {rev.rank_day}{note}")
@@ -1003,18 +1032,23 @@ def cmd_list_review(day: date) -> int:
         print("heavyweights: no list name is in a usable market-cap ranking, none separated")
     if rev.missing:
         print(f"no complete minute summary: {', '.join(rev.missing)}")
-
-    def pct(v: float | None) -> str:
-        return "     -" if v is None else f"{v:+6.2f}"
-
-    print(
-        f"\n{'group':<34}{'n':>4}{'1st hour':>9}{'open->close':>12}{'vs index':>9}{'up':>5}{'max rise med':>13}"
-    )
-    for g in list_review_service.groups(rev.rows):
-        print(
-            f"{g.label:<34}{g.n:>4}{pct(g.first_hour):>9}{pct(g.open_close):>12}{pct(g.vs_market):>9}"
-            f"{g.up_close:>3}/{g.n:<2}{pct(g.mfe_median):>11}"
-        )
+    _review_table(rev.rows)
+    if rev.tops:
+        print("\nscore TOP3 (current rule; '-' = no complete minute summary):")
+        for cat in ("기술", "재무", "종합"):
+            for tag, name, r in rev.tops.get(cat, []):
+                if r is None:
+                    print(f"  {tag:<4} {name:<12} -")
+                    continue
+                lock = (
+                    "  (one price all through 9:30: locked, not a chance to buy low)"
+                    if r.locked_open
+                    else ""
+                )
+                print(
+                    f"  {tag:<4} {name:<12} max to 9:30 {_pct(r.peak_930)}  1st hour {_pct(r.first_hour)}"
+                    f"  open->close {_pct(r.open_close)}{lock}"
+                )
     heavy = [r for r in rev.rows if r.heavyweight]
     if heavy:
         print(
@@ -1022,8 +1056,8 @@ def cmd_list_review(day: date) -> int:
         )
         for r in heavy:
             print(
-                f"  {r.name:<12} weight {r.weight_pct:5.2f}%  open->close {pct(r.open_close)}  "
-                f"index {pct(r.market)}"
+                f"  {r.name:<12} weight {r.weight_pct:5.2f}%  open->close {_pct(r.open_close)}  "
+                f"index {_pct(r.market)}"
             )
     limited = [r for r in rev.rows if r.prev_limit]
     if limited:
@@ -1031,8 +1065,8 @@ def cmd_list_review(day: date) -> int:
         for r in limited:
             label = list_review_service.LIMIT_LABELS.get(r.prev_limit or "", "")
             print(
-                f"  {r.name:<12} {label:<16} gap {pct(r.gap)}  1st hour {pct(r.first_hour)}  "
-                f"open->close {pct(r.open_close)}"
+                f"  {r.name:<12} {label:<16} gap {_pct(r.gap)}  1st hour {_pct(r.first_hour)}  "
+                f"open->close {_pct(r.open_close)}"
             )
     if rev.semis and any(x["change_pct"] is not None for x in rev.semis["refs"]):
 
@@ -1045,6 +1079,38 @@ def cmd_list_review(day: date) -> int:
 
         refs = ", ".join(ref(x) for x in rev.semis["refs"])
         print(f"overnight US semis before {rev.semis['day']} open: {refs}")
+    return 0
+
+
+def _list_review_range(start: date, end: date) -> int:
+    """기간 안 아침 목록들을 합친 표. 종목-일 단위이고 같은 종목이 여러 날 겹친다(서로 독립이 아니다)."""
+    rows: list[list_review_service.Row] = []
+    with session_scope() as session:
+        days = list_review_service.list_days(session, start, end)
+        if not days:
+            print(f"no V2 morning list between {start} and {end}")
+            return 1
+        print(f"{start}..{end} morning lists pooled:", end=" ")
+        _review_header()
+        print("(rows are name-days; the same name on several days is counted each day)")
+        for d in days:
+            rev = list_review_service.review(session, d, with_semis=False)
+            if rev is None:
+                continue
+            if not rev.rows:
+                print(f"  {d}: skipped, no complete minute summaries yet")
+                continue
+            hw = (
+                f"heavyweights by ranking of {rev.rank_day}"
+                + (" (after the fact)" if rev.after_the_fact else "")
+                if rev.rank_day
+                else "no heavyweight ranking"
+            )
+            print(f"  {d}: {len(rev.rows)} names, {len(rev.missing)} missing; {hw}")
+            rows += rev.rows
+    if not rows:
+        return 1
+    _review_table(rows)
     return 0
 
 
@@ -1337,7 +1403,9 @@ def main(argv: list[str] | None = None) -> int:
         "list-review",
         help="one morning list's after-the-fact stats, index heavyweights apart; reads only",
     )
-    lr.add_argument("--day", required=True, help="list day, YYYY-MM-DD")
+    lr.add_argument("--day", help="one list day, YYYY-MM-DD")
+    lr.add_argument("--from", dest="start", help="pool list days from this day, YYYY-MM-DD")
+    lr.add_argument("--to", dest="end", help="pool list days up to this day, YYYY-MM-DD")
 
     ob = sub.add_parser(
         "opinion-backfill",
@@ -1421,7 +1489,11 @@ def main(argv: list[str] | None = None) -> int:
                 [date.fromisoformat(d.strip()) for d in args.days.split(",")]
             )
         case "list-review":
-            return cmd_list_review(date.fromisoformat(args.day))
+            return cmd_list_review(
+                date.fromisoformat(args.day) if args.day else None,
+                date.fromisoformat(args.start) if args.start else None,
+                date.fromisoformat(args.end) if args.end else None,
+            )
         case "forward":
             return cmd_forward()
         case "forward-run":

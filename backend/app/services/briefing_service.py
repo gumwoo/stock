@@ -68,6 +68,14 @@ def _eligible(row: Mapping[str, Any]) -> bool:
     )
 
 
+def weight_total(detail: Any) -> float | None:
+    """채점 상세의 참여 가중치 합(요인 effective_weight 합). 상세가 없으면 None. 신호 탭과 list-review가 같이 쓴다."""
+    factors = detail.get("factors") if isinstance(detail, dict) else None
+    if not isinstance(factors, list):
+        return None
+    return sum(float(f.get("effective_weight") or 0.0) for f in factors if isinstance(f, dict))
+
+
 def judged(row: Mapping[str, Any]) -> float:
     return float(row["total_score"]) / float(row["weight_total"])
 

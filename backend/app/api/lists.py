@@ -20,7 +20,12 @@ from app.realtime.gateway import load_members, member_dict
 from app.repositories import instrument_repo, minute_repo
 from app.scoring.policy import THRESHOLDS
 from app.scoring.watchlist import STRATEGY_VERSION_V2
-from app.services import analyst_service, heavyweight_service, price_limit_service
+from app.services import (
+    analyst_service,
+    briefing_service,
+    heavyweight_service,
+    price_limit_service,
+)
 from app.services.heavyweight_service import Weight
 from app.services.price_limit_service import PrevLimit
 
@@ -68,13 +73,7 @@ def signal_row(
     기준에 대는 것과 같다(`Thresholds.action_for`) — 재무가 없으면 기술 점수 하나로 판단한다. 화면이 기준값을 상수로
     들고 있지 않게 여기서 준다. 기준값은 지금 규칙의 것이다(전략 버전이 하나뿐인 동안은 행의 채점 당시와 같다).
     """
-    detail = m.score_detail
-    factors = detail.get("factors") if isinstance(detail, dict) else None
-    weight_total = (
-        sum(float(f.get("effective_weight") or 0.0) for f in factors if isinstance(f, dict))
-        if isinstance(factors, list)
-        else None
-    )
+    weight_total = briefing_service.weight_total(m.score_detail)
     return {
         "member_id": m.id,
         "instrument_id": m.instrument_id,

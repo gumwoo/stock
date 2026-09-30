@@ -12,9 +12,10 @@ from __future__ import annotations
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,10 +29,13 @@ from app.scoring.intraday import ANALYSIS_VERSION
 from app.scoring.watchlist import SELECTION_VERSION_V2, STRATEGY_VERSION_V2
 from app.services import (
     analyst_service,
+    briefing_service,
     heavyweight_service,
     overnight_service,
     price_limit_service,
 )
+
+SEOUL = ZoneInfo("Asia/Seoul")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +55,12 @@ class Row:
     """그날 첫 1분봉 시가 / 전 거래일 종가 - 1(%)."""
     reports: int | None = None
     """목록 날 전 90일 증권사 리포트 수. None은 조회하지 못함(0과 다르다)."""
+    peak_930: float | None = None
+    """첫 1분봉 시가 대비 09:30 전 1분봉 고가의 최댓값(%). 사후 최고값이지 팔 수 있었던 가격이 아니다."""
+    tops: tuple[str, ...] = ()
+    """그날 점수 순위(현재 브리핑 규칙을 08:40 저장 점수에 사후 적용): "기술1", "종합2" 등."""
+    locked_open: bool = False
+    """09:30 전 모든 1분봉이 한 가격(시초 상한가 잠김 등) — 사실상 살 수 없었다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +72,8 @@ class Stats:
     vs_market: float | None
     up_close: int
     mfe_median: float | None
+    peak_930: float | None = None
+    peak_930_2pct: int = 0
 
 
 def _mean(xs: Sequence[float]) -> float | None:
@@ -80,6 +92,8 @@ def stats(label: str, rows: Sequence[Row]) -> Stats:
         vs_market=_mean(vs),
         up_close=sum(1 for r in rows if r.open_close > 0),
         mfe_median=statistics.median(mfe) if mfe else None,
+        peak_930=_mean([r.peak_930 for r in rows if r.peak_930 is not None]),
+        peak_930_2pct=sum(1 for r in rows if r.peak_930 is not None and r.peak_930 >= 2.0),
     )
 
 
@@ -113,6 +127,11 @@ def groups(rows: Sequence[Row]) -> list[Stats]:
     heavy = [r for r in rows if r.heavyweight]
     if heavy:
         out.append(stats("지수 대형주", heavy))
+    # 점수 TOP3: 대형주를 빼지 않는다(순위 그대로를 잰다).
+    for cat in ("기술", "재무", "종합"):
+        g = [r for r in rows if any(t.startswith(cat) for t in r.tops)]
+        if g:
+            out.append(stats(f"{cat} TOP3(현재 규칙, 대형주 포함)", g))
     return out
 
 
@@ -124,9 +143,64 @@ class Review:
     after_the_fact: bool = False
     rank_day: date | None = None
     semis: dict[str, Any] | None = None
+    tops: dict[str, list[tuple[str, str, Row | None]]] = field(default_factory=dict)
+    """점수 순위별 (표시, 이름, 행). 1분봉 요약이 없어 빠진 종목은 행이 None."""
 
 
-def review(session: Session, day: date) -> Review | None:
+def list_days(session: Session, start: date, end: date) -> list[date]:
+    """기간 안 V2 아침 목록 날짜(달력이 아니라 목록이 있는 날)."""
+    return list(
+        session.execute(
+            select(WatchlistSnapshot.session_date)
+            .where(
+                WatchlistSnapshot.session_date >= start,
+                WatchlistSnapshot.session_date <= end,
+                WatchlistSnapshot.strategy_version == STRATEGY_VERSION_V2,
+                WatchlistSnapshot.selection_version == SELECTION_VERSION_V2,
+            )
+            .order_by(WatchlistSnapshot.session_date)
+        ).scalars()
+    )
+
+
+def peak_930(
+    bars: Sequence[tuple[datetime, Decimal, Decimal, Decimal]],
+) -> tuple[float | None, bool]:
+    """(첫 봉 시가 대비 09:30 전 고가 최댓값 %, 09:30 전이 한 가격에 잠겼는가). bars: (ts, open, high, low), 시각 순. 순수."""
+    if not bars:
+        return None, False
+    first_open = float(bars[0][1])
+    early = [b for b in bars if b[0].astimezone(SEOUL).time() < time(9, 30)]
+    if not early or first_open <= 0:
+        return None, False
+    high = max(float(b[2]) for b in early)
+    low = min(float(b[3]) for b in early)
+    return (high / first_open - 1) * 100, high == low
+
+
+def _ranks(members: Sequence[Any]) -> dict[int, list[str]]:
+    """목록 행(08:40 저장값)에 현재 브리핑 순위 규칙을 적용한 표시."""
+    rows = [
+        {
+            "instrument_id": m.instrument_id,
+            "rank": m.rank,
+            "detail": m.score_detail,
+            "action": m.last_action,
+            "total_score": m.total_score,
+            "weight_total": briefing_service.weight_total(m.score_detail),
+            "technical_score": m.technical_score,
+            "fundamental_score": m.fundamental_score,
+        }
+        for m, _ in members
+    ]
+    out: dict[int, list[str]] = {}
+    for cat, top in briefing_service.rankings(rows).items():
+        for n, r in enumerate(top, 1):
+            out.setdefault(int(r["instrument_id"]), []).append(f"{cat}{n}")
+    return out
+
+
+def review(session: Session, day: date, *, with_semis: bool = True) -> Review | None:
     snap = session.execute(
         select(WatchlistSnapshot).where(
             WatchlistSnapshot.session_date == day,
@@ -165,7 +239,16 @@ def review(session: Session, day: date) -> Review | None:
         .distinct(MinuteBar.instrument_id)
     ).all()
     opens: dict[int, Decimal] = {row[0]: row[1] for row in first_bars}
+    bars_by: dict[int, list[tuple[datetime, Decimal, Decimal, Decimal]]] = {}
+    for i, ts, o, h, lo in session.execute(
+        select(MinuteBar.instrument_id, MinuteBar.ts, MinuteBar.open, MinuteBar.high, MinuteBar.low)
+        .where(MinuteBar.session_date == day, MinuteBar.instrument_id.in_(ids))
+        .order_by(MinuteBar.instrument_id, MinuteBar.ts)
+    ).all():
+        bars_by.setdefault(i, []).append((ts, o, h, lo))
+    ranks = _ranks(members)
     out = Review(day=day)
+    by_id: dict[int, Row] = {}
     for m, name in members:
         s = summaries.get(m.instrument_id)
         if s is None or s.first_hour_pct is None or s.return_pct is None:
@@ -175,6 +258,7 @@ def review(session: Session, day: date) -> Review | None:
         lim = limits.get(m.instrument_id)
         first = opens.get(m.instrument_id)
         gap = (float(first) / lim.close - 1) * 100 if lim and first else None
+        peak, locked = peak_930(bars_by.get(m.instrument_id, []))
         out.rows.append(
             Row(
                 name=name,
@@ -189,11 +273,22 @@ def review(session: Session, day: date) -> Review | None:
                 prev_limit=lim.state if lim else None,
                 gap=gap,
                 reports=analysts[m.instrument_id]["count"] if m.instrument_id in analysts else None,
+                peak_930=peak,
+                tops=tuple(ranks.get(m.instrument_id, ())),
+                locked_open=locked,
             )
         )
+        by_id[m.instrument_id] = out.rows[-1]
     any_w = next(iter(weights.values()), None)
     if any_w is not None:
         out.after_the_fact = any_w.after_the_fact
         out.rank_day = any_w.rank_day
-    out.semis = overnight_service.us_semis(session, day)
+    names = {m.instrument_id: name for m, name in members}
+    for i, tags in ranks.items():
+        for t in tags:
+            out.tops.setdefault(t[:2], []).append((t, names[i], by_id.get(i)))
+    for entries in out.tops.values():
+        entries.sort(key=lambda e: e[0])
+    if with_semis:
+        out.semis = overnight_service.us_semis(session, day)
     return out
