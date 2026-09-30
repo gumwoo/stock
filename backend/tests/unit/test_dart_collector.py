@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from typing import ClassVar
 
 import pytest
 
@@ -946,3 +947,144 @@ class TestTheSmallEndOfTheColumn:
     def test_zero_is_zero(self) -> None:
         """A reported zero is a figure; only a tiny non-zero one is not."""
         assert _parse_amount("0") == Decimal("0")
+
+
+class TestSeparateStatementsWhenNoConsolidated:
+    """연결재무제표가 없는 해(013)는 별도재무제표로 한 번 더 묻는다(피델릭스 2025: CFS 013, OFS 100행)."""
+
+    REVENUE: ClassVar[dict[str, str]] = {
+        "account_id": "ifrs-full_Revenue",
+        "rcept_no": "20260318000123",
+        "thstrm_amount": "53,615,518,212",
+        "currency": "KRW",
+    }
+
+    def run(
+        self, answers: dict[str, list[object]], monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[list[str], list[object]]:
+        import httpx
+
+        from app.collectors import dart_fundamental as mod
+        from app.collectors.dart_fundamental import _Tally
+
+        asked: list[str] = []
+        saved: list[object] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            fs = request.url.params.get("fs_div", "")
+            year = request.url.params.get("bsns_year", "")
+            asked.append(f"{year}:{fs}")
+            rows = answers.get(f"{year}:{fs}")
+            if rows is None:
+                return httpx.Response(200, json={"status": "013", "message": "no data"})
+            return httpx.Response(200, json={"status": "000", "list": rows})
+
+        class Guard:
+            def reserve(self, *_a: object, **_k: object) -> None:
+                asked.append("reserve")
+
+        c = DartFundamentalCollector(guard=Guard(), years_back=2)  # type: ignore[arg-type]
+        c._key = "test-key"
+        c._bucket = type("NoWait", (), {"acquire": lambda self: None})()  # type: ignore[assignment]
+        monkeypatch.setattr(c, "_fiscal_end_month", lambda *_a: 12)
+        monkeypatch.setattr(c, "_collect_filings", lambda *_a: [])
+        monkeypatch.setattr(mod.filing_repo, "save_filings", lambda _s, _r: 0)
+        monkeypatch.setattr(
+            mod.fundamental_repo, "save_facts", lambda _s, rows: saved.extend(rows) or len(rows)
+        )
+        instrument = type(
+            "I", (), {"kr_corp_code": "00189538", "instrument_id": 1, "name": "피델릭스"}
+        )()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            c._collect_one(
+                client,
+                None,
+                instrument,  # type: ignore[arg-type]
+                today=date(2026, 9, 30),
+                krx=MarketCalendar(Market.KR),
+                warnings=[],
+                tally=_Tally(),
+            )
+        return asked, saved
+
+    def test_no_consolidated_falls_back_to_separate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        asked, saved = self.run({"2025:OFS": [self.REVENUE]}, monkeypatch)
+        calls = [a for a in asked if a != "reserve"]
+        assert calls == ["2026:CFS", "2026:OFS", "2025:CFS", "2025:OFS"]
+        assert asked.count("reserve") == len(calls)  # 별도 호출도 한도 원장에 먼저 적는다
+        assert saved and all(r.frame == "OFS" for r in saved)  # type: ignore[attr-defined]
+
+    def test_neither_basis_means_nothing_and_no_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        asked, saved = self.run({}, monkeypatch)
+        assert [a for a in asked if a != "reserve"] == [
+            "2026:CFS",
+            "2026:OFS",
+            "2025:CFS",
+            "2025:OFS",
+        ]
+        assert saved == []
+
+    def test_consolidated_is_used_as_before(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        asked, saved = self.run({"2025:CFS": [self.REVENUE]}, monkeypatch)
+        assert [a for a in asked if a != "reserve"] == ["2026:CFS", "2026:OFS", "2025:CFS"]
+        assert saved and all(r.frame is None for r in saved)  # type: ignore[attr-defined]
+
+
+class TestSeparateStatementTotals:
+    """별도재무제표에는 지배주주 귀속 태그가 없다. 총액을 쓰되 재무상태표·손익계산서 줄만(자본변동표 줄은 구성요소별이라 값이 다르다)."""
+
+    ROWS: ClassVar[list[dict[str, str]]] = [
+        {
+            "account_id": "ifrs-full_ProfitLoss",
+            "sj_div": "IS",
+            "rcept_no": "20260318000123",
+            "thstrm_amount": "-2,963,388,471",
+        },
+        {
+            "account_id": "ifrs-full_ProfitLoss",
+            "sj_div": "SCE",
+            "rcept_no": "20260318000123",
+            "thstrm_amount": "-1",
+        },
+        {
+            "account_id": "ifrs-full_Equity",
+            "sj_div": "BS",
+            "rcept_no": "20260318000123",
+            "thstrm_amount": "21,316,085,568",
+        },
+        {
+            "account_id": "ifrs-full_Equity",
+            "sj_div": "SCE",
+            "rcept_no": "20260318000123",
+            "thstrm_amount": "5",
+        },
+    ]
+
+    def rows(self, basis: str) -> dict[str, list[Decimal]]:
+        c = DartFundamentalCollector()
+        out, _ = c._to_rows(
+            self.ROWS,
+            instrument_id=1,
+            business_year=2025,
+            fiscal_end_month=12,
+            calendar=MarketCalendar(Market.KR),
+            basis=basis,
+        )
+        found: dict[str, list[Decimal]] = {}
+        for r in out:
+            if r.fiscal_year == 2025:
+                found.setdefault(r.concept, []).append(r.value)
+        return found
+
+    def test_separate_totals_are_read_from_the_main_statements_only(self) -> None:
+        found = self.rows("OFS")
+        assert found == {
+            "NetIncomeLoss": [Decimal("-2963388471")],
+            "StockholdersEquity": [Decimal("21316085568")],
+        }
+
+    def test_consolidated_totals_stay_unmapped(self) -> None:
+        # 연결의 총액은 비지배지분을 포함하므로 지배주주 몫 자리에 넣지 않는다(기존 규칙).
+        assert self.rows("CFS") == {}

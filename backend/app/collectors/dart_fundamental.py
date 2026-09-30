@@ -21,6 +21,11 @@ restatement history for free and in the same shape SEC comparatives do: a
 fiscal year reappears in each subsequent annual report, and if the figure
 changed, that is a new revision under a new receipt number.
 
+**연결이 없으면 별도(2026-09-30부터).** 먼저 연결재무제표(`CFS`)를 묻고, 그해 연결이 없다는 답(013)이면 같은 해를
+별도재무제표(`OFS`)로 한 번 더 묻는다. 자회사가 없는 회사는 연결을 내지 않는다. 연결만 묻던 동안 이런 회사는 오류 없이
+재무 0행으로 끝났다(피델릭스 2025: CFS 013, OFS 100행). 별도에서 온 행은 `frame="OFS"`로 표시한다. 연결이 있는 해는
+지금처럼 연결만 쓴다.
+
 `rcept_no` doubles as the accession and the filing date — its first eight
 digits are `YYYYMMDD`. The availability rule is identical to SEC's, because
 DART has the same limitation: `rcept_dt` is a date with no time of day, so a
@@ -133,6 +138,20 @@ ACCOUNT_MAP: dict[str, str] = {
     },
 }
 
+# 별도재무제표에만 쓰는 대응. 별도재무제표는 한 법인의 것이라 비지배지분이 없고, 지배주주 귀속 태그 대신 총액
+# (`ProfitLoss`, `Equity`)만 있다(피델릭스 2025 OFS 확인). 그 법인에게는 총액이 곧 지배주주 몫이므로 같은 개념으로 읽는다.
+# 연결에서는 쓰지 않는다(위 설명대로 연결의 총액은 비지배지분을 포함한다). 자본변동표(SCE)에도 같은 태그가 자본 구성요소별로
+# 여러 줄 있어 값이 다르므로, 재무상태표·손익계산서 줄만 받는다.
+_OFS_ACCOUNTS: dict[str, tuple[str, frozenset[str]]] = {
+    "ProfitLoss": ("NetIncomeLoss", frozenset({"IS", "CIS"})),
+    "Equity": ("StockholdersEquity", frozenset({"BS"})),
+}
+OFS_ACCOUNT_MAP: dict[str, tuple[str, frozenset[str]]] = {
+    f"{prefix}{local}": target
+    for local, target in _OFS_ACCOUNTS.items()
+    for prefix in IFRS_PREFIXES
+}
+
 # What one annual report should yield. A year returning far fewer than this has
 # usually met a naming change rather than a company that reports less, which is
 # the failure above and is invisible unless counted.
@@ -148,6 +167,9 @@ INSTANTANEOUS = frozenset(
 PER_SHARE = frozenset({"EarningsPerShareBasic", "EarningsPerShareDiluted"})
 
 ANNUAL_REPORT = "11011"  # 사업보고서
+# 재무제표 기준(`fs_div`). 연결이 없는 해만 별도를 쓴다.
+CONSOLIDATED = "CFS"
+SEPARATE = "OFS"
 
 # Which response column belongs to which year, counting back from bsns_year.
 PERIOD_COLUMNS = (
@@ -260,6 +282,8 @@ class _Tally:
 
     read: int = 0
     saved: int = 0
+    separate: int = 0
+    """별도재무제표로 받은 회사·연도 수."""
 
 
 class DartFundamentalCollector(BaseCollector):
@@ -416,7 +440,8 @@ class DartFundamentalCollector(BaseCollector):
             items_saved=tally.saved,
             partial=bool(warnings),
             warnings=warnings,
-            detail=f"{asked} of {len(instruments)} instruments, {self.years_back} years each",
+            detail=f"{asked} of {len(instruments)} instruments, {self.years_back} years each"
+            + (f"; {tally.separate} years from separate statements" if tally.separate else ""),
         )
 
     def _collect_one(
@@ -440,8 +465,15 @@ class DartFundamentalCollector(BaseCollector):
 
         for year in range(today.year, today.year - self.years_back, -1):
             items = self._accounts(client, corp_code=corp_code, year=year)
+            basis = CONSOLIDATED
+            if not items:
+                # 연결이 없는 해: 별도재무제표로 한 번 더(자회사가 없는 회사는 연결을 내지 않는다).
+                items = self._accounts(client, corp_code=corp_code, year=year, fs_div=SEPARATE)
+                basis = SEPARATE
             if not items:
                 continue
+            if basis == SEPARATE:
+                tally.separate += 1
 
             rows, seen = self._to_rows(
                 items,
@@ -449,6 +481,7 @@ class DartFundamentalCollector(BaseCollector):
                 business_year=year,
                 fiscal_end_month=fiscal_end_month,
                 calendar=krx,
+                basis=basis,
             )
             tally.read += seen
             tally.saved += fundamental_repo.save_facts(session, rows)
@@ -467,7 +500,9 @@ class DartFundamentalCollector(BaseCollector):
                     f"{CONCEPTS_PER_REPORT} concepts, missing {', '.join(missing)}"
                 )
 
-    def _accounts(self, client: httpx.Client, *, corp_code: str, year: int) -> list[Any]:
+    def _accounts(
+        self, client: httpx.Client, *, corp_code: str, year: int, fs_div: str = "CFS"
+    ) -> list[Any]:
         """One year of account rows for one company.
 
         Its own method for the same reason `_collect_filings` is: the shape
@@ -481,7 +516,7 @@ class DartFundamentalCollector(BaseCollector):
             corp_code=corp_code,
             bsns_year=str(year),
             reprt_code=ANNUAL_REPORT,
-            fs_div="CFS",
+            fs_div=fs_div,
         )
         return as_rows(payload.get("list"), source="DART fnlttSinglAcntAll.json")
 
@@ -557,13 +592,21 @@ class DartFundamentalCollector(BaseCollector):
         business_year: int,
         fiscal_end_month: int,
         calendar: MarketCalendar,
+        basis: str = "CFS",
     ) -> tuple[list[FundamentalRow], int]:
-        """Flatten three reported years out of each account row."""
+        """Flatten three reported years out of each account row.
+
+        `basis`가 별도(`OFS`)면 행에 `frame="OFS"`를 남긴다. 연결 행은 지금처럼 비워 둔다.
+        """
         rows: list[FundamentalRow] = []
         seen = 0
 
         for item in items:
-            concept = ACCOUNT_MAP.get(as_text(item, "account_id"))
+            account_id = as_text(item, "account_id")
+            concept = ACCOUNT_MAP.get(account_id)
+            if concept is None and basis == SEPARATE and account_id in OFS_ACCOUNT_MAP:
+                target, statements = OFS_ACCOUNT_MAP[account_id]
+                concept = target if as_text(item, "sj_div") in statements else None
             if concept is None:
                 continue
 
@@ -614,6 +657,7 @@ class DartFundamentalCollector(BaseCollector):
                         available_at=calendar.next_session_open(filed_at),
                         accession=rcept_no,
                         source=FundamentalSource.DART,
+                        frame=SEPARATE if basis == SEPARATE else None,
                     )
                 )
 

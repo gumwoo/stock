@@ -187,7 +187,11 @@ class Fundamental(Base):
         "transaction-time axis keeps meaning what it says.",
     )
     frame: Mapped[str | None] = mapped_column(
-        String(32), nullable=True, doc="SEC calendar frame, e.g. CY2008Q4I"
+        String(32),
+        nullable=True,
+        doc="SEC calendar frame, e.g. CY2008Q4I. DART rows: 'OFS' when read from the separate "
+        "(non-consolidated) statements because the company filed no consolidated ones that year; "
+        "null for consolidated.",
     )
 
     __table_args__ = (
