@@ -250,12 +250,6 @@
   cursor: default;
 }
 
-.card__parts {
-  margin: var(--s-1) 0 0;
-  font-size: var(--t-micro);
-  color: var(--c-text-tertiary);
-}
-
 .card__listReasons {
   display: flex;
   flex-wrap: wrap;

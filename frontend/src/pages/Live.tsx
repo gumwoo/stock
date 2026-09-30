@@ -10,8 +10,9 @@ import {
   heavyweightNote,
   prevLimitNote,
 } from "../components/MarketWeight";
+import { ScoreParts, hasScoreParts } from "../components/ScoreParts";
 import { ThemeNews } from "../components/ThemeNews";
-import type { LiveBar, LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
+import type { ListSignalRow, LiveBar, LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
 import { useLiveChart } from "../hooks/useLiveChart";
 import "./Live.css";
 
@@ -129,6 +130,22 @@ export function Live({
   const [sparks, setSparks] = useState<Record<string, number[]>>({});
   const [preopenError, setPreopenError] = useState(false);
   const [stepsOpen, setStepsOpen] = useState(false);
+  // 그날 08:40 점수(신호 탭과 같은 행). 날짜와 묶어 둔다: 두 날 목록에 같은 종목이 흔해서, 묶지 않으면 날짜를 바꾼 직후나
+  // 요청이 실패했을 때 전날 점수가 보인다.
+  const [scores, setScores] = useState<{ day: string; rows: ListSignalRow[] | null } | null>(null);
+
+  useEffect(() => {
+    if (day === null) return;
+    let alive = true;
+    setScores(null);
+    api
+      .listSignals(day)
+      .then((rows) => alive && setScores({ day, rows }))
+      .catch(() => alive && setScores({ day, rows: null })); // 보조 정보: 실패하면 점수 칸만 뺀다(날짜를 바꾸면 다시 받는다)
+    return () => {
+      alive = false;
+    };
+  }, [day]);
   const { container, reset, push } = useLiveChart(440);
 
   const liveHasList = !!state && !!state.day && state.members.length > 0;
@@ -431,6 +448,10 @@ export function Live({
   }, [reset, apply]);
 
   const member: LiveMember | undefined = shown.find((m) => m.code === selected);
+  const scoreRow =
+    member && scores && scores.day === day && scores.rows
+      ? scores.rows.find((r) => r.instrument_id === member.instrument_id)
+      : undefined;
 
   // 테마 기사에 목록 종목 배지를 붙일 집합(아침 목록일 때만).
   const isMorningList = mode === "archive" || state?.source === "morning list";
@@ -608,6 +629,12 @@ export function Live({
                   </span>
                 ))}
               </div>
+              {scoreRow && hasScoreParts(scoreRow) && (
+                <section className="live__scores" aria-label="08:40 점수">
+                  <p className="live__scoresTitle">08:40 점수 (전 거래일 종가·재무 기준, 뉴스 점수는 합계에 들어가지 않음)</p>
+                  <ScoreParts row={scoreRow} />
+                </section>
+              )}
               {heavyweightNote(member) && <p className="mw__note">{heavyweightNote(member)}</p>}
               {prevLimitNote(member) && <p className="mw__note">{prevLimitNote(member)}</p>}
               <dl className="live__facts">

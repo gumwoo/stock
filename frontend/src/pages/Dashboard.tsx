@@ -7,7 +7,7 @@ import {
   REGIME_LABEL,
   datetime,
 } from "../api/format";
-import { fundamentalMissing, judgedScore, listRowToSignal, maxScore, shrunk } from "../api/listSignal";
+import { judgedScore, listRowToSignal } from "../api/listSignal";
 import type { ListSignalRow, Signal } from "../api/types";
 import {
   HeavyweightBadge,
@@ -17,6 +17,7 @@ import {
   prevLimitNote,
 } from "../components/MarketWeight";
 import { dayLabel } from "../components/MorningStatus";
+import { ScoreParts } from "../components/ScoreParts";
 import { SignalFactorDrawer } from "../components/SignalFactorDrawer";
 import "./Dashboard.css";
 
@@ -50,7 +51,6 @@ function SignalCard({
 }) {
   const signal = listRowToSignal(row);
   const judged = judgedScore(row);
-  const noFundamental = row.detail !== null && row.action !== "ABSTAINED" && fundamentalMissing(row);
   const warning = row.prefetch_status ? PREFETCH_WARNING[row.prefetch_status] : undefined;
 
   return (
@@ -79,13 +79,7 @@ function SignalCard({
             <span className="card__score-num num">{judged.toFixed(1)}</span>
           </div>
           <ScoreBar score={judged} />
-          <p className="card__parts">
-            {noFundamental && shrunk(row)
-              ? `재무 자료 없음 → 기술 점수 ${judged.toFixed(1)} 하나로 판단 (합계 ${row.total_score.toFixed(1)} / 최대 ${maxScore(row)})`
-              : `기술 ${row.technical_score === null ? "–" : row.technical_score.toFixed(1)} · 재무 ${
-                  row.fundamental_score === null ? "–" : row.fundamental_score.toFixed(1)
-                }`}
-          </p>
+          <ScoreParts row={row} showJudged={false} />
         </div>
       )}
 

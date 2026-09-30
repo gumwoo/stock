@@ -368,3 +368,13 @@ a.live__eventTitle:hover {
   font-size: var(--t-micro);
   color: var(--c-text-tertiary);
 }
+
+.live__scores {
+  margin: var(--s-2) 0;
+}
+
+.live__scoresTitle {
+  margin: 0;
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
