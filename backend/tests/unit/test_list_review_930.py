@@ -56,7 +56,10 @@ def test_top3_groups_keep_heavyweights_and_count_two_percent() -> None:
         and fund.peak_930 == pytest.approx((5.65 + 1.54) / 2)
         and fund.peak_930_2pct == 1
     )
-    assert g["기술 TOP3(현재 규칙, 대형주 포함)"].n == 1 and g["종합 TOP3(현재 규칙, 대형주 포함)"].n == 1
+    assert (
+        g["기술 TOP3(현재 규칙, 대형주 포함)"].n == 1
+        and g["종합 TOP3(현재 규칙, 대형주 포함)"].n == 1
+    )
 
 
 def test_stats_ignore_names_without_a_peak() -> None:
