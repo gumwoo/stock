@@ -228,9 +228,12 @@ def build(
                 tags[i] = []
                 order.append(r)
             tags[i].append(f"{label}{n}")
+    # 합치기는 한 종목 안에서만: 앞 종목의 뉴스와 다음 종목의 점수가 한 메시지에 섞이지 않게.
+    messages = list(parts)
     for r in order:
         i = int(r["instrument_id"])
         events = list(events_by_id.get(i) or [])
-        parts.append(score_message(r, tags[i], bool(events)))
-        parts += news_messages(str(r["name"]), events)
-    return pack(parts)
+        messages += pack(
+            [score_message(r, tags[i], bool(events)), *news_messages(str(r["name"]), events)]
+        )
+    return messages
