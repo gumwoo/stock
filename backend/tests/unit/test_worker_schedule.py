@@ -44,6 +44,7 @@ def test_the_morning_runs_in_seoul_time_in_order_before_the_open() -> None:
         "preopen_supplement",
         "preopen_scores",
         "watchlist_before_open",
+        "kis_opinions_morning",
     ):
         job = scheduler.get_job(job_id)
         assert str(job.trigger.timezone) == "Asia/Seoul"
@@ -55,7 +56,12 @@ def test_the_morning_runs_in_seoul_time_in_order_before_the_open() -> None:
         "preopen_supplement": (8, 30),
         "preopen_scores": (8, 40),
         "watchlist_before_open": (8, 50),
+        # 증권사 의견은 목록 확정 뒤, 개장 전. 늦게 깨면 5분만 기다린다(09:00 실시간 채우기와 KIS 잠금을 다투지 않게).
+        "kis_opinions_morning": (8, 53),
     }
+    assert scheduler.get_job("kis_opinions_morning").misfire_grace_time == 300
+    evening = {f.name: str(f) for f in scheduler.get_job("kis_opinions_evening").trigger.fields}
+    assert (evening["hour"], evening["minute"]) == ("18", "0")
 
 
 class _Calendar:

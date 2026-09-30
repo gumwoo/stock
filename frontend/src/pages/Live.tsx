@@ -10,6 +10,7 @@ import {
   heavyweightNote,
   prevLimitNote,
 } from "../components/MarketWeight";
+import { AnalystLine } from "../components/AnalystLine";
 import { ScoreParts, hasScoreParts } from "../components/ScoreParts";
 import { ThemeNews } from "../components/ThemeNews";
 import type { ListSignalRow, LiveBar, LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
@@ -629,6 +630,7 @@ export function Live({
                   </span>
                 ))}
               </div>
+              {scoreRow && <AnalystLine analyst={scoreRow.analyst} showNone />}
               {scoreRow && hasScoreParts(scoreRow) && (
                 <section className="live__scores" aria-label="08:40 점수">
                   <p className="live__scoresTitle">08:40 점수 (전 거래일 종가·재무 기준, 뉴스 점수는 합계에 들어가지 않음)</p>

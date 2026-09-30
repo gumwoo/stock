@@ -20,7 +20,7 @@ from app.realtime.gateway import load_members, member_dict
 from app.repositories import instrument_repo, minute_repo
 from app.scoring.policy import THRESHOLDS
 from app.scoring.watchlist import STRATEGY_VERSION_V2
-from app.services import heavyweight_service, price_limit_service
+from app.services import analyst_service, heavyweight_service, price_limit_service
 from app.services.heavyweight_service import Weight
 from app.services.price_limit_service import PrevLimit
 
@@ -60,6 +60,7 @@ def signal_row(
     code: str | None,
     weight: Weight | None = None,
     limit: PrevLimit | None = None,
+    analyst: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """목록 행 하나를 신호 탭의 행으로. 순수하다.
 
@@ -98,6 +99,8 @@ def signal_row(
         **weight_fields(weight),
         # 전일 상한가(표시 전용): 전 거래일 일봉 기준. 목록 선정·채점에는 쓰지 않는다.
         **limit_fields(limit),
+        # 증권사 투자의견(참고, KIS). 조회하지 못한 종목은 null, 조회했는데 리포트가 없으면 count 0.
+        "analyst": analyst,
     }
 
 
@@ -130,6 +133,20 @@ def _limits(
         return {}
 
 
+def _analysts(
+    session: Session, day: date, ids: list[int], limits: dict[int, PrevLimit]
+) -> dict[int, dict[str, Any]]:
+    """증권사 의견 표시는 보조다. 읽다 실패하면 표시 없이 신호를 그대로 보인다."""
+    try:
+        with session.begin_nested():
+            return analyst_service.summaries(
+                session, day, ids, closes={i: x.close for i, x in limits.items()}
+            )
+    except Exception:
+        logger.exception("list signals: analyst opinions failed; no opinion lines")
+        return {}
+
+
 def weight_fields(weight: Weight | None) -> dict[str, Any]:
     return {
         "market_weight_pct": weight.weight_pct if weight else None,
@@ -153,6 +170,7 @@ def list_signals(day: date, session: SessionDep) -> list[dict[str, Any]]:
     weights = _weights(session, day, ids)
     # 목록을 얼린 시각까지 들어온 봉만(나중에 받은 봉으로 지난 화면을 바꾸지 않게).
     limits = _limits(session, day, ids, snap.created_at)
+    analysts = _analysts(session, day, ids, limits)
     return [
         signal_row(
             m,
@@ -160,6 +178,7 @@ def list_signals(day: date, session: SessionDep) -> list[dict[str, Any]]:
             instrument_repo.current_symbol(session, m.instrument_id),
             weights.get(m.instrument_id),
             limits.get(m.instrument_id),
+            analysts.get(m.instrument_id),
         )
         for m, name in rows
     ]

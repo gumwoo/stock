@@ -26,6 +26,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.collectors.base import CollectorError, run_collector
 from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import DartFundamentalCollector
+from app.collectors.kis_invest_opinion import KisInvestOpinionCollector
 from app.collectors.kis_market_cap import KisMarketCapCollector
 from app.collectors.kis_minute import (
     DEFAULT_BACKFILL_SESSIONS,
@@ -103,6 +104,11 @@ _SEC_WEEKLY = CronTrigger(day_of_week="sat", hour=8, minute=0, timezone="Asia/Se
 
 # 장 마감 뒤 시가총액 순위(지수 대형주 표시용). 15:40 지수 분봉 뒤, 16:20 분봉 앞이라 KIS 한 번에 하나 잠금이 비어 있다.
 _KR_MARKET_CAP = CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone="Asia/Seoul")
+# 증권사 투자의견(참고 표시): 08:50 목록 확정 뒤, 개장 전. 늦게 깨면 09:00 실시간 채우기와 KIS 잠금을 다투므로 5분만 기다리고,
+# 놓친 종목은 저녁(18:00)에 채운다 — 목록 날 D의 표시는 D보다 앞선 날짜의 리포트만 쓴다. 늦게 받으면 전날 늦게 등록된
+# 리포트가 더 들어올 수 있고, 그런 조회는 개장 뒤 받은 것으로 표시된다.
+_KR_OPINIONS = CronTrigger(day_of_week="mon-fri", hour=8, minute=53, timezone="Asia/Seoul")
+_KR_OPINIONS_EVENING = CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone="Asia/Seoul")
 # The day's minute bars, after the close and before the daily loop. A job of
 # its own: a failure here must not take the proven daily loop down with it.
 _KR_MINUTES = CronTrigger(day_of_week="mon-fri", hour=16, minute=20, timezone="Asia/Seoul")
@@ -207,6 +213,23 @@ def _kr_market_cap() -> None:
             return
         if attempt < 2:
             time_module.sleep(60)
+
+
+def _kr_opinions(*, only_missing: bool = False) -> None:
+    """증권사 투자의견. 다른 KIS 실행이 잠금을 쥐고 있으면 1분 뒤 두 번까지 다시 해 본다."""
+    if not MarketCalendar(Market.KR).is_session(MarketCalendar(Market.KR).local_today(utc_now())):
+        return
+    for attempt in range(3):
+        with session_scope() as session:
+            run = run_collector(KisInvestOpinionCollector(only_missing=only_missing), session)
+        if run.status is not CollectorStatus.SKIPPED or "another KIS run" not in (run.detail or ""):
+            return
+        if attempt < 2:
+            time_module.sleep(60)
+
+
+def _kr_opinions_evening() -> None:
+    _kr_opinions(only_missing=True)
 
 
 def _kr_minutes() -> None:
@@ -326,6 +349,22 @@ def build_scheduler() -> BlockingScheduler:
         guarded("kis_market_cap_after_close", _kr_market_cap),
         _KR_MARKET_CAP,
         id="kis_market_cap_after_close",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        guarded("kis_opinions_morning", _kr_opinions),
+        _KR_OPINIONS,
+        id="kis_opinions_morning",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        guarded("kis_opinions_evening", _kr_opinions_evening),
+        _KR_OPINIONS_EVENING,
+        id="kis_opinions_evening",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,

@@ -6,6 +6,7 @@ invisible to migrations.
 """
 
 from app.core.types import Interval, SampleType
+from app.models.analyst import AnalystOpinion, AnalystOpinionFetch
 from app.models.attention import SearchTrend, SignalAttention
 from app.models.backtest import BacktestRun, BacktestWindow
 from app.models.base import Base
@@ -70,6 +71,8 @@ from app.models.theme import ThemeNewsDay
 from app.models.watchlist import WatchlistMember, WatchlistSnapshot
 
 __all__ = [
+    "AnalystOpinion",
+    "AnalystOpinionFetch",
     "ApiCallBucket",
     "BacktestRun",
     "BacktestWindow",

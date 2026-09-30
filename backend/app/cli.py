@@ -31,6 +31,7 @@ from app import cli_backtest
 from app.collectors.base import run_collector
 from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import MAX_YEARS_BACK, DartFundamentalCollector
+from app.collectors.kis_invest_opinion import LOOKBACK_DAYS, KisInvestOpinionCollector
 from app.collectors.kis_market_cap import KisMarketCapCollector
 from app.collectors.kis_minute import KisIndexMinuteCollector, KisMinuteCollector
 from app.collectors.krx_master import KrxMasterCollector
@@ -50,6 +51,7 @@ from app.core.types import Freshness
 from app.db import session_scope
 from app.models import Interval
 from app.repositories import candle_repo, instrument_repo, news_repo
+from app.scoring.analyst import WINDOW_DAYS
 from app.scoring.review import DayStats
 from app.seed import seed_watchlist
 from app.services import (
@@ -81,6 +83,7 @@ COLLECTORS = {
     "index_minute": KisIndexMinuteCollector,
     "theme": ThemeNewsCollector,
     "kis_market_cap": KisMarketCapCollector,
+    "kis_opinion": KisInvestOpinionCollector,
     "us_semis": UsSemiReferenceCollector,
 }
 
@@ -100,7 +103,16 @@ PERIODS: dict[str, int] = {"2y": 2, "5y": 5, "10y": 10, "max": MAX_YEARS_BACK}
 # is the filer's entire XBRL history in a single document; there is no shorter
 # request to make, so a period given here would be silently discarded.
 FIXED_RANGE = frozenset(
-    {"sec", "naver", "disclosure", "datalab", "index_minute", "theme", "kis_market_cap"}
+    {
+        "sec",
+        "naver",
+        "disclosure",
+        "datalab",
+        "index_minute",
+        "theme",
+        "kis_market_cap",
+        "kis_opinion",
+    }
 )
 
 
@@ -951,6 +963,28 @@ def cmd_entry_rules(minutes: str) -> int:
     return 0
 
 
+def cmd_opinion_backfill(days: list[date]) -> int:
+    """지난 목록 종목의 증권사 의견을 한 번 받는다. 조회 끝은 오늘이고, 화면은 목록 날보다 앞선 날짜만 쓴다."""
+    too_old = [
+        d
+        for d in days
+        if (MarketCalendar(Market.KR).local_today(utc_now()) - d).days > LOOKBACK_DAYS - WINDOW_DAYS
+    ]
+    if too_old:
+        print(
+            f"warning: {', '.join(map(str, too_old))} is too far back for a query ending today "
+            f"({LOOKBACK_DAYS} days); those days will show no opinion line"
+        )
+    with session_scope() as session:
+        run = run_collector(KisInvestOpinionCollector(days=days), session)
+    print(f"{run.source}: {run.status.value} read={run.items_read} saved={run.items_saved}")
+    if run.detail:
+        print(f"  detail: {run.detail}")
+    if run.error:
+        print(f"  warnings: {run.error}")
+    return 0 if run.status.value in ("SUCCESS", "PARTIAL") else 1
+
+
 def cmd_list_review(day: date) -> int:
     """목록 하루의 사후 기술 통계. 지수 대형주는 따로. 읽기만 한다."""
     with session_scope() as session:
@@ -1305,6 +1339,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     lr.add_argument("--day", required=True, help="list day, YYYY-MM-DD")
 
+    ob = sub.add_parser(
+        "opinion-backfill",
+        help="fetch KIS analyst opinions for the names on past morning lists (KIS calls: one per name)",
+    )
+    ob.add_argument("--days", required=True, help="list days, comma separated YYYY-MM-DD")
+
     sub.add_parser("forward", help="the forward-test record so far; reads only")
     sub.add_parser(
         "review", help="the forward record against its review gates and decision rule; reads only"
@@ -1376,6 +1416,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_preopen(args.action, args.asof)
         case "intraday":
             return cmd_intraday(args.analyze)
+        case "opinion-backfill":
+            return cmd_opinion_backfill(
+                [date.fromisoformat(d.strip()) for d in args.days.split(",")]
+            )
         case "list-review":
             return cmd_list_review(date.fromisoformat(args.day))
         case "forward":

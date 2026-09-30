@@ -287,6 +287,24 @@ export interface OvernightSemis {
   }[];
 }
 
+/** 증권사 투자의견 요약(KIS, 목록 날 전 90일, 참고용). */
+export interface AnalystSummary {
+  window_days: number;
+  count: number;
+  brokers: number;
+  avg_target: number | null;
+  target_brokers: number;
+  /** 평균 목표가 / 전일 종가 - 1(%). 전일 종가가 없으면 null. */
+  upside_pct: number | null;
+  opinions: Record<string, number>;
+  raised: number;
+  lowered: number;
+  latest: { date: string; broker: string; opinion: string; label: string; target: number | null } | null;
+  /** 100행 상한에 걸려 창 안이 다 오지 않았다(건수는 "이상"). */
+  truncated: boolean;
+  fetched_after_open: boolean;
+}
+
 /** 그날 아침 목록 한 종목의 신호(`/api/lists/{day}/signals`). */
 export interface ListSignalRow extends MarketWeightFields {
   member_id: number;
@@ -312,6 +330,8 @@ export interface ListSignalRow extends MarketWeightFields {
   weight_total: number | null;
   /** 판단 기준(지금 규칙). */
   thresholds: { buy_interest: number; caution: number };
+  /** 증권사 의견(참고). 조회하지 못했으면 null, 조회했는데 리포트가 없으면 count 0. 옛 서버는 보내지 않는다. */
+  analyst?: AnalystSummary | null;
 }
 
 /** 그날 관찰 목록(`/api/lists/{day}/members`). 시세(`last`)는 없다. */

@@ -17,6 +17,7 @@ import {
   prevLimitNote,
 } from "../components/MarketWeight";
 import { dayLabel } from "../components/MorningStatus";
+import { AnalystLine } from "../components/AnalystLine";
 import { ScoreParts } from "../components/ScoreParts";
 import { SignalFactorDrawer } from "../components/SignalFactorDrawer";
 import "./Dashboard.css";
@@ -103,6 +104,7 @@ function SignalCard({
 
       {heavyweightNote(row) && <p className="mw__note">{heavyweightNote(row)}</p>}
       {prevLimitNote(row) && <p className="mw__note">{prevLimitNote(row)}</p>}
+      <AnalystLine analyst={row.analyst} />
       {warning && <p className="card__warn">{warning}</p>}
       {judged === null && row.abstained_reason && <p className="card__note">{row.abstained_reason}</p>}
 

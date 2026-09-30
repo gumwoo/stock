@@ -26,7 +26,12 @@ from app.repositories import minute_repo
 from app.scoring import price_limit
 from app.scoring.intraday import ANALYSIS_VERSION
 from app.scoring.watchlist import SELECTION_VERSION_V2, STRATEGY_VERSION_V2
-from app.services import heavyweight_service, overnight_service, price_limit_service
+from app.services import (
+    analyst_service,
+    heavyweight_service,
+    overnight_service,
+    price_limit_service,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +49,8 @@ class Row:
     """전 거래일 상한가 상태(LOCKED / CLOSED / TOUCHED)."""
     gap: float | None = None
     """그날 첫 1분봉 시가 / 전 거래일 종가 - 1(%)."""
+    reports: int | None = None
+    """목록 날 전 90일 증권사 리포트 수. None은 조회하지 못함(0과 다르다)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +100,12 @@ def groups(rows: Sequence[Row]) -> list[Stats]:
             out.append(stats(f"판단 {action}", g))
     for reason in sorted({x for r in rest for x in r.reasons}):
         out.append(stats(f"이유 {reason}", [r for r in rest if reason in r.reasons]))
+    with_reports = [r for r in rest if r.reports]
+    without = [r for r in rest if r.reports == 0]
+    if with_reports:
+        out.append(stats("증권사 리포트 있음(90일)", with_reports))
+    if without:
+        out.append(stats("증권사 리포트 없음(조회됨)", without))
     for code, label in LIMIT_LABELS.items():
         g = [r for r in rest if r.prev_limit == code]
         if g:
@@ -144,6 +157,7 @@ def review(session: Session, day: date) -> Review | None:
     # 사후 분석이므로 이전 순위표가 없으면 그날(또는 뒤) 표로 뗀다 — 출력에 "사후 판정"으로 적는다.
     weights = heavyweight_service.weights_for(session, day, ids, allow_after=True)
     limits = price_limit_service.prev_limits(session, day, ids)
+    analysts = analyst_service.summaries(session, day, ids)
     first_bars = session.execute(
         select(MinuteBar.instrument_id, MinuteBar.open)
         .where(MinuteBar.session_date == day, MinuteBar.instrument_id.in_(ids))
@@ -174,6 +188,7 @@ def review(session: Session, day: date) -> Review | None:
                 mfe=s.mfe_pct,
                 prev_limit=lim.state if lim else None,
                 gap=gap,
+                reports=analysts[m.instrument_id]["count"] if m.instrument_id in analysts else None,
             )
         )
     any_w = next(iter(weights.values()), None)
