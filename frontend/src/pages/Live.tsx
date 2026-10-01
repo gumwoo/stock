@@ -657,6 +657,12 @@ export function Live({
                   <h2 id="live-events-title" className="live__eventsTitle">
                     근거 뉴스·공시
                   </h2>
+                  {member.events.some((e) => e.kind) && (
+                    <p className="live__explainGuide">
+                      좋은 일/나쁜 일은 공시는 제목 규칙, 뉴스는 AI 판독입니다. '보통'은 9시 시가 기준 지난 기록이고 그대로 된다는
+                      뜻이 아닙니다.
+                    </p>
+                  )}
                   <ul className="live__eventList">
                     {member.events.map((e, i) => {
                       const dir = e.sentiment > 0 ? "up" : e.sentiment < 0 ? "down" : "flat";
@@ -670,7 +676,8 @@ export function Live({
                             {dir === "up" ? "+" : dir === "down" ? "−" : "·"}
                           </span>
                           <span className="live__eventMeta">
-                            {eventTypeLabel(e.event_type)} · {shortSeoulTime(e.first_at)}
+                            {eventTypeLabel(e.event_type)}
+                            {e.first_at ? ` · ${shortSeoulTime(e.first_at)}` : ""}
                             {countLabel(e.articles, e.disclosures ?? 0)}
                           </span>
                           {e.url ? (
@@ -680,6 +687,18 @@ export function Live({
                             </a>
                           ) : (
                             <span className="live__eventTitle">{e.title}</span>
+                          )}
+                          {e.kind && (
+                            <div className="live__explain">
+                              <p>
+                                <strong>{e.kind}</strong> — <span className="live__verdict">{e.verdict}</span>
+                                {e.verdict_source && <span className="live__explainSrc"> ({e.verdict_source})</span>}
+                              </p>
+                              {e.what && <p>무슨 일: {e.what}</p>}
+                              {e.why && <p>왜: {e.why}</p>}
+                              {(e.usual || !e.usual_ours) && <p>보통: {e.usual ?? "기록 부족"}</p>}
+                              {e.usual_ours && <p>우리 목록: {e.usual_ours}</p>}
+                            </div>
                           )}
                         </li>
                       );

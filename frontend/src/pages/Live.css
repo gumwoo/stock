@@ -378,3 +378,31 @@ a.live__eventTitle:hover {
   font-size: var(--t-micro);
   color: var(--c-text-tertiary);
 }
+
+.live__explainGuide {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}
+
+.live__explain {
+  grid-column: 2;
+  margin-top: var(--s-1);
+  padding: var(--s-2);
+  border-left: 2px solid var(--c-border-strong);
+  font-size: var(--t-small);
+  color: var(--c-text-secondary);
+}
+
+.live__explain p {
+  margin: 0 0 2px;
+}
+
+.live__verdict {
+  font-weight: var(--w-semibold);
+}
+
+.live__explainSrc {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+}

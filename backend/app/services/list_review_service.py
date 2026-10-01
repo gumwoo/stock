@@ -24,15 +24,18 @@ from app.models import Instrument
 from app.models.intraday import IntradaySummary, MinuteBar
 from app.models.watchlist import WatchlistMember, WatchlistSnapshot
 from app.repositories import minute_repo
-from app.scoring import price_limit
+from app.scoring import disclosure_events, event_explain, price_limit
+from app.scoring.early_path import EarlyPath, measure
 from app.scoring.intraday import ANALYSIS_VERSION
 from app.scoring.watchlist import SELECTION_VERSION_V2, STRATEGY_VERSION_V2
 from app.services import (
     analyst_service,
     briefing_service,
+    event_brief_service,
     heavyweight_service,
     overnight_service,
     price_limit_service,
+    reaction_service,
 )
 
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -61,6 +64,10 @@ class Row:
     """그날 점수 순위(현재 브리핑 규칙을 08:40 저장 점수에 사후 적용): "기술1", "종합2" 등."""
     locked_open: bool = False
     """09:30 전 모든 1분봉이 한 가격(시초 상한가 잠김 등) — 사실상 살 수 없었다."""
+    early: EarlyPath | None = None
+    """09:00 봉 시가 진입 기준 첫 1시간(+2.5%/+5% 도달, 닿기 전 최저, 10시). 09:00 봉이 없으면 None."""
+    kinds: tuple[str, ...] = ()
+    """목록 이유가 된 공시의 쉬운 종류(예: "유상증자", "자회사 유상증자")."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,10 +81,19 @@ class Stats:
     mfe_median: float | None
     peak_930: float | None = None
     peak_930_2pct: int = 0
+    hit25_10: float | None = None
+    """+2.5%에 10분 안에 닿은 비율(09:00 봉이 있는 종목 중)."""
+    hit25_60: float | None = None
+    miss_at10: float | None = None
+    """+2.5%에 1시간 안에 못 닿은 종목의 10:00 평균(%)."""
 
 
 def _mean(xs: Sequence[float]) -> float | None:
     return statistics.fmean(xs) if xs else None
+
+
+def _rate(flags: Sequence[bool]) -> float | None:
+    return sum(flags) / len(flags) if flags else None
 
 
 def stats(label: str, rows: Sequence[Row]) -> Stats:
@@ -94,6 +110,9 @@ def stats(label: str, rows: Sequence[Row]) -> Stats:
         mfe_median=statistics.median(mfe) if mfe else None,
         peak_930=_mean([r.peak_930 for r in rows if r.peak_930 is not None]),
         peak_930_2pct=sum(1 for r in rows if r.peak_930 is not None and r.peak_930 >= 2.0),
+        hit25_10=_rate([r.early.hit_25_within(10) for r in rows if r.early]),
+        hit25_60=_rate([r.early.hit_25 is not None for r in rows if r.early]),
+        miss_at10=_mean([r.early.at_10 for r in rows if r.early and r.early.hit_25 is None]),
     )
 
 
@@ -124,6 +143,22 @@ def groups(rows: Sequence[Row]) -> list[Stats]:
         g = [r for r in rest if r.prev_limit == code]
         if g:
             out.append(stats(label, g))
+    # 시가 갭 구간, 지수가 오른 날·내린 날(장 분위기에 따라 갈리는지 보려고), 공시 쉬운 종류.
+    for lo, hi, label in (
+        (-99.0, -2.0, "갭 -2% 미만"),
+        (-2.0, 0.0, "갭 -2~0%"),
+        (0.0, 2.0, "갭 0~+2%"),
+        (2.0, 99.0, "갭 +2% 이상"),
+    ):
+        g = [r for r in rest if r.gap is not None and lo <= r.gap < hi]
+        if g:
+            out.append(stats(label, g))
+    for up, label in ((True, "지수 오른 날"), (False, "지수 내린·보합 날")):
+        g = [r for r in rest if r.market is not None and (r.market > 0) == up]
+        if g:
+            out.append(stats(label, g))
+    for kind in sorted({k for r in rest for k in r.kinds}):
+        out.append(stats(f"공시 {kind}", [r for r in rest if kind in r.kinds]))
     heavy = [r for r in rows if r.heavyweight]
     if heavy:
         out.append(stats("지수 대형주", heavy))
@@ -240,12 +275,27 @@ def review(session: Session, day: date, *, with_semis: bool = True) -> Review | 
     ).all()
     opens: dict[int, Decimal] = {row[0]: row[1] for row in first_bars}
     bars_by: dict[int, list[tuple[datetime, Decimal, Decimal, Decimal]]] = {}
-    for i, ts, o, h, lo in session.execute(
-        select(MinuteBar.instrument_id, MinuteBar.ts, MinuteBar.open, MinuteBar.high, MinuteBar.low)
+    closes: dict[int, list[Any]] = {}
+    for i, ts, o, h, lo, c in session.execute(
+        select(
+            MinuteBar.instrument_id,
+            MinuteBar.ts,
+            MinuteBar.open,
+            MinuteBar.high,
+            MinuteBar.low,
+            MinuteBar.close,
+        )
         .where(MinuteBar.session_date == day, MinuteBar.instrument_id.in_(ids))
         .order_by(MinuteBar.instrument_id, MinuteBar.ts)
     ).all():
         bars_by.setdefault(i, []).append((ts, o, h, lo))
+        closes.setdefault(i, []).append((ts, o, h, lo, c))
+    kinds: dict[int, set[str]] = {}
+    for i, evs in event_brief_service.disclosure_events_for(session, day, snap.asof, ids).items():
+        for e in evs:
+            found = disclosure_events.matched(e["report_nm"])
+            if found is not None:
+                kinds.setdefault(i, set()).add(event_explain.disclosure(found[0], found[1]).kind)
     ranks = _ranks(members)
     out = Review(day=day)
     by_id: dict[int, Row] = {}
@@ -276,6 +326,10 @@ def review(session: Session, day: date, *, with_semis: bool = True) -> Review | 
                 peak_930=peak,
                 tops=tuple(ranks.get(m.instrument_id, ())),
                 locked_open=locked,
+                early=measure(
+                    [reaction_service.to_bar(*b) for b in closes.get(m.instrument_id, [])]
+                ),
+                kinds=tuple(sorted(kinds.get(m.instrument_id, ()))),
             )
         )
         by_id[m.instrument_id] = out.rows[-1]

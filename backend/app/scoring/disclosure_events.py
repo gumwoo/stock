@@ -125,8 +125,12 @@ _SUBSIDIARY = ("자회사의주요경영사항", "종속회사의주요경영사
 SUBSIDIARY_WEIGHT = 0.5
 
 
-def classify(report_nm: str) -> DisclosureEvent | None:
-    """The event a disclosure title reports, or None if it is not one we count."""
+def matched(report_nm: str) -> tuple[str, bool, DisclosureEvent] | None:
+    """`classify`가 고른 규칙의 맞은 문구(예: "유상증자결정"), 자회사 공시인가, 규칙의 사건. 사건이 아니면 None.
+
+    화면의 쉬운 설명과 반응 기준표가 공시를 규칙 단위로 나누는 데 쓴다(같은 규칙 묶음 안에서도 "상장폐지"와 "횡령배임"처럼
+    문구마다 뜻이 달라 문구를 키로 쓴다).
+    """
     tag = _LEADING_TAG.match(report_nm)
     if tag is not None and "정정" in tag.group(0):
         return None
@@ -134,10 +138,20 @@ def classify(report_nm: str) -> DisclosureEvent | None:
     if any(n in flat for n in _NOT_EVENTS):
         return None
     for phrases, event in _RULES:
-        if any(p in flat for p in phrases):
-            if any(m in flat for m in _SUBSIDIARY):
-                return DisclosureEvent(
-                    event.event_type, event.sentiment, event.intensity * SUBSIDIARY_WEIGHT
-                )
-            return event
+        hit = next((p for p in phrases if p in flat), None)
+        if hit is not None:
+            return hit, any(m in flat for m in _SUBSIDIARY), event
     return None
+
+
+def classify(report_nm: str) -> DisclosureEvent | None:
+    """The event a disclosure title reports, or None if it is not one we count."""
+    found = matched(report_nm)
+    if found is None:
+        return None
+    _, subsidiary, event = found
+    if subsidiary:
+        return DisclosureEvent(
+            event.event_type, event.sentiment, event.intensity * SUBSIDIARY_WEIGHT
+        )
+    return event

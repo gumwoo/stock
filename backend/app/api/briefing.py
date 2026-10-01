@@ -21,10 +21,7 @@ from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import get_db
 from app.models import WatchlistSnapshot
-from app.models.disclosure import Disclosure
 from app.realtime.gateway import load_members, member_dict
-from app.repositories import disclosure_repo
-from app.scoring import disclosure_events
 from app.scoring.watchlist import STRATEGY_VERSION_V2
 from app.services import briefing_service
 
@@ -34,41 +31,6 @@ SessionDep = Annotated[Session, Depends(get_db)]
 SEOUL = ZoneInfo("Asia/Seoul")
 KR = MarketCalendar(Market.KR)
 WINDOW = (time(8, 40), time(9, 30))
-
-
-def _disclosures(
-    session: Session, day: date, snap: WatchlistSnapshot, ids: list[int]
-) -> dict[int, list[dict[str, Any]]]:
-    if not ids:
-        return {}
-    before = KR.sessions_between(
-        date.fromordinal(day.toordinal() - 14), date.fromordinal(day.toordinal() - 1)
-    )
-    if not before:
-        return {}
-    filed = disclosure_repo.filed_between(
-        session, first=before[-1], before=day, stored_by=snap.asof, instrument_ids=ids
-    )
-    events = [d for d in filed if disclosure_events.classify(d.report_nm) is not None]
-    if not events:
-        return {}
-    found = session.execute(
-        select(Disclosure.id, Disclosure.rcept_no).where(Disclosure.id.in_([d.id for d in events]))
-    ).all()
-    receipts: dict[int, str] = {row[0]: row[1] for row in found}
-    out: dict[int, list[dict[str, Any]]] = {}
-    for d in sorted(events, key=lambda x: receipts.get(x.id, ""), reverse=True):
-        out.setdefault(d.instrument_id, []).append(
-            {
-                "event_type": None,
-                "title": f"[공시] {d.report_nm}",
-                "url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipts[d.id]}"
-                if receipts.get(d.id)
-                else None,
-                "disclosures": 1,
-            }
-        )
-    return out
 
 
 @router.get("")
@@ -100,10 +62,7 @@ def briefing(session: SessionDep, day: date | None = None, force: bool = False) 
     try:  # 뉴스·공시는 보조다: 실패해도 점수 순위는 보낸다
         _, members = load_members(target)
         events = {m.instrument_id: member_dict(m)["events"] for m in members}
-        # 뉴스 묶음이 없는 종목은 목록 이유가 된 공시(전 거래일~전날 접수, 목록을 얼린 시각까지 저장된 것)로 채운다.
-        bare = [int(r["instrument_id"]) for r in rows if not events.get(int(r["instrument_id"]))]
-        with session.begin_nested():
-            events.update(_disclosures(session, target, snap, bare))
+        # 공시 사건과 쉬운 설명은 load_members(event_brief_service)가 붙인다.
     except Exception:
         logger.exception("briefing: news and disclosures failed; scores only")
     return {

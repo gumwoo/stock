@@ -32,7 +32,7 @@ import contextlib
 import itertools
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
@@ -54,7 +54,12 @@ from app.realtime.kis_feed import LiveBook, parse_control, parse_trades, subscri
 from app.repositories import instrument_repo, minute_repo
 from app.repositories.minute_repo import SecondBarRow
 from app.scoring.watchlist import MAX_MEMBERS, STRATEGY_VERSION_V2
-from app.services import heavyweight_service, overlay_service, price_limit_service
+from app.services import (
+    event_brief_service,
+    heavyweight_service,
+    overlay_service,
+    price_limit_service,
+)
 
 logger = logging.getLogger(__name__)
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -78,6 +83,16 @@ class LiveEvent:
     url: str | None = None
     lead_source: str | None = None
     lead_id: int | None = None
+    # 쉬운 설명(판단 보조, `event_brief_service`). 붙이지 못하면 비어 있다.
+    kind: str | None = None
+    what: str | None = None
+    verdict: str | None = None
+    why: str | None = None
+    verdict_source: str | None = None
+    usual: str | None = None
+    usual_short: str | None = None
+    usual_ours: str | None = None
+    usual_ours_short: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +182,9 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
             return TRACKED_FALLBACK, found
     # 링크는 멤버를 읽은 세션을 닫은 뒤 따로 찾는다. 링크 조회의 SQL 오류가 같은 트랜잭션을 망가뜨려 목록·구독까지
     # 막지 않게 하려는 것이다(화면 보조 기능이 시세 피드를 멈추면 안 된다).
-    return source, attach_limits(attach_weights(attach_links(found, asof), day), day, created)
+    linked = attach_links(found, asof)
+    explained = attach_explanations(linked, day, asof) if source == MORNING_LIST else linked
+    return source, attach_limits(attach_weights(explained, day), day, created)
 
 
 def to_events(raw: object) -> tuple[LiveEvent, ...]:
@@ -234,6 +251,43 @@ def attach_links(
         )
         out.append(replace(m, events=events))
     return out
+
+
+def attach_explanations(
+    members: list[LiveMember], day: date, asof: datetime | None
+) -> list[LiveMember]:
+    """사건마다 쉬운 설명을 붙이고, 사건 칸에 없는 목록 이유 공시를 앞에 더한다. 실패하면 그대로."""
+    if not members or asof is None:
+        return members
+    try:
+        with session_scope() as session:
+            got = event_brief_service.explain(
+                session,
+                day,
+                asof,
+                [
+                    {
+                        "instrument_id": m.instrument_id,
+                        "reasons": list(m.reasons),
+                        "events": [asdict(e) for e in m.events],
+                    }
+                    for m in members
+                ],
+            )
+        names = {f.name for f in fields(LiveEvent)}
+        return [
+            replace(
+                m,
+                events=tuple(
+                    LiveEvent(**{k: v for k, v in e.items() if k in names})
+                    for e in got.get(m.instrument_id, [asdict(x) for x in m.events])
+                ),
+            )
+            for m in members
+        ]
+    except Exception:  # 설명은 보조다
+        logger.exception("live feed: event explanations failed; plain events")
+        return members
 
 
 def attach_weights(members: list[LiveMember], day: date) -> list[LiveMember]:
@@ -410,6 +464,15 @@ def member_dict(m: LiveMember, last: dict[str, Any] | None = None) -> dict[str, 
                 "articles": e.articles,
                 "disclosures": e.disclosures,
                 "url": e.url,
+                "kind": e.kind,
+                "what": e.what,
+                "verdict": e.verdict,
+                "why": e.why,
+                "verdict_source": e.verdict_source,
+                "usual": e.usual,
+                "usual_short": e.usual_short,
+                "usual_ours": e.usual_ours,
+                "usual_ours_short": e.usual_ours_short,
             }
             for e in m.events
         ],

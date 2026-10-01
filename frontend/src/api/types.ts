@@ -171,6 +171,20 @@ export interface LiveEvent {
   disclosures?: number;
   /** 제목을 준 기사(네이버 주소 우선)나 DART 공시 주소. 못 찾으면 null. */
   url: string | null;
+  /** 쉬운 설명(판단 보조). 옛 서버나 설명을 붙이지 못한 경우 없다. */
+  kind?: string | null;
+  what?: string | null;
+  /** 좋음 / 다소 좋음 / 애매 / 다소 나쁨 / 나쁨 */
+  verdict?: string | null;
+  why?: string | null;
+  /** 좋음·나쁨의 출처: "공시 제목 규칙" 또는 "기사 판독(언어 모델)" */
+  verdict_source?: string | null;
+  /** 지난 3개월 같은 공시의 9시 시가 기준 기록(공시만). */
+  usual?: string | null;
+  usual_short?: string | null;
+  /** 우리 목록 기록(건수가 충분할 때만). */
+  usual_ours?: string | null;
+  usual_ours_short?: string | null;
 }
 
 export interface LiveState {

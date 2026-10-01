@@ -133,6 +133,16 @@ def test_the_state_carries_the_events() -> None:
             "articles": 1,
             "disclosures": 0,
             "url": "https://x/1",
+            # 쉬운 설명 칸(아침 목록에서만 채워진다)
+            "kind": None,
+            "what": None,
+            "verdict": None,
+            "why": None,
+            "verdict_source": None,
+            "usual": None,
+            "usual_short": None,
+            "usual_ours": None,
+            "usual_ours_short": None,
         }
     ]
 

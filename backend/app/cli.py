@@ -963,6 +963,30 @@ def cmd_entry_rules(minutes: str) -> int:
     return 0
 
 
+def cmd_reaction_reference(disclosures: str, minutes: str, first: date, last: date) -> int:
+    """3개월 공시 반응 기준표를 만든다. 외부 호출 없음(파일과 DB 읽기만)."""
+    import json as json_module
+    from pathlib import Path
+
+    from app.services import reaction_service
+
+    data = json_module.loads(Path(disclosures).read_text(encoding="utf-8"))
+    bars = json_module.loads(Path(minutes).read_text(encoding="utf-8"))
+    with session_scope() as session:
+        table = reaction_service.build_reference(session, data, bars, first=first, last=last)
+    out = reaction_service.REFERENCE
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json_module.dumps(table, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8"
+    )
+    print(f"wrote {out}: {len(table['detail'])} kinds, {len(table['group'])} groups")
+    for k, v in sorted(table["detail"].items(), key=lambda kv: -kv[1]["n"])[:12]:
+        print(
+            f"  {k:<30} n={v['n']:<4} hit60 {v['hit_60']:.0%} hit10 {v['hit_10']:.0%} miss10 {v['miss_at_10']}"
+        )
+    return 0
+
+
 def cmd_opinion_backfill(days: list[date]) -> int:
     """지난 목록 종목의 증권사 의견을 한 번 받는다. 조회 끝은 오늘이고, 화면은 목록 날보다 앞선 날짜만 쓴다."""
     too_old = [
@@ -989,16 +1013,21 @@ def _pct(v: float | None) -> str:
     return "     -" if v is None else f"{v:+6.2f}"
 
 
+def _share(v: float | None) -> str:
+    return "-" if v is None else f"{v * 100:.0f}%"
+
+
 def _review_table(rows: list[list_review_service.Row]) -> None:
     print(
         f"\n{'group':<34}{'n':>4}{'1st hour':>9}{'open->close':>12}{'vs index':>9}{'up':>6}"
-        f"{'max rise med':>13}{'9:30 max avg':>13}{'>=2%':>7}"
+        f"{'max rise med':>13}{'9:30 max avg':>13}{'>=2%':>7}{'+2.5% 10m':>10}{'+2.5% 60m':>10}{'miss@10':>9}"
     )
     for g in list_review_service.groups(rows):
         print(
             f"{g.label:<34}{g.n:>4}{_pct(g.first_hour):>9}{_pct(g.open_close):>12}"
             f"{_pct(g.vs_market):>9}{g.up_close:>3}/{g.n:<2}{_pct(g.mfe_median):>11}"
             f"{_pct(g.peak_930):>13}{g.peak_930_2pct:>4}/{g.n:<2}"
+            f"{_share(g.hit25_10):>10}{_share(g.hit25_60):>10}{_pct(g.miss_at10):>9}"
         )
 
 
@@ -1407,6 +1436,19 @@ def main(argv: list[str] | None = None) -> int:
     lr.add_argument("--from", dest="start", help="pool list days from this day, YYYY-MM-DD")
     lr.add_argument("--to", dest="end", help="pool list days up to this day, YYYY-MM-DD")
 
+    rr = sub.add_parser(
+        "reaction-reference",
+        help="build app/reference/disclosure_reaction.json from the disclosure study files (DB reads only)",
+    )
+    rr.add_argument(
+        "--disclosures", required=True, help="the disclosure file of the 2026-09-26 study"
+    )
+    rr.add_argument("--minutes", required=True, help="the first-hour minute file of that study")
+    rr.add_argument("--first", default="2026-06-30", help="first entry session")
+    rr.add_argument(
+        "--last", default="2026-09-21", help="last entry session (the minute file ends here)"
+    )
+
     ob = sub.add_parser(
         "opinion-backfill",
         help="fetch KIS analyst opinions for the names on past morning lists (KIS calls: one per name)",
@@ -1484,6 +1526,13 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_preopen(args.action, args.asof)
         case "intraday":
             return cmd_intraday(args.analyze)
+        case "reaction-reference":
+            return cmd_reaction_reference(
+                args.disclosures,
+                args.minutes,
+                date.fromisoformat(args.first),
+                date.fromisoformat(args.last),
+            )
         case "opinion-backfill":
             return cmd_opinion_backfill(
                 [date.fromisoformat(d.strip()) for d in args.days.split(",")]

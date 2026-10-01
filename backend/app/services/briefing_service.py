@@ -18,6 +18,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 MAX_CHARS = 200
+NL = "\n"
 SEOUL = ZoneInfo("Asia/Seoul")
 TOP = 3
 
@@ -47,6 +48,10 @@ EVENT = {
 LIMIT = {"LOCKED": "전일 점상한가", "CLOSED": "전일 상한가", "TOUCHED": "전일 상한가 터치"}
 OPINION = {"BUY": "매수", "HOLD": "중립", "SELL": "매도"}
 NEWS_PER_NAME = 2
+GUIDE = (
+    "※ 읽는 법: 좋은 일/나쁜 일은 공시는 제목 규칙, 뉴스는 AI 판독. '보통'은 9시 시가에 샀다면 1시간 안에 +2.5%까지 간 비율"
+    "(10분 안 비율·보통 걸린 분), 닿기 전 최저 평균, 못 닿았을 때 10시 평균이다. 지난 기록일 뿐 그대로 된다는 뜻이 아니다."
+)
 
 
 def clip(text: str, limit: int) -> str:
@@ -198,6 +203,66 @@ def news_messages(name: str, events: Sequence[Mapping[str, Any]]) -> list[str]:
     return out
 
 
+def event_messages(name: str, events: Sequence[Mapping[str, Any]]) -> list[str]:
+    """사건마다 쉬운 설명 한 통(무슨 일 · 좋은 일? · 왜 · 보통)과 원문 링크 한 줄. 설명이 없으면 예전처럼 제목과 링크.
+
+    같은 종류·판단의 사건(예: 소송 판결 두 건)은 한 번만 보낸다 — 종목당 두 칸이 같은 문장으로 차지 않게.
+    """
+    out: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    picked: list[Mapping[str, Any]] = []
+    for e in events:
+        if e.get("kind"):
+            key = (str(e["kind"]), str(e.get("verdict") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+        picked.append(e)
+    for e in picked[:NEWS_PER_NAME]:
+        if not e.get("kind"):
+            out += news_messages(name, [e])
+            continue
+        head = f"📌 {name} · {e['kind']} — {e.get('verdict') or '애매'}"
+        what = f"무슨 일: {e.get('what') or e.get('title') or ''}"
+        why = f"왜: {e.get('why') or ''}"
+        if e.get("usual_short"):
+            usual = f"보통: {e['usual_short']}"
+            ours = f"우리 목록: {e['usual_ours_short']}" if e.get("usual_ours_short") else ""
+        else:
+            # 뉴스는 3개월 기준표가 없다: 우리 목록 기록이 "보통"이다(빼지 않는다)
+            usual = f"보통: {e.get('usual_ours_short') or '기록 부족'}"
+            ours = ""
+        out.append(clip_lines(fit_event(head, what, why, usual, ours)))
+        url = str(e.get("url") or "")
+        if url and len(url) <= 150:
+            line = f"{name} 원문: {url}"
+            out.append(line if len(line) <= MAX_CHARS else url)
+    return out
+
+
+def fit_event(head: str, what: str, why: str, usual: str, ours: str) -> str:
+    """사건 한 통을 200자에 맞춘다. 남는 자리는 "왜"(좋은 일/나쁜 일의 이유)에 먼저 주고, "무슨 일"은 40자까지 줄인다.
+    "우리 목록"은 넣으면 둘 중 하나가 잘릴 때 뺀다."""
+    what, why = clip(what, 10_000), clip(why, 10_000)
+    for extra in ([ours] if ours else [], []):
+        room = (
+            MAX_CHARS - len(NL.join(x for x in (head, usual, *extra) if x)) - 2
+        )  # 무슨 일·왜 줄바꿈
+        if len(what) + len(why) <= room:
+            return NL.join(x for x in (head, what, why, usual, *extra) if x)
+        if extra:
+            continue
+        why_n = max(1, min(len(why), max(room - 40, room // 2)))
+        what_n = max(1, room - why_n)
+        return NL.join(x for x in (head, clip(what, what_n), clip(why, why_n), usual) if x)
+    raise AssertionError("unreachable")
+
+
+def clip_lines(text: str) -> str:
+    """줄바꿈을 지키며 200자로 자른다."""
+    return text if len(text) <= MAX_CHARS else text[: MAX_CHARS - 1] + "…"
+
+
 def pack(parts: Sequence[str]) -> list[str]:
     """이웃한 짧은 메시지를 200자 안에서 합친다. 각 조각은 이미 200자 이하."""
     out: list[str] = []
@@ -239,6 +304,8 @@ def build(
         parts.append(text)
     else:
         parts += [clip(line, MAX_CHARS) for line in header]
+    if any(e.get("kind") for es in events_by_id.values() for e in es):
+        parts.append(GUIDE)
 
     tags: dict[int, list[str]] = {}
     order: list[Mapping[str, Any]] = []
@@ -255,6 +322,6 @@ def build(
         i = int(r["instrument_id"])
         events = list(events_by_id.get(i) or [])
         messages += pack(
-            [score_message(r, tags[i], bool(events)), *news_messages(str(r["name"]), events)]
+            [score_message(r, tags[i], bool(events)), *event_messages(str(r["name"]), events)]
         )
     return messages
