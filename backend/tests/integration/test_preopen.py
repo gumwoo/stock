@@ -408,7 +408,10 @@ class TestStages:
         assert collector.name == "PREOPEN_NEWS_SUPPLEMENT"
         assert collector.instrument_ids == frozenset(world.ids)
         assert collector.since == swept
-        assert seen["llm"]["budget"] == preopen_service.LLM_SUPPLEMENT_BUDGET == 30
+        assert seen["llm"]["budget"] == preopen_service.LLM_SUPPLEMENT_BUDGET == 50
+        assert seen["llm"]["judge_cap"] == preopen_service.LLM_SUPPLEMENT_JUDGE_CAP == 25
+        assert seen["llm"]["spread"] is True
+        assert seen["llm"]["stop_at"] == datetime.combine(DAY, time(8, 36), tzinfo=SEOUL)
         assert seen["llm"]["after_hit_id"] == 4242
         world.session.refresh(pool)
         assert pool.stages["supplement"]["status"] == "SUCCESS"  # type: ignore[index]

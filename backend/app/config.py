@@ -140,7 +140,10 @@ class Settings(BaseSettings):
     # Stop before the owner's own Claude usage runs out. The subscription's
     # windows are shared with every other use of Claude on the account.
     llm_max_five_hour_utilization: float = Field(default=0.5, gt=0, le=1)
-    llm_max_seven_day_utilization: float = Field(default=0.8, gt=0, le=1)
+    # 0.8 -> 0.95 on 2026-10-01 at the owner's choice: the seven-day window sat at 0.79 from
+    # their own use, so 0.8 would have stopped every morning run. A 100+30-item morning barely moved
+    # it (second decimal place); the cost of 400+50 is not yet measured.
+    llm_max_seven_day_utilization: float = Field(default=0.95, gt=0, le=1)
     # A scheduled pass over tracked names before the close, so the day's
     # signal can carry the morning's news. Off unless asked for: it spends the
     # owner's Claude usage without anyone at the keyboard.

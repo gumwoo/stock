@@ -116,8 +116,16 @@ POLL = timedelta(seconds=60)
 DISCOVERY_TOP = 30
 # 풀 전체를 덮는 안전 상한(풀은 보통 80~100). DART 호출은 QuotaGuard가 따로 막는다(2026-09-28, 20에서 올림).
 PREFETCH_CAP = 150
-LLM_MORNING_BUDGET = 100
-LLM_SUPPLEMENT_BUDGET = 30
+# 아침 LLM(판정+해석 합계, 건). 2026-10-02부터 100·30에서 올림: 판정이 예산을 다 써서 해석이 0건이던 날이 있었다.
+# 호출 하나가 25건이고 판정·해석을 따로 올림하므로 아침 최대 17호출 + 보충 최대 3호출로, 우리 쿼터(5시간 30호출·하루 120호출) 안이다.
+LLM_MORNING_BUDGET = 400
+LLM_SUPPLEMENT_BUDGET = 50
+# 판정 몫의 상한(호출 단위로 맞춤). 나머지는 해석 몫이다.
+LLM_MORNING_JUDGE_CAP = 100
+LLM_SUPPLEMENT_JUDGE_CAP = 25
+# 이 시각 뒤로는 새 LLM 호출을 시작하지 않는다(늦게 깬 날 보충·목록 고정을 밀어내지 않게).
+LLM_MORNING_STOP = time(8, 25)
+LLM_SUPPLEMENT_STOP = time(8, 36)
 # 재무를 다시 받는 간격. 기존 재무 신선도 기준과 같은 값을 쓴다.
 FUNDAMENTAL_REFRESH = scoring_service.FUNDAMENTAL_SOURCE_CHECK
 PREFETCH_PREFIX = "PREFETCH_"
@@ -690,7 +698,19 @@ def run_morning(session: Session, *, clock: Callable[[], datetime] = utc_now) ->
     _step(session, pool, PREFETCH, lambda: prefetch(session, pool, now=clock()))
     if _stop(session, pool, day, clock, (LLM, THEME_NEWS)):
         return pool
-    _step(session, pool, LLM, lambda: _read(session, ids, LLM_MORNING_BUDGET, after_hit_id=None))
+    _step(
+        session,
+        pool,
+        LLM,
+        lambda: _read(
+            session,
+            ids,
+            LLM_MORNING_BUDGET,
+            after_hit_id=None,
+            judge_cap=LLM_MORNING_JUDGE_CAP,
+            stop_at=datetime.combine(day, LLM_MORNING_STOP, tzinfo=SEOUL),
+        ),
+    )
     if _stop(session, pool, day, clock, (THEME_NEWS,)):
         return pool
     _step(session, pool, THEME_NEWS, lambda: _themes(session))
@@ -706,7 +726,7 @@ def _stop(
 ) -> bool:
     """개장했거나 오늘 V2 목록이 이미 있으면, 남은 단계를 건너뛰었다고 적고 멈춘다.
 
-    늦게 깬 체인이 08:50 뒤에도 사전 수집과 LLM 100건을 계속 돌면, 이미 얼린
+    늦게 깬 체인이 목록 고정 뒤에도 사전 수집과 아침 LLM을 계속 돌면, 이미 얼린
     목록이 가리키는 풀 행을 다시 쓰고 아무도 읽지 않을 해석에 구독을 쓴다.
     """
     listed = session.execute(
@@ -728,12 +748,24 @@ def _stop(
 
 
 def _read(
-    session: Session, ids: Sequence[int], budget: int, *, after_hit_id: int | None
+    session: Session,
+    ids: Sequence[int],
+    budget: int,
+    *,
+    after_hit_id: int | None,
+    judge_cap: int,
+    stop_at: datetime,
 ) -> tuple[str, str]:
     if not get_settings().llm_schedule_enabled:
         return SKIPPED, "LLM_SCHEDULE_ENABLED is off"
     run = llm_service.run_within_budget(
-        session, budget=budget, instrument_ids=ids, after_hit_id=after_hit_id
+        session,
+        budget=budget,
+        instrument_ids=ids,
+        after_hit_id=after_hit_id,
+        judge_cap=judge_cap,
+        spread=True,  # 흔한 낱말 이름 몇 종목이 예산을 다 먹지 않게 종목마다 돌아가며
+        stop_at=stop_at,
     )
     detail = f"{run.items} of {budget} items"
     if run.stopped:
@@ -809,7 +841,14 @@ def run_supplement(
         session,
         pool,
         SUPPLEMENT_LLM,
-        lambda: _read(session, ids, LLM_SUPPLEMENT_BUDGET, after_hit_id=mark),
+        lambda: _read(
+            session,
+            ids,
+            LLM_SUPPLEMENT_BUDGET,
+            after_hit_id=mark,
+            judge_cap=LLM_SUPPLEMENT_JUDGE_CAP,
+            stop_at=datetime.combine(day, LLM_SUPPLEMENT_STOP, tzinfo=SEOUL),
+        ),
     )
     _step(session, pool, THEME_REFRESH, lambda: _themes(session))
     return pool

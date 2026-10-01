@@ -55,6 +55,10 @@ from app.repositories.llm_repo import LlmCallRow, SentimentRow
 from app.repositories.news_repo import OpenHit, QueryHitRow
 
 QUOTA_GROUP = "claude_subscription"
+# 종목마다 돌아가며 고를 때(`spread_hits`): 후보를 예산의 몇 배까지 받아 둘지, 그 상한, "최근"의 길이.
+SPREAD_OVERFETCH = 50
+SPREAD_POOL = 20000
+SPREAD_RECENT = timedelta(hours=72)
 
 # 2: version 1 confirmed 19 of 22 hits wrongly on the first real batch — the
 # company's baseball and esports teams, the broadcaster named as a report's
@@ -244,6 +248,7 @@ def _run_unlocked(
     apply: Callable[[Sequence[OpenHit], LlmResult, LlmRunReport], int],
     provider: LlmProvider,
     guard: Any,
+    stop_at: datetime | None = None,
 ) -> LlmRunReport:
     settings = get_settings()
     report = LlmRunReport(purpose=purpose)
@@ -259,6 +264,10 @@ def _run_unlocked(
         return report
     for start in range(0, len(hits), size):
         batch = hits[start : start + size]
+        if stop_at is not None and utc_now() >= stop_at:
+            # 늦게 깬 날: 쓸 사람이 없는 시각에 새 호출을 시작하지 않는다(이미 시작한 호출은 끝까지 간다).
+            report.stopped = f"past {ensure_utc(stop_at, field='stop_at'):%H:%M}Z; no new call"
+            break
         try:
             guard.reserve(QUOTA_GROUP, purpose)
         except QuotaExhausted as refused:
@@ -411,17 +420,23 @@ def judge_pending(
     provider: LlmProvider | None = None,
     guard: Any = None,
     after_hit_id: int | None = None,
+    spread: bool = False,
+    stop_at: datetime | None = None,
 ) -> LlmRunReport:
-    """Ask the model about PENDING hits, newest first, and append its verdicts."""
+    """Ask the model about PENDING hits, newest first, and append its verdicts.
+
+    `spread`: 종목마다 돌아가며 고른다(`spread_hits`). 아침 예산 실행만 쓴다."""
     settings = get_settings()
     model = settings.relevance_llm_model
     hits = news_repo.pending_for_model(
         session,
-        limit=limit,
+        limit=min(limit * SPREAD_OVERFETCH, SPREAD_POOL) if spread else limit,
         prompt_version=RELEVANCE_PROMPT_VERSION,
         instrument_ids=instrument_ids,
         after_hit_id=after_hit_id,
     )
+    if spread:
+        hits = spread_hits(hits, limit, now=utc_now())
 
     def apply(batch: Sequence[OpenHit], result: LlmResult, report: LlmRunReport) -> int:
         answers = _answers(result, "verdicts", len(batch))
@@ -470,6 +485,7 @@ def judge_pending(
         apply=apply,
         provider=provider if provider is not None else default_provider(),
         guard=guard if guard is not None else QuotaGuard(),
+        stop_at=stop_at,
     )
 
 
@@ -481,18 +497,24 @@ def read_confirmed(
     provider: LlmProvider | None = None,
     guard: Any = None,
     after_hit_id: int | None = None,
+    spread: bool = False,
+    stop_at: datetime | None = None,
 ) -> LlmRunReport:
-    """Read CONFIRMED hits not yet read under this model and prompt, newest first."""
+    """Read CONFIRMED hits not yet read under this model and prompt, newest first.
+
+    `spread`: 종목마다 돌아가며 고른다(`spread_hits`). 아침 예산 실행만 쓴다."""
     settings = get_settings()
     model = settings.sentiment_llm_model
     hits = news_repo.confirmed_unread(
         session,
         model=model,
         prompt_version=SENTIMENT_PROMPT_VERSION,
-        limit=limit,
+        limit=min(limit * SPREAD_OVERFETCH, SPREAD_POOL) if spread else limit,
         instrument_ids=instrument_ids,
         after_hit_id=after_hit_id,
     )
+    if spread:
+        hits = spread_hits(hits, limit, now=utc_now())
 
     def apply(batch: Sequence[OpenHit], result: LlmResult, report: LlmRunReport) -> int:
         answers = _answers(result, "readings", len(batch))
@@ -550,6 +572,7 @@ def read_confirmed(
         apply=apply,
         provider=provider if provider is not None else default_provider(),
         guard=guard if guard is not None else QuotaGuard(),
+        stop_at=stop_at,
     )
 
 
@@ -568,6 +591,37 @@ class BudgetedRun:
         return sum(r.asked for r in (self.judged, self.read) if r is not None)
 
 
+def spread_hits(
+    hits: Sequence[OpenHit], limit: int, *, now: datetime, recent: timedelta = SPREAD_RECENT
+) -> list[OpenHit]:
+    """종목마다 돌아가며 고른다: 각 종목의 가장 새 기사 하나씩, 그다음 둘째씩 …(종목 안에서는 새것 먼저).
+
+    한 바퀴 안에서는 가장 새 기사가 있는 종목이 먼저다(마지막 바퀴가 잘릴 때 최신 뉴스 종목이 남게).
+    `recent` 안의 기사를 먼저 다 돌고, 남는 자리에만 그보다 오래된 기사를 같은 방식으로 넣는다.
+    흔한 낱말 이름(예: SBS·LS) 한두 종목이 예산을 다 먹어 다른 종목이 해석 없이 남는 것을 막는다.
+    오버레이는 같은 사건 유형을 24시간 안에서 한 번만 세므로, 한 종목의 기사를 다 읽는 것보다 이쪽이 낫다.
+    """
+    cut = now - recent
+    out: list[OpenHit] = []
+    for tier in (
+        [h for h in hits if h.available_at >= cut],
+        [h for h in hits if h.available_at < cut],
+    ):
+        queues: dict[int, list[OpenHit]] = {}
+        for h in sorted(tier, key=lambda x: x.available_at, reverse=True):
+            queues.setdefault(h.instrument_id, []).append(h)
+        order = sorted(queues.values(), key=lambda q: q[0].available_at, reverse=True)
+        depth = 0
+        while len(out) < limit and any(depth < len(q) for q in order):
+            for q in order:
+                if depth < len(q):
+                    out.append(q[depth])
+                    if len(out) >= limit:
+                        return out
+            depth += 1
+    return out
+
+
 def run_within_budget(
     session: Session,
     *,
@@ -576,6 +630,9 @@ def run_within_budget(
     after_hit_id: int | None = None,
     provider: LlmProvider | None = None,
     guard: Any = None,
+    judge_cap: int | None = None,
+    spread: bool = False,
+    stop_at: datetime | None = None,
 ) -> BudgetedRun:
     """판정 뒤 해석을, 둘을 합쳐 `budget`건 안에서. 다른 LLM 실행이 돌면 하지 않는다.
 
@@ -583,6 +640,9 @@ def run_within_budget(
     100이라도 200건을 보낼 수 있었다. 여기서는 판정이 쓴 만큼 해석의 몫이
     줄어든다. 판정이 새로 확정한 기사를 같은 실행 안에서 바로 해석할 수 있게
     순서는 판정이 먼저다. 잠금은 각 호출 묶음(`_run`)이 잡는다.
+
+    `judge_cap`: 판정이 쓸 수 있는 최대 건수(예산 안). 판정 대기는 흔한 낱말 이름 몇 종목에 수천 건씩 쌓여
+    있어, 상한이 없으면 판정이 예산을 다 써서 해석이 0건이 된다(2026-10-01). `spread`·`stop_at`은 두 단계에 그대로 넘긴다.
     """
     out = BudgetedRun(budget=budget)
     if budget <= 0:
@@ -590,11 +650,13 @@ def run_within_budget(
         return out
     out.judged = judge_pending(
         session,
-        limit=budget,
+        limit=budget if judge_cap is None else max(0, min(budget, judge_cap)),
         instrument_ids=instrument_ids,
         provider=provider,
         guard=guard,
         after_hit_id=after_hit_id,
+        spread=spread,
+        stop_at=stop_at,
     )
     if out.judged.stopped:
         out.stopped = out.judged.stopped
@@ -609,6 +671,8 @@ def run_within_budget(
         provider=provider,
         guard=guard,
         after_hit_id=after_hit_id,
+        spread=spread,
+        stop_at=stop_at,
     )
     out.stopped = out.read.stopped
     return out
