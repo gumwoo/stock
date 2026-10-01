@@ -4,12 +4,12 @@
 |-------|----------------------------------------------------------|----------------------------------|
 | 07:00 | 체인: 전체 스윕 → 풀 확정 → 검색 추세 → 사전 수집 → LLM  | 거래일                           |
 | 08:30 | 보충 스윕 → 보충 기사 LLM                                | 풀 확정, 07:00 LLM 단계 종료     |
-| 08:40 | 그날 관찰용 점수                                         | 풀 확정, 사전 수집 단계 종료     |
-| 08:50 | V2 목록 고정                                             | 없음. 빠진 단계는 기록만 한다    |
+| 08:35 | 그날 관찰용 점수                                         | 풀 확정, 사전 수집 단계 종료     |
+| 08:38 | V2 목록 고정                                             | 없음. 빠진 단계는 기록만 한다    |
 
 **시각은 시작 신호일 뿐이다.** 뒷 단계는 앞 단계가 끝났는지를 `preopen_pool.stages`로
-확인하고, 안 끝났으면 1분마다 다시 본다. 08:45까지도 안 되면 건너뛰었다고 기록한다.
-08:50 목록만은 무엇이 빠졌든 만든다. 늦은 것은 목록이 없는 것보다 낫고, 무엇이
+확인하고, 안 끝났으면 1분마다 다시 본다. 08:36까지도 안 되면 건너뛰었다고 기록한다.
+08:38 목록만은(2026-10-02부터, 그 전 08:50) 무엇이 빠졌든 만든다. 늦은 것은 목록이 없는 것보다 낫고, 무엇이
 빠졌는지는 목록의 `inputs`에 남는다. 풀조차 없으면 `DEGRADED_FALLBACK` 풀을 그
 자리에서 만들어 같은 계보로 잇는다.
 
@@ -29,9 +29,9 @@
 **점수는 참고용이고 `signal`에 쓰지 않는다.** 기존 엔진을 그대로 쓰되, 비교군은
 그 시점의 추적 종목으로 고정하고 수와 해시를 남긴다. 시점은 셋으로 나눠 남긴다.
 기술 데이터는 직전 거래일 종가, 재무 데이터는 점수가 쓸 수 있던 가장 늦은 공시가
-쓸 수 있게 된 시각, 평가는 08:40이다. 엔진은 재무를 가격 일봉과 같은 순간(직전
+쓸 수 있게 된 시각, 평가는 08:35(2026-10-01까지 08:40)이다. 엔진은 재무를 가격 일봉과 같은 순간(직전
 종가)에 맞춰 읽는다. 공시의 `available_at`은 다음 개장이라 전날 장 마감 뒤 공시는
-어차피 09:00에야 쓸 수 있으므로, 08:40까지 쓸 수 있는 재무와 같은 집합이다.
+어차피 09:00에야 쓸 수 있으므로, 평가 시각까지 쓸 수 있는 재무와 같은 집합이다.
 
 **한 단계의 예상 밖 오류는 그 단계의 FAILED로 남고 체인은 계속된다.** 다른 작업은
 프로그래밍 오류를 그대로 터뜨려 드러내지만, 아침 체인이 멈추면 그날 목록의 입력이
@@ -106,10 +106,11 @@ KR = MarketCalendar(Market.KR)
 
 # 아침의 시작. 이 시각 뒤에 돈 입력만 "오늘 아침" 입력으로 센다.
 MORNING = time(7, 0)
-# 08:30·08:40 단계가 앞 단계를 기다리는 한계. 08:50 목록 전에 끝나야 한다.
-DEADLINE = time(8, 45)
-# 목록을 얼리는 시각. worker의 `_KR_WATCHLIST` cron(08:50)과 같아야 한다.
-LIST_AT = time(8, 50)
+# 08:30·08:35 단계가 앞 단계를 기다리는 한계. 08:38 목록 전에 끝나야 한다. 기다림은 60초 간격이라 실제 마지막
+# 시작은 한계 + 59초(08:36:59)이고, 점수는 10초 안팎이라 08:38 전에 끝난다.
+DEADLINE = time(8, 36)
+# 목록을 얼리는 시각. worker의 `_KR_WATCHLIST` cron(08:38)과 같아야 한다(2026-10-02부터, 그 전에는 08:50).
+LIST_AT = time(8, 38)
 POLL = timedelta(seconds=60)
 
 DISCOVERY_TOP = 30
@@ -189,7 +190,7 @@ def stage_status(pool: PreopenPool | None, name: str) -> str | None:
 def _locked_stages(session: Session, pool: PreopenPool) -> dict[str, object]:
     """풀 행을 잠그고 DB의 최신 `stages`를 읽는다. 커밋할 때 잠금이 풀린다.
 
-    07:00 체인, 08:30 보충, 08:40 점수, 08:50 목록은 서로 다른 세션에서 같은
+    07:00 체인, 08:30 보충, 08:35 점수, 08:38 목록은 서로 다른 세션에서 같은
     행을 쓴다. 세션은 커밋 뒤에도 객체를 만료시키지 않으므로(`expire_on_commit
     =False`), 처음 읽은 사본에 덧써서 칸 전체를 저장하면 다른 세션이 그사이 적은
     단계가 지워진다. 실제로 끝난 LLM 단계가 RUNNING으로 되돌아가 08:30 보충이
@@ -554,7 +555,7 @@ def _fetch_one(
     return FETCHED if ok else FAILED
 
 
-# --- 08:40 관찰용 점수 ---------------------------------------------------------------
+# --- 08:35 관찰용 점수 ---------------------------------------------------------------
 
 
 def score_pool(session: Session, pool: PreopenPool, *, now: datetime) -> tuple[str, str]:
@@ -627,7 +628,7 @@ def score_pool(session: Session, pool: PreopenPool, *, now: datetime) -> tuple[s
     return (PARTIAL if failed else SUCCESS), detail
 
 
-# --- 작업: 07:00 체인, 08:30 보충, 08:40 점수 ------------------------------------
+# --- 작업: 07:00 체인, 08:30 보충, 08:35 점수 ------------------------------------
 
 
 def run_morning(session: Session, *, clock: Callable[[], datetime] = utc_now) -> PreopenPool | None:
@@ -750,7 +751,7 @@ def _wait_for(
     clock: Callable[[], datetime],
     sleep: Callable[[float], None],
 ) -> tuple[PreopenPool | None, str | None]:
-    """풀이 확정되고 `needs` 단계가 모두 끝날 때까지 기다린다. 08:45가 한계다."""
+    """풀이 확정되고 `needs` 단계가 모두 끝날 때까지 기다린다. `DEADLINE`(08:36)이 한계다."""
     deadline = datetime.combine(day, DEADLINE, tzinfo=SEOUL)
     while True:
         session.expire_all()
@@ -764,6 +765,12 @@ def _wait_for(
         if clock() >= deadline:
             return pool, f"prerequisite not finished by {DEADLINE:%H:%M}: {', '.join(waiting)}"
         sleep(POLL.total_seconds())
+
+
+def _past_list(pool: PreopenPool, now: datetime) -> bool:
+    """목록이 이미 얼었거나 목록 시각이 지났는가."""
+    at = datetime.combine(pool.session_date, LIST_AT, tzinfo=SEOUL)
+    return stage_status(pool, SNAPSHOT) in FINISHED or ensure_utc(now, field="now") >= at
 
 
 def run_supplement(
@@ -780,6 +787,8 @@ def run_supplement(
     if pool is None:
         logger.warning("preopen supplement: no pool for %s", day)
         return None
+    if why is None and _past_list(pool, clock()):
+        why = "the list is already frozen"  # 늦게 깬 날: 아무도 쓰지 않을 보충에 LLM을 쓰지 않는다
     if why is not None:
         for name in (SUPPLEMENT, SUPPLEMENT_LLM, THEME_REFRESH):
             _mark(session, pool, name, SKIPPED, detail=why)
@@ -812,7 +821,7 @@ def run_scores(
     clock: Callable[[], datetime] = utc_now,
     sleep: Callable[[float], None] = time_module.sleep,
 ) -> PreopenPool | None:
-    """08:40: 풀 확정과 사전 수집 종료를 확인한 뒤, 풀 종목의 관찰용 점수를 계산한다."""
+    """08:35: 풀 확정과 사전 수집 종료를 확인한 뒤, 풀 종목의 관찰용 점수를 계산한다."""
     day = _before_open(clock())
     if day is None:
         return None
@@ -823,11 +832,16 @@ def run_scores(
     if why is not None:
         _mark(session, pool, SCORE, SKIPPED, detail=why)
         return pool
+    if _past_list(pool, clock()):
+        # 늦게 깬 날(절전 포함): 목록 시각이 지났거나 목록이 이미 얼었으면 점수를 쓰지 않는다. 목록과 동시에 돌면
+        # 일부만 새 점수인 행이 목록에 복사될 수 있다.
+        _mark(session, pool, SCORE, SKIPPED, detail="the list is already frozen")
+        return pool
     _step(session, pool, SCORE, lambda: score_pool(session, pool, now=clock()))
     return pool
 
 
-# --- 08:50 V2 목록 -------------------------------------------------------------------
+# --- 08:38 V2 목록 -------------------------------------------------------------------
 
 
 def _swept(session: Session, ids: list[int], asof: datetime) -> dict[int, datetime]:
@@ -903,7 +917,7 @@ def take_snapshot(
     now: datetime | None = None,
     only: Collection[int] | None = None,
 ) -> WatchlistSnapshot | None:
-    """08:50 V2 목록. 거래일이 아니거나, 개장 뒤거나, 이미 있으면 None.
+    """08:38 V2 목록. 거래일이 아니거나, 개장 뒤거나, 이미 있으면 None.
 
     풀이 없거나 아직 얼지 않았으면 `DEGRADED_FALLBACK`으로 그 자리에서 얼린다.
     `only`는 테스트가 풀을 자기 종목으로 좁히는 데 쓴다. 운영에서는 넘기지 않는다.

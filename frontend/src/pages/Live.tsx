@@ -464,13 +464,16 @@ export function Live({
   // 다음 아침 목록이 아직 없으면(아침 상태의 날이 최신 목록보다 뒤) 모드와 상관없이 알린다.
   const nextPending = !!preopen && (latestListDay === null || preopen.day > latestListDay);
 
+  // 목록 시각은 서버가 준다(2026-10-02부터 08:38).
+  const listTime = preopen ? shortSeoulTime(preopen.list_at).split(" ")[1] ?? "" : "";
+
   const morningTitle = (): string => {
     if (!preopen && preopenError) return "아침 상태를 불러오지 못했습니다. API 서버가 켜져 있는지 확인해 주세요.";
     if (!preopen) return "아침 상태를 불러오는 중…";
     if (snapshot === "MISSING") return `${dayLabel(preopen.day)} 목록을 만들지 못했습니다.`;
-    if (!preopen.list_passed) return `다음 관찰 목록: ${dayLabel(preopen.day)} 08:50`;
+    if (!preopen.list_passed) return `다음 관찰 목록: ${dayLabel(preopen.day)} ${listTime}`;
     if (snapshot === "SUCCESS") return `${dayLabel(preopen.day)} 목록이 만들어졌습니다.`;
-    return `${dayLabel(preopen.day)} 목록을 만드는 중입니다(08:50).`;
+    return `${dayLabel(preopen.day)} 목록을 만드는 중입니다(${listTime}).`;
   };
 
   const statusLine = (): string => {
@@ -632,8 +635,8 @@ export function Live({
               </div>
               {scoreRow && <AnalystLine analyst={scoreRow.analyst} showNone />}
               {scoreRow && hasScoreParts(scoreRow) && (
-                <section className="live__scores" aria-label="08:40 점수">
-                  <p className="live__scoresTitle">08:40 점수 (전 거래일 종가·재무 기준, 뉴스 점수는 합계에 들어가지 않음)</p>
+                <section className="live__scores" aria-label="아침 점수">
+                  <p className="live__scoresTitle">아침 점수 (전 거래일 종가·재무 기준, 뉴스 점수는 합계에 들어가지 않음)</p>
                   <ScoreParts row={scoreRow} />
                 </section>
               )}

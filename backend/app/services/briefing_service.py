@@ -1,7 +1,7 @@
 """아침 목록 브리핑 문장(카카오톡 나에게 보내기용). 순수 — 이미 만든 신호 행과 관찰 목록 행(dict)만 받는다.
 
 카카오 도구는 메시지당 200자까지라, 머리말(순위) + 종목마다 점수·근거 한 개 + 뉴스·공시 한두 개로 나누고, 짧은 것은
-200자 안에서 이어 붙인다. 점수는 08:40 저장값 그대로이고 새로 계산하지 않는다. 순위:
+200자 안에서 이어 붙인다. 점수는 아침 채점(2026-10-02부터 08:35, 그 전 08:40) 저장값 그대로이고 새로 계산하지 않는다. 순위:
 
 - 기술 1~3: 기술 점수 높은 순
 - 재무 1~3: 재무 점수 높은 순(재무를 쓰지 못한 종목 제외)
@@ -13,10 +13,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 MAX_CHARS = 200
+SEOUL = ZoneInfo("Asia/Seoul")
 TOP = 3
 
 ACTION = {"BUY_INTEREST": "매수 관심", "WATCH": "관망", "CAUTION": "주의", "ABSTAINED": "판단 보류"}
@@ -207,13 +209,24 @@ def pack(parts: Sequence[str]) -> list[str]:
     return out
 
 
+def scored_at(rows: Sequence[Mapping[str, Any]]) -> str:
+    """머리말의 채점 시각: 행들의 `evaluated_at` 중 가장 늦은 것(서울 HH:MM) + "·". 없으면 빈 문자열."""
+    times = [str(r["evaluated_at"]) for r in rows if r.get("evaluated_at")]
+    if not times:
+        return ""
+    latest = max(datetime.fromisoformat(t) for t in times).astimezone(SEOUL)
+    return f"{latest:%H:%M} "
+
+
 def build(
     day: date,
     rows: Sequence[Mapping[str, Any]],
     events_by_id: Mapping[int, Sequence[Mapping[str, Any]]],
 ) -> list[str]:
     ranks = rankings(rows)
-    title = f"[{day.month}/{day.day} 아침 목록 점수 순위] {len(rows)}종목·08:40 채점·참고용(매매 권유 아님)"
+    when = scored_at(rows)
+    scored = f"{when}채점" if when else "채점 기록 없음"
+    title = f"[{day.month}/{day.day} 아침 목록 점수 순위] {len(rows)}종목·{scored}·참고용(매매 권유 아님)"
     rank_lines = []
     for label, top in ranks.items():
         key = {"기술": "technical_score", "재무": "fundamental_score", "종합": "total_score"}[label]

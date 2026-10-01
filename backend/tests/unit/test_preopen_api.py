@@ -16,7 +16,7 @@ def test_rows_follow_the_chain_order_and_missing_stages_are_none() -> None:
     rows = stage_rows({"sweep": {"status": "SUCCESS"}}, now=NOW, opened=False)
     assert [r["name"] for r in rows] == [s[0] for s in STAGES]
     assert rows[0]["status"] == "SUCCESS" and all(r["status"] is None for r in rows[1:])
-    assert rows[-1]["name"] == "snapshot" and rows[-1]["at"] == "08:50"
+    assert rows[-1]["name"] == "snapshot" and rows[-1]["at"] == "08:38"
 
 
 def test_no_pool_before_the_open_is_all_none_and_after_it_the_list_is_missing() -> None:
@@ -78,9 +78,9 @@ def test_the_list_time_matches_the_worker_cron() -> None:
     from app import worker
     from app.services import preopen_service
 
-    assert time(8, 50) == preopen_service.LIST_AT
+    assert time(8, 38) == preopen_service.LIST_AT
     fields = {f.name: str(f) for f in worker._KR_WATCHLIST.fields}
-    assert (fields["hour"], fields["minute"]) == ("8", "50")
+    assert (fields["hour"], fields["minute"]) == ("8", "38")
 
 
 @pytest.mark.parametrize(

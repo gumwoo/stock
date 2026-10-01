@@ -95,7 +95,7 @@ _KR_AFTER_CLOSE = CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone
 # The daily loop (Phase 4-8). Prices for the Korean session once it has closed
 # and the 16:00 news sweep has had its ten minutes; then filings and the record
 # of what earlier judgements turned into. One job, so the steps cannot run out of
-# order. 추적 종목 채점은 2026-09-28 소유자 결정으로 멈췄다. 매일 아침 목록 종목만 08:40에 채점한다.
+# order. 추적 종목 채점은 2026-09-28 소유자 결정으로 멈췄다. 매일 아침 목록 종목만 08:35에 채점한다.
 # 가격·재무 수집은 그대로다: 한국 추적 종목은 목록 종목 재무 순위의 비교군이다.
 _KR_DAILY_LOOP = CronTrigger(day_of_week="mon-fri", hour=16, minute=40, timezone="Asia/Seoul")
 # US prices after the NYSE close, which is early morning in Seoul the next day.
@@ -104,10 +104,10 @@ _SEC_WEEKLY = CronTrigger(day_of_week="sat", hour=8, minute=0, timezone="Asia/Se
 
 # 장 마감 뒤 시가총액 순위(지수 대형주 표시용). 15:40 지수 분봉 뒤, 16:20 분봉 앞이라 KIS 한 번에 하나 잠금이 비어 있다.
 _KR_MARKET_CAP = CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone="Asia/Seoul")
-# 증권사 투자의견(참고 표시): 08:50 목록 확정 뒤, 개장 전. 늦게 깨면 09:00 실시간 채우기와 KIS 잠금을 다투므로 5분만 기다리고,
+# 증권사 투자의견(참고 표시): 08:38 목록 확정 뒤, 개장 전(08:44 아침 카톡 전에 끝나게). 늦게 깨면 09:00 실시간 채우기와 KIS 잠금을 다투므로 5분만 기다리고,
 # 놓친 종목은 저녁(18:00)에 채운다 — 목록 날 D의 표시는 D보다 앞선 날짜의 리포트만 쓴다. 늦게 받으면 전날 늦게 등록된
 # 리포트가 더 들어올 수 있고, 그런 조회는 개장 뒤 받은 것으로 표시된다.
-_KR_OPINIONS = CronTrigger(day_of_week="mon-fri", hour=8, minute=53, timezone="Asia/Seoul")
+_KR_OPINIONS = CronTrigger(day_of_week="mon-fri", hour=8, minute=40, timezone="Asia/Seoul")
 _KR_OPINIONS_EVENING = CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone="Asia/Seoul")
 # The day's minute bars, after the close and before the daily loop. A job of
 # its own: a failure here must not take the proven daily loop down with it.
@@ -120,15 +120,16 @@ _KR_INDEX_MINUTES = (
 )
 # PREOPEN_V2 아침 흐름 (`preopen_service`). 07:00 체인은 전체 스윕 → 풀 확정 →
 # 검색 추세 → 사전 수집 → LLM을 한 작업 안에서 순서대로 돈다. 08:30 보충과
-# 08:40 점수는 시각에 시작하지만, 앞 단계가 끝났는지는 풀의 단계 상태로
-# 확인하고 기다린다. 08:50 목록은 개장 10분 전에 얼린다.
+# 08:35 점수는 시각에 시작하지만, 앞 단계가 끝났는지는 풀의 단계 상태로
+# 확인하고 기다린다. 08:38 목록은 개장 22분 전에 얼린다(2026-10-02부터. 그 전에는
+# 08:40 점수·08:50 목록). 08:44 아침 카톡이 개장 전 판단 시간을 갖게 당겼다.
 _KR_PREOPEN_MORNING = CronTrigger(day_of_week="mon-fri", hour=7, minute=0, timezone="Asia/Seoul")
 _KR_PREOPEN_SUPPLEMENT = CronTrigger(
     day_of_week="mon-fri", hour=8, minute=30, timezone="Asia/Seoul"
 )
-_KR_PREOPEN_SCORES = CronTrigger(day_of_week="mon-fri", hour=8, minute=40, timezone="Asia/Seoul")
+_KR_PREOPEN_SCORES = CronTrigger(day_of_week="mon-fri", hour=8, minute=35, timezone="Asia/Seoul")
 # `preopen_service.LIST_AT`과 같아야 한다(화면이 "다음 목록 시각"으로 보여 준다).
-_KR_WATCHLIST = CronTrigger(day_of_week="mon-fri", hour=8, minute=50, timezone="Asia/Seoul")
+_KR_WATCHLIST = CronTrigger(day_of_week="mon-fri", hour=8, minute=38, timezone="Asia/Seoul")
 
 
 def _collect_korean_news() -> None:
@@ -323,9 +324,11 @@ def build_scheduler() -> BlockingScheduler:
             misfire_grace_time=3600,
         )
 
-    for job_id, trigger, fn in (
-        ("preopen_supplement", _KR_PREOPEN_SUPPLEMENT, _preopen_supplement),
-        ("preopen_scores", _KR_PREOPEN_SCORES, _preopen_scores),
+    # 늦은 발화 허용: 보충 08:34·점수 08:37까지. 기다림의 한계는 08:36이고, 목록 시각(08:38)이 지났으면 두 작업 모두
+    # 건너뛴다. 보충은 늦게 시작하면 목록 뒤에 끝날 수 있다(그 기사는 그날 목록에 들어가지 않는다).
+    for job_id, trigger, fn, grace in (
+        ("preopen_supplement", _KR_PREOPEN_SUPPLEMENT, _preopen_supplement, 240),
+        ("preopen_scores", _KR_PREOPEN_SCORES, _preopen_scores, 120),
     ):
         scheduler.add_job(
             guarded(job_id, fn),
@@ -333,8 +336,7 @@ def build_scheduler() -> BlockingScheduler:
             id=job_id,
             max_instances=1,
             coalesce=True,
-            # 08:45가 기다림의 한계라, 그보다 늦은 발화는 의미가 없다.
-            misfire_grace_time=600,
+            misfire_grace_time=grace,
         )
     scheduler.add_job(
         guarded("watchlist_before_open", _watchlist),

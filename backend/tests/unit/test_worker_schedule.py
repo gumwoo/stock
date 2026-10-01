@@ -54,12 +54,15 @@ def test_the_morning_runs_in_seoul_time_in_order_before_the_open() -> None:
     assert at == {
         "preopen_morning": (7, 0),
         "preopen_supplement": (8, 30),
-        "preopen_scores": (8, 40),
-        "watchlist_before_open": (8, 50),
+        "preopen_scores": (8, 35),
+        "watchlist_before_open": (8, 38),
         # 증권사 의견은 목록 확정 뒤, 개장 전. 늦게 깨면 5분만 기다린다(09:00 실시간 채우기와 KIS 잠금을 다투지 않게).
-        "kis_opinions_morning": (8, 53),
+        "kis_opinions_morning": (8, 40),
     }
     assert scheduler.get_job("kis_opinions_morning").misfire_grace_time == 300
+    # 늦은 발화는 08:38 목록 전에 끝날 수 있는 만큼만.
+    assert scheduler.get_job("preopen_supplement").misfire_grace_time == 240
+    assert scheduler.get_job("preopen_scores").misfire_grace_time == 120
     evening = {f.name: str(f) for f in scheduler.get_job("kis_opinions_evening").trigger.fields}
     assert (evening["hour"], evening["minute"]) == ("18", "0")
 

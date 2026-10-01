@@ -124,7 +124,10 @@ def test_a_name_without_news_says_so_and_titles_are_squeezed() -> None:
 @pytest.mark.parametrize(
     ("now", "status"),
     [
-        (datetime(2026, 9, 29, 23, 49, tzinfo=UTC), "NOT_YET"),  # 08:49 KST
+        (
+            datetime(2026, 9, 29, 23, 39, tzinfo=UTC),
+            "NOT_YET",
+        ),  # 08:39 KST(08:38 목록 직후는 창 밖)
         (datetime(2026, 9, 30, 0, 31, tzinfo=UTC), "LATE"),  # 09:31 KST
     ],
 )
@@ -143,3 +146,25 @@ def test_a_holiday_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(briefing, "utc_now", lambda: datetime(2026, 10, 5, 0, 0, tzinfo=UTC))
     assert briefing.briefing(None, day=None, force=False)["status"] == "HOLIDAY"  # type: ignore[arg-type]
+
+
+def test_the_header_names_the_actual_scoring_time() -> None:
+    from app.services.briefing_service import scored_at
+
+    rows = [
+        {"evaluated_at": "2026-10-01T23:35:00+00:00"},
+        {"evaluated_at": "2026-10-01T23:35:09+00:00"},
+    ]
+    assert scored_at(rows) == "08:35 "
+    assert scored_at([{"evaluated_at": None}]) == ""
+
+
+def test_late_scores_and_supplement_skip_once_the_list_time_passes() -> None:
+    from datetime import date as d_
+    from types import SimpleNamespace
+
+    from app.services.preopen_service import _past_list
+
+    pool: Any = SimpleNamespace(session_date=d_(2026, 10, 2), stages={})
+    assert not _past_list(pool, datetime(2026, 10, 1, 23, 37, 59, tzinfo=UTC))  # 08:37:59 KST
+    assert _past_list(pool, datetime(2026, 10, 1, 23, 38, tzinfo=UTC))  # 08:38 KST

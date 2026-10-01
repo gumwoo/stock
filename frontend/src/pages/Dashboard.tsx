@@ -225,7 +225,7 @@ export function Dashboard({
           )}
         </header>
         <p className="signals__lead">
-          그날 아침 목록 종목을 08:40에 전 거래일 종가·재무로 채점한 것입니다. 매매 권유가 아닙니다.
+          그날 아침 목록 종목을 개장 전에 전 거래일 종가·재무로 채점한 것입니다(채점 시각은 카드 아래). 매매 권유가 아닙니다.
           {backfilled ? ` 이 날의 점수 상세는 ${datetime(backfilled)}에 같은 입력으로 다시 계산해 채웠습니다.` : ""}
         </p>
 
@@ -234,7 +234,7 @@ export function Dashboard({
         {error && <p className="signals__error">{error}</p>}
 
         {!error && days !== null && days.length === 0 && (
-          <p className="signals__empty">아직 아침 목록이 없습니다. 평일 08:50에 만들어집니다.</p>
+          <p className="signals__empty">아직 아침 목록이 없습니다. 평일 08:38에 만들어집니다.</p>
         )}
         {!error && day !== null && rows === null && <p className="signals__empty">불러오는 중…</p>}
 

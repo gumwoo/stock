@@ -416,7 +416,7 @@ class TestStages:
 
     def test_scores_wait_for_the_prefetch_and_skip_without_it(self, world: World) -> None:
         pool = _pool(world)
-        clock = Clock(datetime.combine(DAY, time(8, 40), tzinfo=SEOUL))
+        clock = Clock(datetime.combine(DAY, time(8, 35), tzinfo=SEOUL))
         preopen_service.run_scores(world.session, clock=clock, sleep=clock.sleep)
         world.session.refresh(pool)
         assert pool.stages["score"]["status"] == "SKIPPED"  # type: ignore[index]

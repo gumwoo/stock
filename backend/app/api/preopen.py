@@ -35,8 +35,8 @@ STAGES: tuple[tuple[str, str, str], ...] = (
     (preopen_service.SUPPLEMENT, "아침 기사 보충", "08:30"),
     (preopen_service.SUPPLEMENT_LLM, "보충 기사 해석(LLM)", "08:30"),
     (preopen_service.THEME_REFRESH, "테마 뉴스 갱신", "08:30"),
-    (preopen_service.SCORE, "관찰용 점수", "08:40"),
-    (preopen_service.SNAPSHOT, "관찰 목록", "08:50"),
+    (preopen_service.SCORE, "관찰용 점수", "08:35"),
+    (preopen_service.SNAPSHOT, "관찰 목록", f"{preopen_service.LIST_AT:%H:%M}"),
 )
 SLOW_AFTER = timedelta(minutes=60)
 NOTE_CHARS = 120
@@ -197,7 +197,7 @@ def stage_rows(
     RUNNING인데 시작한 지 60분이 지났으면 "SLOW"(오래 걸림). 워커가 도중에 죽으면 RUNNING이 영원히 남지만,
     07:00 LLM처럼 정상적으로 오래 걸리는 단계도 있어 "멈춤"이라고 단정하지 않는다.
     장이 열렸는데 목록 단계 기록이 없으면 "MISSING". 목록은 다 만든 뒤에만 기록되고 개장 뒤에는 만들지 않으므로,
-    08:50이 아니라 개장 시각부터 실패가 확정된다(그 전에는 만드는 중일 수 있다).
+    목록 시각이 아니라 개장 시각부터 실패가 확정된다(그 전에는 만드는 중일 수 있다).
     note는 실패·건너뜀·일부일 때만, `korean_note`로 한국어로 바꾼 앞 120자(예외 문자열을 화면에 그대로
     늘어놓지 않는다).
     """

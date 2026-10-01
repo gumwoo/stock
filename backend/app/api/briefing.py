@@ -1,7 +1,7 @@
 """아침 목록 브리핑(카카오톡 나에게 보내기용 문장). 읽기만 한다.
 
-데스크톱 앱의 예약 작업이 평일 08:55에 이 주소를 받아 `messages`를 순서대로 그대로 보낸다. 날짜는 서버가 정한다(한국 날짜).
-보내는 창은 08:50~09:30이다: 앱이 늦게 켜져 예약이 늦게 돌면 아침 브리핑이 엉뚱한 시각에 가거나, 08:50 전이라 목록이
+데스크톱 앱의 예약 작업이 평일 08:44(cron 08:40 + 앱 지연 4분)에 이 주소를 받아 `messages`를 순서대로 그대로 보낸다. 날짜는 서버가 정한다(한국 날짜).
+보내는 창은 08:40~09:30이다(08:38 목록이 끝나기 전에 불러 거짓 "목록 없음"이 가지 않게 08:40부터): 앱이 늦게 켜져 예약이 늦게 돌면 아침 브리핑이 엉뚱한 시각에 가거나, 목록 전이라 목록이
 아직 없는데 "목록 없음"이 가지 않게 창 밖에서는 빈 목록을 준다. `force=true`는 시험 발송용(창과 날짜를 무시).
 """
 
@@ -33,7 +33,7 @@ router = APIRouter(prefix="/api/briefing", tags=["briefing"])
 SessionDep = Annotated[Session, Depends(get_db)]
 SEOUL = ZoneInfo("Asia/Seoul")
 KR = MarketCalendar(Market.KR)
-WINDOW = (time(8, 50), time(9, 30))
+WINDOW = (time(8, 40), time(9, 30))
 
 
 def _disclosures(

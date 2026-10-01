@@ -1007,7 +1007,7 @@ def _review_header() -> None:
     print(
         "(groups without heavyweights differ from the pre-registered sample. 'max rise' and 'max to 9:30'"
         " are hindsight highs, not prices anyone could count on selling at. TOP3 = the current briefing"
-        " ranking rule applied after the fact to the 08:40 scores, heavyweights included)"
+        " ranking rule applied after the fact to the morning scores, heavyweights included)"
     )
 
 
