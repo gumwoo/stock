@@ -31,7 +31,11 @@ from app.models.intraday import IntradaySummary, MinuteFetch
 from app.models.watchlist import WatchlistMember, WatchlistSnapshot
 from app.scoring import disclosure_events, lab
 from app.scoring.entry_rules import Bar
-from app.scoring.watchlist import SELECTION_VERSION_V2, STRATEGY_VERSION_V2
+from app.scoring.watchlist import (
+    SELECTION_VERSION_V2_EXCLUDE,
+    SELECTION_VERSIONS_V2,
+    STRATEGY_VERSION_V2,
+)
 from app.services import intraday_service, price_limit_service
 
 logger = logging.getLogger(__name__)
@@ -55,7 +59,7 @@ def _snapshots(session: Session) -> list[WatchlistSnapshot]:
             select(WatchlistSnapshot)
             .where(
                 WatchlistSnapshot.strategy_version == STRATEGY_VERSION_V2,
-                WatchlistSnapshot.selection_version == SELECTION_VERSION_V2,
+                WatchlistSnapshot.selection_version.in_(SELECTION_VERSIONS_V2),
             )
             .order_by(WatchlistSnapshot.session_date)
         ).scalars()
@@ -133,24 +137,25 @@ def our_samples(session: Session) -> tuple[list[lab.Sample], list[dict[str, Any]
         pending = False
         day_samples: list[lab.Sample] = []
         for m in group:
+            tally = excluded if not m.excluded_reason else lab.Exclusions()  # 뺀 종목은 세지 않는다
             got = bars.get((d, m.instrument_id), [])
             st = status.get((d, m.instrument_id))
             if st is None and not got:
-                pending = True
-                excluded.add("수집 전")
+                pending = pending or not m.excluded_reason
+                tally.add("수집 전")
                 continue
             if st is not None and st not in SETTLED:
                 # 최신 수집이 PARTIAL·ERROR면 남은 봉이 있어도 재지 않는다
-                excluded.add("부분 수집")
+                tally.add("부분 수집")
                 continue
             if not got:
-                excluded.add("1분봉 없음")
+                tally.add("1분봉 없음")
                 continue
             if got[0][0] != "0900":
-                excluded.add("09:00 봉 없음")
+                tally.add("09:00 봉 없음")
                 continue
             if lab.locked(got):
-                excluded.add("시초 잠김(살 수 없었음)")
+                tally.add("시초 잠김(살 수 없었음)")
                 continue
             p = prev.get(m.instrument_id)
             day_samples.append(
@@ -165,10 +170,21 @@ def our_samples(session: Session) -> tuple[list[lab.Sample], list[dict[str, Any]
                     fundamental=m.fundamental_score,
                     total=m.total_score,
                     rank=m.rank,
+                    excluded=m.excluded_reason,
+                    screened=snap.selection_version == SELECTION_VERSION_V2_EXCLUDE,
                 )
             )
         samples += day_samples
-        days.append(_day_row(d, snap.asof, len(group), day_samples, excluded, pending))
+        days.append(
+            _day_row(
+                d,
+                snap.asof,
+                sum(1 for m in group if not m.excluded_reason),
+                day_samples,
+                excluded,
+                pending,
+            )
+        )
     return samples, days
 
 
@@ -184,11 +200,19 @@ def _day_row(
         got = [v for v in values if v is not None]
         return statistics.fmean(got) if got else None
 
+    # 성적표는 화면·카톡에 나간 목록(남은 종목) 기준이고, 뺀 종목은 따로 한 칸에 둔다.
+    out_ = [s for s in samples if s.excluded]
+    samples = [s for s in samples if not s.excluded]
     return {
         "day": d.isoformat(),
         "asof": asof.isoformat(),
         "members": members,
         "measured": len(samples),
+        "excluded_names": len(out_),
+        "excluded_rules": [
+            {"take": t, "stop": st, "mean": mean([lab.ret(s.bars, t, st) for s in out_])}
+            for t, st in lab.HEADLINE
+        ],
         "kospi": sum(1 for s in samples if s.market == "KOSPI"),
         "kosdaq": sum(1 for s in samples if s.market == "KOSDAQ"),
         "excluded": excluded.counts,
@@ -327,6 +351,11 @@ def lab_view(session: Session) -> dict[str, Any]:
         "frozen_at": lab.FROZEN_AT.isoformat(),
         "days": days,
         "grid": {"ours": lab.grid(samples), "reference": ref.get("grid", [])},
+        # 성적표 누적 줄: 화면·카톡에 나간 목록(남은 종목) 기준. 비교표(grid)는 제외 전 40개 기준이다.
+        "kept_rules": [
+            lab.rule_stat([s for s in samples if not s.excluded], t, st).as_dict()
+            for t, st in lab.HEADLINE
+        ],
         "conditions": {
             "ours": lab.conditions(samples, lab.OUR_FEATURES),
             "reference": ref.get("conditions", []),

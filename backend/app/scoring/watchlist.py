@@ -59,6 +59,10 @@ class Seen:
     last_action: str | None = None
     disclosure_intensity: float | None = None
     """V2 순서에서만 쓴다: 사건 공시 중 가장 강한 것의 강도(`disclosure_events`)."""
+    judged_score: float | None = None
+    """그날 08:35 판단 점수(합계 ÷ 참여 가중치 합). 판단 보류·채점 실패면 None — 선정 3의 제외에만 쓴다."""
+    prev_change: float | None = None
+    """전 거래일 종가 등락(%). 선정 3의 제외에만 쓴다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +70,8 @@ class Pick:
     instrument_id: int
     rank: int
     reasons: tuple[str, ...]
+    excluded: tuple[str, ...] = ()
+    """선정 3에서 뺀 이유(LOW_SCORE / PREV_SURGE). 비어 있으면 목록에 남는다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +134,16 @@ def select_names(pool: Sequence[Seen], *, limit: int = MAX_MEMBERS) -> Selection
 
 SELECTION_VERSION_V2 = 2
 STRATEGY_VERSION_V2 = "PREOPEN_V2"
+# 선정 3(2026-10-06 목록부터, 10/5는 휴장): 같은 40개를 고른 뒤, 그날 판단 점수 40 미만과 전일 +15% 이상 종목을 뺀다(빈자리는
+# 채우지 않고 순위도 다시 매기지 않는다). 우리 목록 5일(9/28~10/2)과 3개월 공시 표본에서 두 묶음은 9시 시가 매수가 꾸준히
+# 마이너스였다(소유자 결정, 2026-10-02). 판단 점수가 없으면(판단 보류·채점 실패) 빼지 않는다 — 채점이 멈춘 날 목록이
+# 비지 않게. 읽는 쪽은 두 버전을 모두 V2로 센다(`SELECTION_VERSIONS_V2`).
+SELECTION_VERSION_V2_EXCLUDE = 3
+SELECTION_VERSIONS_V2 = (SELECTION_VERSION_V2, SELECTION_VERSION_V2_EXCLUDE)
+EXCLUDE_JUDGED_BELOW = 40.0
+EXCLUDE_PREV_SURGE_AT = 15.0
+LOW_SCORE = "LOW_SCORE"
+PREV_SURGE = "PREV_SURGE"
 EVENT_REASONS = (
     DISCOVERY_SURGE,
     POSITIVE_NEWS_OVERLAY,
@@ -156,13 +172,33 @@ def _order_v2(seen: Seen, why: tuple[str, ...]) -> tuple[float, ...]:
     )
 
 
-def select_names_v2(pool: Sequence[Seen], *, limit: int = MAX_MEMBERS) -> Selection:
-    """그날 이유가 하나라도 있는 종목만, 순위대로 `limit`개까지. 0개도 결과다."""
+def exclusion_v2(seen: Seen) -> tuple[str, ...]:
+    """선정 3에서 뺄 이유. 값이 없으면 빼지 않는다."""
+    why: list[str] = []
+    if seen.judged_score is not None and seen.judged_score < EXCLUDE_JUDGED_BELOW:
+        why.append(LOW_SCORE)
+    if seen.prev_change is not None and seen.prev_change >= EXCLUDE_PREV_SURGE_AT:
+        why.append(PREV_SURGE)
+    return tuple(why)
+
+
+def select_names_v2(
+    pool: Sequence[Seen], *, limit: int = MAX_MEMBERS, exclude: bool = False
+) -> Selection:
+    """그날 이유가 하나라도 있는 종목만, 순위대로 `limit`개까지. 0개도 결과다.
+
+    `exclude`(선정 3): 같은 `limit`개를 고른 뒤 뺄 이유가 있는 종목에 `Pick.excluded`를 붙인다. 순위는 그대로다.
+    """
     chosen = [(s, reasons_v2(s)) for s in pool]
     chosen = [(s, why) for s, why in chosen if why]
     chosen.sort(key=lambda pair: _order_v2(*pair))
     picks = [
-        Pick(instrument_id=s.instrument_id, rank=n, reasons=why)
+        Pick(
+            instrument_id=s.instrument_id,
+            rank=n,
+            reasons=why,
+            excluded=exclusion_v2(s) if exclude else (),
+        )
         for n, (s, why) in enumerate(chosen[:limit], 1)
     ]
     return Selection(picks=picks, left_out=max(0, len(chosen) - limit))

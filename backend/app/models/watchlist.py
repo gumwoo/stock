@@ -140,6 +140,10 @@ class WatchlistMember(Base):
     abstained_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 08:40 채점의 상세(요인 분해·근거 문장). `/api/signals`의 신호와 같은 모양. 채점하지 못했으면 None.
     score_detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # 선정 3(2026-10-06 목록부터, 10/5는 휴장): 40개를 고른 뒤 판단 점수 40 미만·전일 +15% 이상을 뺀다. 뺀 종목도 원래 순위 그대로
+    # 행으로 남겨(이유 코드 "LOW_SCORE"·"PREV_SURGE", 둘이면 쉼표) 분석·1분봉 수집은 제외 전 40개를 계속 본다.
+    # 화면·카톡·증권사 의견 수집은 이 칸이 비어 있는 행만 쓴다.
+    excluded_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("snapshot_id", "instrument_id", name="uq_watchlist_member_name"),

@@ -322,6 +322,9 @@ export interface LabDay {
   asof: string;
   members: number;
   measured: number;
+  /** 선정 3에서 목록에서 뺀 종목 중 잴 수 있었던 수와 그 종목들의 대표 규칙 평균(목록에 없으니 참고). */
+  excluded_names: number;
+  excluded_rules: { take: number; stop: number | null; mean: number | null }[];
   kospi: number;
   kosdaq: number;
   excluded: Record<string, number>;
@@ -372,6 +375,7 @@ export interface LabView {
   days: LabDay[];
   grid: { ours: LabGridCell[]; reference: LabGridCell[] };
   conditions: { ours: LabCondition[]; reference: LabCondition[] };
+  kept_rules: LabRuleStat[];
   hypotheses: LabHypothesis[];
   list_hypotheses: LabListHypothesis[];
   reference_meta: Record<string, string | number>;

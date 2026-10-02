@@ -287,11 +287,14 @@ def build(
     day: date,
     rows: Sequence[Mapping[str, Any]],
     events_by_id: Mapping[int, Sequence[Mapping[str, Any]]],
+    excluded: int = 0,
 ) -> list[str]:
+    """`excluded`: 선정 3에서 뺀 종목 수(판단 점수 40 미만·전일 +15% 이상). 머리말에 한 번 적는다."""
     ranks = rankings(rows)
     when = scored_at(rows)
     scored = f"{when}채점" if when else "채점 기록 없음"
-    title = f"[{day.month}/{day.day} 아침 목록 점수 순위] {len(rows)}종목·{scored}·참고용(매매 권유 아님)"
+    out = f"(점수 40 미만·전일 급등 {excluded}개 뺌)" if excluded else ""
+    title = f"[{day.month}/{day.day} 아침 목록 점수 순위] {len(rows)}종목{out}·{scored}·참고용(매매 권유 아님)"
     rank_lines = []
     for label, top in ranks.items():
         key = {"기술": "technical_score", "재무": "fundamental_score", "종합": "total_score"}[label]

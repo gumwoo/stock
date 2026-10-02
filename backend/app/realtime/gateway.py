@@ -146,7 +146,12 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
             rows = session.execute(
                 select(WatchlistMember, Instrument.name)
                 .join(Instrument, Instrument.instrument_id == WatchlistMember.instrument_id)
-                .where(WatchlistMember.snapshot_id == snap.id)
+                .where(
+                    WatchlistMember.snapshot_id == snap.id,
+                    WatchlistMember.excluded_reason.is_(
+                        None
+                    ),  # 선정 3에서 뺀 종목은 화면·카톡에 없다
+                )
                 .order_by(WatchlistMember.rank)
             ).all()
             for m, name in rows[:MAX_MEMBERS]:

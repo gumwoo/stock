@@ -151,7 +151,7 @@ class TestJudge:
 
 
 def test_the_freeze_is_before_the_first_counted_list() -> None:
-    # 10/5 08:38 목록부터 센다(10/2 목록은 고정 전에 얼었다).
+    # 10/6 08:38 목록부터 센다(10/5는 휴장, 10/2 목록은 고정 전에 얼었다).
     assert datetime(2026, 10, 4, 23, 38, tzinfo=UTC) > lab.FROZEN_AT
     assert datetime(2026, 10, 1, 23, 38, tzinfo=UTC) < lab.FROZEN_AT
 

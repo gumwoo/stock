@@ -84,7 +84,9 @@ from app.repositories import (
 )
 from app.scoring import disclosure_events
 from app.scoring.watchlist import (
-    SELECTION_VERSION_V2,
+    LOW_SCORE,
+    PREV_SURGE,
+    SELECTION_VERSION_V2_EXCLUDE,
     STRATEGY_VERSION_V2,
     Seen,
     Selection,
@@ -92,9 +94,11 @@ from app.scoring.watchlist import (
 )
 from app.services import (
     attention_service,
+    briefing_service,
     discovery_service,
     llm_service,
     overlay_service,
+    price_limit_service,
     regime_service,
     scoring_service,
     watchlist_service,
@@ -438,6 +442,16 @@ def last_fundamental_check(session: Session, instrument_id: int) -> datetime | N
             PreopenPoolMember.instrument_id == instrument_id
         )
     ).scalar()
+
+
+def judged_score(m: PreopenPoolMember) -> float | None:
+    """그날 판단 점수(합계 ÷ 참여 가중치 합) — 신호 탭·카톡의 "판단"과 같다. 판단 보류·채점 실패·가중치 없음이면 None."""
+    if m.total_score is None or m.action in (None, "ABSTAINED"):
+        return None
+    w = briefing_service.weight_total(m.score_detail)
+    if w is None or w <= 0:
+        return None
+    return float(m.total_score) / w
 
 
 def provisional_ranks(
@@ -1016,6 +1030,13 @@ def take_snapshot(
     by_id = {m.instrument_id: m for m in members}
     ids = sorted(by_id)
     overlays = overlay_service.overlays_at(session, asof=asof, instrument_ids=ids)
+    # 선정 3의 제외 입력: 08:35 판단 점수와 전 거래일 종가 등락(목록을 얼리는 시각까지 들어온 수정본).
+    try:
+        with session.begin_nested():  # 보조 입력: 실패해도 목록은 만든다(급등 규칙만 적용 안 됨)
+            prev = price_limit_service.prev_limits_many(session, day, ids, ingested_before=asof)
+    except Exception:
+        logger.exception("watchlist v2 %s: previous-day changes failed; no surge exclusion", day)
+        prev = {}
     attention: dict[int, tuple[str, float | None]] = {}
     seen = []
     for i in ids:
@@ -1031,9 +1052,12 @@ def take_snapshot(
                 disclosure_intensity=m.disclosure_intensity,
                 search_surge=found.surge,
                 discovery_score=m.discovery_score,
+                judged_score=judged_score(m),
+                prev_change=prev[i].change_pct if i in prev else None,
             )
         )
-    chosen = select_names_v2(seen)
+    chosen = select_names_v2(seen, exclude=True)
+    excluded = [p for p in chosen.picks if p.excluded]
     picked = [p.instrument_id for p in chosen.picks]
     swept = _swept(session, ids, asof)
     morning = datetime.combine(day, MORNING, tzinfo=SEOUL)
@@ -1042,9 +1066,22 @@ def take_snapshot(
         session_date=day,
         asof=asof,
         strategy_version=STRATEGY_VERSION_V2,
-        selection_version=SELECTION_VERSION_V2,
+        selection_version=SELECTION_VERSION_V2_EXCLUDE,
         versions=watchlist_service.versions_used(overlays),
-        inputs=_inputs(session, pool, members, picked, swept, asof=asof, morning=morning),
+        inputs={
+            **_inputs(session, pool, members, picked, swept, asof=asof, morning=morning),
+            "exclusion": {
+                # 규칙마다 따로: 점수 단계가 끝나지 않았으면 점수 규칙은 아무것도 빼지 못했다(점수가 비어 있다).
+                "applied": {
+                    LOW_SCORE: stage_status(pool, SCORE) in (SUCCESS, PARTIAL),
+                    PREV_SURGE: bool(prev),
+                },
+                "score_stage": stage_status(pool, SCORE),
+                "excluded": len(excluded),
+                LOW_SCORE: sum(1 for p in excluded if LOW_SCORE in p.excluded),
+                PREV_SURGE: sum(1 for p in excluded if PREV_SURGE in p.excluded),
+            },
+        },
         pool=len(ids),
         left_out=chosen.left_out,
         pool_id=pool.id,
@@ -1094,6 +1131,7 @@ def take_snapshot(
                 prefetch_status=m.prefetch_status,
                 abstained_reason=m.abstained_reason,
                 score_detail=m.score_detail,
+                excluded_reason=",".join(pick.excluded) or None,
             )
         )
     session.commit()
@@ -1102,13 +1140,14 @@ def take_snapshot(
         pool,
         SNAPSHOT,
         SUCCESS,
-        detail=f"{len(chosen.picks)} of {len(ids)} names, {chosen.left_out} left out",
+        detail=f"{len(chosen.picks) - len(excluded)} of {len(ids)} names ({len(excluded)} excluded), {chosen.left_out} left out",
     )
     logger.info(
-        "watchlist v2 %s: %d of %d names, %d left out (pool %s)",
+        "watchlist v2 %s: %d of %d names (%d excluded), %d left out (pool %s)",
         day,
-        len(chosen.picks),
+        len(chosen.picks) - len(excluded),
         len(ids),
+        len(excluded),
         chosen.left_out,
         pool.status,
     )

@@ -62,6 +62,10 @@ class Sample:
     price: float | None = None
     direction: str | None = None
     """공시 방향(기준표만): 좋음 / 나쁨 / 애매."""
+    excluded: str | None = None
+    """선정 3에서 목록에서 뺀 이유(LOW_SCORE / PREV_SURGE). 남은 종목·선정 2 날은 None."""
+    screened: bool = False
+    """선정 3(제외 규칙을 적용한) 목록 날인가. 선정 2 날은 "남음/뺌"으로 나눌 수 없다."""
 
 
 def ret(bars: Sequence[Bar], take: float, stop: float | None) -> float | None:
@@ -101,6 +105,7 @@ RANK_LABELS = ("1~10위", "11~20위", "21~30위", "31~40위")
 VOLUME_LABELS = ("0.7배 미만", "0.7~1.5배", "1.5~3배", "3~10배", "10배 이상")
 PRICE_LABELS = ("2천 미만", "2천~5천", "5천~1만", "1만~5만", "5만 이상")
 MARKET_GAP_LABELS = ("갭 -1% 미만", "갭 ±1%", "갭 +1% 이상")
+EXCLUDED_LABEL = {"LOW_SCORE": "뺌: 판단 점수 40 미만", "PREV_SURGE": "뺌: 전일 +15% 이상"}
 _ORDER = {
     label: i
     for i, label in enumerate(
@@ -111,6 +116,8 @@ _ORDER = {
             *PREV_LABELS,
             *SCORE_LABELS,
             "점수 없음",
+            "목록에 남음",
+            *EXCLUDED_LABEL.values(),
             *RANK_LABELS,
             *VOLUME_LABELS,
             *PRICE_LABELS,
@@ -155,7 +162,18 @@ def market_gap(s: Sample) -> str | None:
 
 Feature = Callable[[Sample], Iterable[str] | str | None]
 
+
+def excluded_bucket(s: Sample) -> tuple[str, ...]:
+    """선정 3 날만 나눈다(그 전 날은 규칙이 없어 모두 "남음"으로 보이면 다른 기간끼리 비교가 된다)."""
+    if not s.screened:
+        return ()
+    if not s.excluded:
+        return ("목록에 남음",)
+    return tuple(EXCLUDED_LABEL.get(x, x) for x in s.excluded.split(","))
+
+
 OUR_FEATURES: tuple[tuple[str, Feature], ...] = (
+    ("목록 제외", excluded_bucket),
     ("시장", lambda s: s.market),
     ("목록 이유", lambda s: s.reasons),
     ("기술 점수", lambda s: score_bucket(s.technical)),

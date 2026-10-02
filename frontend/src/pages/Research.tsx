@@ -78,7 +78,7 @@ function excludedText(d: LabDay): string {
   return parts.length ? parts.join(", ") : "없음";
 }
 
-function DaysTable({ days, overall }: { days: LabDay[]; overall: LabGridCell[] }) {
+function DaysTable({ days, overall }: { days: LabDay[]; overall: LabRuleStat[] }) {
   const headline = days[0]?.rules ?? [];
   return (
     <div className="lab__tablewrap">
@@ -97,7 +97,8 @@ function DaysTable({ days, overall }: { days: LabDay[]; overall: LabGridCell[] }
               </th>
             ))}
             <th className="lab__num">10시(비용 전)</th>
-            <th>뺀 종목</th>
+            <th className="lab__num">목록에서 뺀 종목({headline[0] ? ruleLabel(headline[0].take, headline[0].stop) : ""})</th>
+            <th>잴 수 없던 종목</th>
           </tr>
         </thead>
         <tbody>
@@ -122,6 +123,9 @@ function DaysTable({ days, overall }: { days: LabDay[]; overall: LabGridCell[] }
                 </td>
               ))}
               <td className={`lab__num ${sign(d.at_ten)}`}>{pct(d.at_ten)}</td>
+              <td className={`lab__num ${sign(d.excluded_rules?.[0]?.mean)}`}>
+                {d.excluded_names ? `${d.excluded_names}개 ${pct(d.excluded_rules[0]?.mean)}` : "–"}
+              </td>
               <td className="lab__small">{excludedText(d)}</td>
             </tr>
           ))}
@@ -130,14 +134,14 @@ function DaysTable({ days, overall }: { days: LabDay[]; overall: LabGridCell[] }
           <tr>
             <td colSpan={6}>누적(날짜별 평균의 평균)</td>
             {headline.map((r) => {
-              const cell = overall.find((c) => c.market === "전체" && c.take === r.take && c.stop === r.stop);
+              const cell = overall.find((c) => c.take === r.take && c.stop === r.stop);
               return (
                 <td key={`${r.take}-${r.stop}`} className={`lab__num ${sign(cell?.mean)}`} title={cell ? statTitle(cell) : ""}>
                   {pct(cell?.mean)}
                 </td>
               );
             })}
-            <td colSpan={2} />
+            <td colSpan={3} />
           </tr>
         </tfoot>
       </table>
@@ -442,10 +446,11 @@ export function Research() {
 
       <Section title="매일 성적표" badge="우리 목록">
         <p className="lab__caption">
-          목록 종목 중 그날 1분봉으로 잴 수 있는 종목만 셉니다(1분봉은 장 마감 뒤 16:20에 받습니다). 도달률은 손절 없이 그
-          시간 안에 목표가에 닿아 팔린 비율입니다.
+          화면·카톡에 나간 목록 종목 중 그날 1분봉으로 잴 수 있는 종목만 셉니다(1분봉은 장 마감 뒤 16:20에 받습니다). 도달률은
+          손절 없이 그 시간 안에 목표가에 닿아 팔린 비율입니다. 2026-10-06 목록부터는 판단 점수 40 미만·전일 +15% 이상 종목을
+          목록에서 빼고(원래 순위 유지), 뺀 종목의 결과는 따로 한 칸에 둡니다 — 빼는 규칙이 계속 맞는지 보려고.
         </p>
-        <DaysTable days={view.days} overall={view.grid.ours} />
+        <DaysTable days={view.days} overall={view.kept_rules} />
       </Section>
 
       <Section title="규칙 비교표" badge="탐색 — 판정 아님">

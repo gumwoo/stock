@@ -5,11 +5,15 @@ from __future__ import annotations
 from app.scoring.watchlist import (
     DISCLOSURE_EVENT,
     DISCOVERY_SURGE,
+    LOW_SCORE,
     MAX_MEMBERS,
     NEGATIVE_NEWS_OVERLAY,
     POSITIVE_NEWS_OVERLAY,
+    PREV_SURGE,
     SEARCH_SURGE_REASON,
     SELECTION_VERSION_V2,
+    SELECTION_VERSION_V2_EXCLUDE,
+    SELECTION_VERSIONS_V2,
     STRATEGY_VERSION_V2,
     Seen,
     reasons_v2,
@@ -20,6 +24,8 @@ from app.scoring.watchlist import (
 
 def test_versions_are_their_own() -> None:
     assert (STRATEGY_VERSION_V2, SELECTION_VERSION_V2) == ("PREOPEN_V2", 2)
+    # 선정 3(제외 규칙)도 V2로 읽는다: 읽는 쪽이 하나만 보면 조용히 기록이 끊긴다.
+    assert SELECTION_VERSION_V2_EXCLUDE == 3 and SELECTION_VERSIONS_V2 == (2, 3)
 
 
 def test_tracking_and_a_high_score_are_not_reasons() -> None:
@@ -97,3 +103,47 @@ def test_among_disclosure_only_names_the_stronger_event_ranks_first() -> None:
     unknown = Seen(3, False, has_disclosure_event=True)
     order = [p.instrument_id for p in select_names_v2([weak, strong, unknown]).picks]
     assert order == [2, 1, 3]
+
+
+class TestExclusion:
+    def picks(self, *seen: Seen) -> list[tuple[int, int, tuple[str, ...]]]:
+        return [
+            (p.instrument_id, p.rank, p.excluded)
+            for p in select_names_v2(list(seen), exclude=True).picks
+        ]
+
+    def test_low_scores_and_prior_day_surges_are_marked_and_ranks_stay(self) -> None:
+        got = self.picks(
+            Seen(1, tracked=False, overlay_points=3.0, judged_score=39.99),
+            Seen(2, tracked=False, overlay_points=2.0, judged_score=40.0, prev_change=14.99),
+            Seen(3, tracked=False, overlay_points=1.5, judged_score=55.0, prev_change=15.0),
+            Seen(4, tracked=False, overlay_points=1.2, judged_score=12.0, prev_change=29.9),
+        )
+        assert got == [
+            (1, 1, (LOW_SCORE,)),
+            (2, 2, ()),
+            (3, 3, (PREV_SURGE,)),
+            (4, 4, (LOW_SCORE, PREV_SURGE)),
+        ]
+
+    def test_missing_values_never_exclude(self) -> None:
+        # 판단 보류·채점 실패(점수 없음)나 전일 봉 없음이면 빼지 않는다 — 채점이 멈춘 날 목록이 비지 않게.
+        assert self.picks(Seen(1, tracked=False, overlay_points=2.0)) == [(1, 1, ())]
+
+    def test_the_same_forty_are_chosen_before_anything_is_excluded(self) -> None:
+        # 빈자리를 41위로 채우지 않는다: 제외는 40개를 고른 뒤에 붙는 표시다.
+        pool = [
+            Seen(i, tracked=False, overlay_points=100.0 - i, judged_score=10.0)
+            for i in range(1, MAX_MEMBERS + 6)
+        ]
+        sel = select_names_v2(pool, exclude=True)
+        assert [p.instrument_id for p in sel.picks] == list(range(1, MAX_MEMBERS + 1))
+        assert all(p.excluded == (LOW_SCORE,) for p in sel.picks) and sel.left_out == 5
+
+    def test_without_the_flag_nothing_is_marked(self) -> None:
+        assert (
+            select_names_v2([Seen(1, tracked=False, overlay_points=2.0, judged_score=1.0)])
+            .picks[0]
+            .excluded
+            == ()
+        )

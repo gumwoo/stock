@@ -597,9 +597,10 @@ def cmd_watchlist(take: bool) -> int:
             .order_by(WatchlistMember.rank)
         ).all()
         for m, name in rows:
+            out = f"  [제외: {m.excluded_reason}]" if m.excluded_reason else ""
             print(
                 f"  {m.rank:>2}. {name:<16} overlay {_fmt(m.overlay_points, '+.1f'):>5}  "
-                f"search {_fmt(m.attention_surge, '.2f'):>5}  {', '.join(m.reasons)}"
+                f"search {_fmt(m.attention_surge, '.2f'):>5}  {', '.join(m.reasons)}{out}"
             )
     return 0
 

@@ -34,7 +34,7 @@ from app.repositories import market_index_repo, minute_repo
 from app.repositories.minute_repo import COMPLETE
 from app.scoring.intraday import ANALYSIS_VERSION, Bar, DaySummary, bucket_of, index_day, summarize
 from app.scoring.intraday_review import MemberDay, Result, evaluate
-from app.scoring.watchlist import SELECTION_VERSION_V2 as WATCHLIST_SELECTION
+from app.scoring.watchlist import SELECTION_VERSIONS_V2 as WATCHLIST_SELECTIONS
 from app.scoring.watchlist import STRATEGY_VERSION_V2 as WATCHLIST_STRATEGY
 from app.services import llm_service, regime_service, watchlist_service
 
@@ -325,7 +325,7 @@ def report(session: Session) -> IntradayReport:
         .join(WatchlistSnapshot, WatchlistSnapshot.id == WatchlistMember.snapshot_id)
         .where(
             WatchlistSnapshot.strategy_version == WATCHLIST_STRATEGY,
-            WatchlistSnapshot.selection_version == WATCHLIST_SELECTION,
+            WatchlistSnapshot.selection_version.in_(WATCHLIST_SELECTIONS),
         )
     ).all()
     members: list[MemberDay] = []

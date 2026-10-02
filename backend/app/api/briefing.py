@@ -13,14 +13,14 @@ from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.lists import signal_rows
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import get_db
-from app.models import WatchlistSnapshot
+from app.models import WatchlistMember, WatchlistSnapshot
 from app.realtime.gateway import load_members, member_dict
 from app.scoring.watchlist import STRATEGY_VERSION_V2
 from app.services import briefing_service
@@ -68,5 +68,17 @@ def briefing(session: SessionDep, day: date | None = None, force: bool = False) 
     return {
         "day": target.isoformat(),
         "status": "OK",
-        "messages": briefing_service.build(target, rows, events),
+        "messages": briefing_service.build(target, rows, events, _excluded(session, snap.id)),
     }
+
+
+def _excluded(session: Session, snapshot_id: int) -> int:
+    """그날 목록에서 뺀 종목 수(선정 3)."""
+    return int(
+        session.execute(
+            select(func.count()).where(
+                WatchlistMember.snapshot_id == snapshot_id,
+                WatchlistMember.excluded_reason.is_not(None),
+            )
+        ).scalar_one()
+    )

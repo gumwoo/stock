@@ -172,7 +172,10 @@ class TestPoolAndList:
         pool = _pool(world)
         snap = preopen_service.take_snapshot(world.session, now=ASOF, only=world.ids)
         assert snap is not None
-        assert (snap.strategy_version, snap.selection_version) == ("PREOPEN_V2", 2)
+        assert (snap.strategy_version, snap.selection_version) == ("PREOPEN_V2", 3)
+        # 점수 단계를 돌리지 않은 풀이라 점수 규칙은 적용되지 않았다고 남는다(아무도 빠지지 않는다).
+        assert snap.inputs["exclusion"]["applied"]["LOW_SCORE"] is False  # type: ignore[index]
+        assert snap.inputs["exclusion"]["excluded"] == 0  # type: ignore[index]
         assert snap.pool_id == pool.id and snap.pool == 3
         rows = _list(world, snap.id)
         # 추적 중이지만 오늘 사건이 없는 종목은 없다. 공시 강도가 순서를 정한다.

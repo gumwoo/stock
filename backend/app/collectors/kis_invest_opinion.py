@@ -37,7 +37,7 @@ from app.models.analyst import FETCH_FAILED, FETCH_OK, FETCH_TRUNCATED
 from app.repositories import analyst_repo, instrument_repo
 from app.repositories.analyst_repo import OpinionRow
 from app.scoring.analyst import WINDOW_DAYS
-from app.scoring.watchlist import SELECTION_VERSION_V2, STRATEGY_VERSION_V2
+from app.scoring.watchlist import SELECTION_VERSIONS_V2, STRATEGY_VERSION_V2
 
 PATH = "/uapi/domestic-stock/v1/quotations/invest-opinion"
 TR = "FHKST663300C0"
@@ -110,7 +110,8 @@ def list_members(session: Session, days: Sequence[date]) -> list[tuple[date, int
         .where(
             WatchlistSnapshot.session_date.in_(list(days)),
             WatchlistSnapshot.strategy_version == STRATEGY_VERSION_V2,
-            WatchlistSnapshot.selection_version == SELECTION_VERSION_V2,
+            WatchlistSnapshot.selection_version.in_(SELECTION_VERSIONS_V2),
+            WatchlistMember.excluded_reason.is_(None),  # 목록에서 뺀 종목은 의견을 받지 않는다
         )
     ).all()
     latest: dict[int, date] = {}

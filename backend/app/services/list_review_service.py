@@ -27,7 +27,11 @@ from app.repositories import minute_repo
 from app.scoring import disclosure_events, event_explain, price_limit
 from app.scoring.early_path import EarlyPath, measure
 from app.scoring.intraday import ANALYSIS_VERSION
-from app.scoring.watchlist import SELECTION_VERSION_V2, STRATEGY_VERSION_V2
+from app.scoring.watchlist import (
+    SELECTION_VERSION_V2_EXCLUDE,
+    SELECTION_VERSIONS_V2,
+    STRATEGY_VERSION_V2,
+)
 from app.services import (
     analyst_service,
     briefing_service,
@@ -68,6 +72,10 @@ class Row:
     """09:00 봉 시가 진입 기준 첫 1시간(+2.5%/+5% 도달, 닿기 전 최저, 10시). 09:00 봉이 없으면 None."""
     kinds: tuple[str, ...] = ()
     """목록 이유가 된 공시의 쉬운 종류(예: "유상증자", "자회사 유상증자")."""
+    excluded: str | None = None
+    """선정 3에서 목록에서 뺀 이유(LOW_SCORE / PREV_SURGE, 둘이면 쉼표). 남은 종목은 None."""
+    screened: bool = False
+    """선정 3(제외 규칙을 적용한) 목록 날인가."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +135,17 @@ def groups(rows: Sequence[Row]) -> list[Stats]:
     """대형주를 뺀 묶음(전체·판단별·이유별)과 대형주 묶음. 순수."""
     rest = [r for r in rows if not r.heavyweight]
     out = [stats("목록(대형주 뺌)", rest)]
+    # 선정 3(2026-10-06~): 목록에 남은 종목과 뺀 종목을 따로(뺀 규칙이 계속 맞는지 보려고).
+    screened = [r for r in rest if r.screened]  # 선정 2 날은 "남음/뺌"으로 나눌 수 없다
+    if screened:
+        out.append(stats("목록에 남음", [r for r in screened if not r.excluded]))
+        for code, label in (
+            ("LOW_SCORE", "뺌: 판단 점수 40 미만"),
+            ("PREV_SURGE", "뺌: 전일 +15% 이상"),
+        ):
+            g = [r for r in screened if r.excluded and code in r.excluded]
+            if g:
+                out.append(stats(label, g))
     for action in ("BUY_INTEREST", "WATCH", "CAUTION", "ABSTAINED", "NONE"):
         g = [r for r in rest if r.action == action]
         if g:
@@ -191,7 +210,7 @@ def list_days(session: Session, start: date, end: date) -> list[date]:
                 WatchlistSnapshot.session_date >= start,
                 WatchlistSnapshot.session_date <= end,
                 WatchlistSnapshot.strategy_version == STRATEGY_VERSION_V2,
-                WatchlistSnapshot.selection_version == SELECTION_VERSION_V2,
+                WatchlistSnapshot.selection_version.in_(SELECTION_VERSIONS_V2),
             )
             .order_by(WatchlistSnapshot.session_date)
         ).scalars()
@@ -240,7 +259,7 @@ def review(session: Session, day: date, *, with_semis: bool = True) -> Review | 
         select(WatchlistSnapshot).where(
             WatchlistSnapshot.session_date == day,
             WatchlistSnapshot.strategy_version == STRATEGY_VERSION_V2,
-            WatchlistSnapshot.selection_version == SELECTION_VERSION_V2,
+            WatchlistSnapshot.selection_version.in_(SELECTION_VERSIONS_V2),
         )
     ).scalar_one_or_none()
     if snap is None:
@@ -296,7 +315,8 @@ def review(session: Session, day: date, *, with_semis: bool = True) -> Review | 
             found = disclosure_events.matched(e["report_nm"])
             if found is not None:
                 kinds.setdefault(i, set()).add(event_explain.disclosure(found[0], found[1]).kind)
-    ranks = _ranks(members)
+    # 점수 TOP3는 카톡과 같게 목록에 남은 종목으로만 매긴다(행과 묶음은 제외 전 40개 그대로).
+    ranks = _ranks([(m, name) for m, name in members if not m.excluded_reason])
     out = Review(day=day)
     by_id: dict[int, Row] = {}
     for m, name in members:
@@ -330,6 +350,8 @@ def review(session: Session, day: date, *, with_semis: bool = True) -> Review | 
                     [reaction_service.to_bar(*b) for b in closes.get(m.instrument_id, [])]
                 ),
                 kinds=tuple(sorted(kinds.get(m.instrument_id, ()))),
+                excluded=m.excluded_reason,
+                screened=snap.selection_version == SELECTION_VERSION_V2_EXCLUDE,
             )
         )
         by_id[m.instrument_id] = out.rows[-1]

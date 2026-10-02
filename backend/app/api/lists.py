@@ -166,7 +166,10 @@ def signal_rows(session: Session, day: date, snap: WatchlistSnapshot) -> list[di
     rows = session.execute(
         select(WatchlistMember, Instrument.name)
         .join(Instrument, Instrument.instrument_id == WatchlistMember.instrument_id)
-        .where(WatchlistMember.snapshot_id == snap.id)
+        .where(
+            WatchlistMember.snapshot_id == snap.id,
+            WatchlistMember.excluded_reason.is_(None),  # 선정 3에서 뺀 종목은 신호 탭·카톡에 없다
+        )
         .order_by(WatchlistMember.rank)
     ).all()
     ids = [m.instrument_id for m, _ in rows]
