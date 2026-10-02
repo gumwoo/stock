@@ -128,6 +128,7 @@ LLM에게 투자 판단을 맡기지 않는다. 점수, 신선도, 백테스트,
 | [아침 관찰 목록](docs/design/morning-list.md) | 장전 목록(V1), 단타용 아침 흐름(V2), 테마어 뉴스 |
 | [한국투자증권, 1분봉, 장중 분석, 실시간 차트](docs/design/intraday.md) | 응답의 의미, 분봉 정본, 누적 보고서, 실시간 차트 |
 | [포워드 기록과 검토 관문](docs/design/forward-test.md) | 매일 결과를 채우는 루프, 미리 고정한 결정 규칙 |
+| [전략 실험실](docs/design/strategy-lab.md) | 연구 탭: 매일 성적표, 규칙 비교표, 종목 조건 비교, 고정 가설 S1·S2 |
 | [백테스트](docs/studies/backtest.md) | 18종목 10년, v0.3 분포, walk-forward |
 | [공시 이벤트 분석](docs/studies/disclosure.md) | v1 다음 날, v2 9~10시, v3 진입·청산 규칙 |
 | [밤사이 미국 업종 연구](docs/studies/overnight-us-sectors.md) | 미국 업종 지표 → 한국 연동 종목, NXT 8시 진입 |
@@ -186,12 +187,14 @@ python -m venv .venv && ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
 ```bash
 python -m app.worker                 # 띄워 두면 위 "하루에 하는 일"이 돈다(API 서버와 별도 프로세스)
 npm --prefix ../frontend run dev     # 화면. "오늘의 관찰" 탭이 아침 목록·테마 뉴스·실시간 차트
+                                     # "연구" 탭은 전략 실험실: 매일 쌓이는 목록 기록으로 규칙·종목 조건 비교와 고정 가설 추적
 python -m app.cli preopen status     # 오늘 후보 풀과 아침 단계별 상태. 읽기만 한다
 python -m app.cli watchlist          # 가장 최근 아침 목록. 읽기만 한다
 python -m app.cli intraday           # 1분봉 누적 보고서. 읽기만 한다
 python -m app.cli opinion-backfill --days 2026-09-28,2026-09-29  # 지난 목록 종목의 증권사 의견을 한 번 받는다(종목당 KIS 1회)
 python -m app.cli list-review --from 2026-09-28 --to 2026-10-01  # 목록 날들의 사후 기술 통계(9시 시가 기준 +2.5% 도달률, 시가 갭·지수·공시 종류 묶음). 읽기만 한다
 python -m app.cli reaction-reference --disclosures data/disclosure_study/disclosures_20260627_20260925.json --minutes data/disclosure_study/first_hours.json  # 3개월 공시 반응 기준표(app/reference/disclosure_reaction.json)를 다시 만든다. 공시 연구 파일 필요, 호출 없음
+python -m app.cli rule-reference --disclosures data/disclosure_study/disclosures_20260627_20260925.json --minutes data/disclosure_study/first_hours.json  # 전략 실험실의 3개월 규칙 기준표(app/reference/first_hour_rules.json)를 다시 만든다. 호출 없음
 python -m app.cli review             # 포워드 기록의 검토 관문. 읽기만 한다
 ```
 

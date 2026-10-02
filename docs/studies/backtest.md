@@ -21,8 +21,8 @@ python -m app.cli backtest reproduce --run 1       # 다시 돌려 대조
 
 `reproduce`는 무엇이든 다르면 0이 아닌 코드로 끝나므로 검사에 바로 쓸 수 있다.
 
-백테스트 화면은 같은 런들을 in-sample과 out-of-sample을 나란히 놓아 보여주고, **실행 정보**는
-재현에 필요한 좌표를 전부 연다 — 전략, 지문, 커밋, 데이터 스냅샷, 비용, 분할.
+백테스트 화면(in-sample·out-of-sample 나란히, 재현 좌표를 여는 **실행 정보**)은 2026-10-02에 연구 탭을 전략
+실험실로 바꾸며 지웠다. 저장된 런은 `/api/backtests`와 CLI(`backtest show`, `reproduce`)로 본다.
 
 - 기술적 팩터만 참여하면 현재 정책은 BUY_INTEREST에 닿을 수 없다. 임계치가 참여 가중치에
   맞춰 스케일되어 전체 가중 70이 기술적 0.6에서는 42가 되는데, 그러려면 기술적 점수가 70이

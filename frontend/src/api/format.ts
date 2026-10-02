@@ -117,16 +117,6 @@ export function marketLabel(market: string | undefined): string {
 
 // --- 백테스트·전략 표기. DB·API 값은 재현에 쓰는 키라 그대로 두고 화면에서만 한국어로 보인다. 모르는 값은 그대로.
 
-const STRATEGY_KIND_LABEL: Record<string, string> = {
-  technical_fundamental: "기술·재무 점수",
-  moving_average_cross: "이동평균 교차",
-  buy_and_hold: "단순 보유",
-};
-
-export function strategyKindLabel(kind: string): string {
-  return STRATEGY_KIND_LABEL[kind] ?? kind;
-}
-
 const STRATEGY_VERSION_LABEL: Record<string, string> = {
   "v0.3-cross-sectional-fundamental": "v0.3 재무 비교군 순위",
   "v0.2-technical-fundamental": "v0.2 기술·재무",
@@ -147,66 +137,6 @@ export function strategyVersionLabel(version: string): string {
   if (thresholds === null) return name;
   const cut = /^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)$/.exec(thresholds);
   return cut ? `${name} · 매수 관심 ${cut[1]} / 주의 ${cut[2]}` : version;
-}
-
-/** 종류와 버전을 한 줄로. 버전 이름이 이미 종류로 시작하면(단순 보유, 이동평균 교차) 종류를 되풀이하지 않는다. */
-export function strategyLabel(kind: string, version: string): string {
-  const k = strategyKindLabel(kind);
-  const v = strategyVersionLabel(version);
-  return v.startsWith(k) ? v : `${k} ${v}`;
-}
-
-const PARAM_LABEL: Record<string, string> = {
-  buy_interest: "매수 관심",
-  caution: "주의",
-  currency: "통화",
-  short: "짧은 이평",
-  long: "긴 이평",
-};
-const CURRENCY_LABEL: Record<string, string> = { KRW: "원", USD: "달러" };
-
-export function paramsLabel(params: Record<string, unknown>): string {
-  const entries = Object.entries(params);
-  if (entries.length === 0) return "없음";
-  return entries
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, value]) => {
-      const shown = key === "currency" ? (CURRENCY_LABEL[String(value)] ?? String(value)) : String(value);
-      return PARAM_LABEL[key] ? `${PARAM_LABEL[key]} ${shown}` : `${key}=${shown}`;
-    })
-    .join(" · ");
-}
-
-const EXECUTION_MODEL_LABEL: Record<string, string> = {
-  NEXT_OPEN: "다음 세션 시가",
-  NEXT_BAR: "다음 봉 시작",
-};
-
-export function executionModelLabel(model: string): string {
-  return EXECUTION_MODEL_LABEL[model] ?? model;
-}
-
-// API는 값("1d")을 준다. 이름(DAY_1)도 받는다.
-const INTERVAL_LABEL: Record<string, string> = {
-  "1d": "일봉",
-  DAY_1: "일봉",
-  "1m": "1분봉",
-  MIN_1: "1분봉",
-};
-
-export function intervalLabel(interval: string): string {
-  return INTERVAL_LABEL[interval] ?? interval;
-}
-
-/** 베이시스포인트를 퍼센트로: 5 → "0.05%". */
-export function bpsLabel(bps: number): string {
-  return `${(bps / 100).toLocaleString("ko-KR", { maximumFractionDigits: 4 })}%`;
-}
-
-/** 연도와 초까지 보이는 한국 시각(재현 좌표용). */
-export function fullDatetime(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
 }
 
 // 뉴스·공시 묶음의 사건 종류(backend/app/scoring/overlay.py DEFAULT_HALF_LIVES의 13종).

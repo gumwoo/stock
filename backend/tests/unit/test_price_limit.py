@@ -169,3 +169,36 @@ def test_a_failure_to_read_limits_leaves_the_screens_as_they_were(
     created = datetime(2026, 9, 28, 23, 50, tzinfo=UTC)
     assert gateway.attach_limits([member], date(2026, 9, 29), created) == [member]
     assert gateway.member_dict(member)["prev_limit"] is None
+
+
+def test_the_batch_lookup_reads_the_same_bars_the_same_way(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 전략 실험실은 목록 날마다 한 번에 읽는다(`prev_limits_many`). 같은 봉이면 `prev_limits`와 같은 답이어야 한다.
+    by_id = {
+        1: [
+            _bar(date(2026, 9, 23), 31300, 31550, 30050, 30550),
+            _bar(date(2026, 9, 28), 39700, 39700, 39700, 39700),
+        ],
+        2: [
+            _bar(date(2026, 9, 22), 1, 1, 1, 1),
+            _bar(date(2026, 9, 23), 1, 1, 1, 1),
+        ],  # 직전 세션 봉 없음
+        3: [_bar(date(2026, 9, 28), 100, 110, 95, 105)],  # 기준 봉 없음
+    }
+    seen: dict[str, Any] = {}
+
+    def many(_s: object, ids: list[int], _iv: object, **kw: Any) -> dict[int, list[Any]]:
+        seen.update(kw)
+        return {i: by_id[i] for i in ids}
+
+    monkeypatch.setattr(
+        price_limit_service.candle_repo, "history", lambda _s, i, _iv, **_k: by_id[i]
+    )
+    monkeypatch.setattr(price_limit_service.candle_repo, "history_many", many)
+    asof = datetime(2026, 9, 28, 23, 50, tzinfo=UTC)
+    one = price_limit_service.prev_limits(None, date(2026, 9, 29), [1, 2, 3], ingested_before=asof)  # type: ignore[arg-type]
+    batch = price_limit_service.prev_limits_many(
+        None, date(2026, 9, 29), [1, 2, 3], ingested_before=asof
+    )  # type: ignore[arg-type]
+    assert batch == one and set(batch) == {1}
+    assert seen["available_before"] == datetime(2026, 9, 28, 6, 30, tzinfo=UTC)
+    assert seen["ingested_before"] == asof

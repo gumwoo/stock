@@ -71,3 +71,42 @@ def prev_limits(
             close=float(bar.close),
         )
     return out
+
+
+def prev_limits_many(
+    session: Session,
+    day: date,
+    instrument_ids: Collection[int],
+    *,
+    ingested_before: datetime | None = None,
+) -> dict[int, PrevLimit]:
+    """`prev_limits`와 같은 정의를 한 번의 조회로(전략 실험실이 목록 날마다 부른다).
+
+    직전 60일 안의 봉만 본다: 그보다 오래 거래가 없던 종목(긴 거래정지)은 `prev_limits`와 달리 판정하지 않는다.
+    """
+    p = previous_session(day)
+    if p is None or not instrument_ids:
+        return {}
+    closed = KR.session_close(p)
+    found = candle_repo.history_many(
+        session,
+        sorted(instrument_ids),
+        Interval.DAY_1,
+        since=closed - timedelta(days=60),
+        available_before=closed,
+        ingested_before=ingested_before,
+    )
+    out: dict[int, PrevLimit] = {}
+    for i, bars in found.items():
+        if len(bars) < 2 or bars[-1].ts.astimezone(SEOUL).date() != p:
+            continue
+        base, bar = bars[-2], bars[-1]
+        if base.close <= 0:
+            continue
+        out[i] = PrevLimit(
+            state=state(bar.open, bar.high, bar.low, bar.close, base.close),
+            change_pct=round((float(bar.close) / float(base.close) - 1) * 100, 2),
+            day=p,
+            close=float(bar.close),
+        )
+    return out

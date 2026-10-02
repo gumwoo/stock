@@ -987,6 +987,29 @@ def cmd_reaction_reference(disclosures: str, minutes: str, first: date, last: da
     return 0
 
 
+def cmd_rule_reference(disclosures: str, minutes: str, first: date, last: date) -> int:
+    """전략 실험실의 3개월 규칙 기준표를 만든다. 외부 호출 없음(파일과 DB 읽기만)."""
+    import json as json_module
+    from pathlib import Path
+
+    from app.services import lab_service
+
+    data = json_module.loads(Path(disclosures).read_text(encoding="utf-8"))
+    bars = json_module.loads(Path(minutes).read_text(encoding="utf-8"))
+    with session_scope() as session:
+        table = lab_service.build_reference(session, data, bars, first=first, last=last)
+    out = lab_service.REFERENCE
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json_module.dumps(table, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8"
+    )
+    meta = table["meta"]
+    print(f"wrote {out}: {meta['samples']} name-days over {meta['days']} days")
+    for key, v in table["hypotheses"].items():
+        print(f"  {key}: n={v['n']} days={v['days']} mean={v['mean']} t={v['t']} {v['flag']}")
+    return 0
+
+
 def cmd_opinion_backfill(days: list[date]) -> int:
     """지난 목록 종목의 증권사 의견을 한 번 받는다. 조회 끝은 오늘이고, 화면은 목록 날보다 앞선 날짜만 쓴다."""
     too_old = [
@@ -1449,6 +1472,17 @@ def main(argv: list[str] | None = None) -> int:
         "--last", default="2026-09-21", help="last entry session (the minute file ends here)"
     )
 
+    rl = sub.add_parser(
+        "rule-reference",
+        help="build app/reference/first_hour_rules.json for the strategy lab from the disclosure study files (DB reads only)",
+    )
+    rl.add_argument(
+        "--disclosures", required=True, help="the disclosure file of the 2026-09-26 study"
+    )
+    rl.add_argument("--minutes", required=True, help="the first-hour minute file of that study")
+    rl.add_argument("--first", default="2026-06-30", help="first entry session")
+    rl.add_argument("--last", default="2026-09-21", help="last entry session")
+
     ob = sub.add_parser(
         "opinion-backfill",
         help="fetch KIS analyst opinions for the names on past morning lists (KIS calls: one per name)",
@@ -1528,6 +1562,13 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_intraday(args.analyze)
         case "reaction-reference":
             return cmd_reaction_reference(
+                args.disclosures,
+                args.minutes,
+                date.fromisoformat(args.first),
+                date.fromisoformat(args.last),
+            )
+        case "rule-reference":
+            return cmd_rule_reference(
                 args.disclosures,
                 args.minutes,
                 date.fromisoformat(args.first),

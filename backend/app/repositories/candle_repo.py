@@ -160,6 +160,50 @@ def _newest_revision_subquery(
     return stmt.group_by(Candle.ts).subquery()
 
 
+def history_many(
+    session: Session,
+    instrument_ids: Sequence[int],
+    interval: Interval,
+    *,
+    since: datetime,
+    available_before: datetime | None = None,
+    ingested_before: datetime | None = None,
+) -> dict[int, list[Candle]]:
+    """`history`를 여러 종목에 한 번에: 종목마다 각 봉의 최신 수정본, 오래된 것 먼저. `since`(봉 시작) 뒤만.
+
+    거르는 규칙은 `history`와 같다(최신 수정본을 고른 뒤 `available_before`로 거른다).
+    """
+    if not instrument_ids:
+        return {}
+    newest = select(
+        Candle.instrument_id, Candle.ts, func.max(Candle.ingested_at).label("ingested_at")
+    ).where(
+        Candle.instrument_id.in_(list(instrument_ids)),
+        Candle.interval == interval,
+        Candle.ts >= since,
+        _finite(),
+    )
+    if ingested_before is not None:
+        newest = newest.where(Candle.ingested_at <= ingested_before)
+    sub = newest.group_by(Candle.instrument_id, Candle.ts).subquery()
+    stmt = (
+        select(Candle)
+        .join(
+            sub,
+            (Candle.instrument_id == sub.c.instrument_id)
+            & (Candle.ts == sub.c.ts)
+            & (Candle.ingested_at == sub.c.ingested_at),
+        )
+        .where(Candle.interval == interval)
+    )
+    if available_before is not None:
+        stmt = stmt.where(Candle.available_at <= available_before)
+    out: dict[int, list[Candle]] = {}
+    for c in session.execute(stmt.order_by(Candle.instrument_id, Candle.ts)).scalars():
+        out.setdefault(c.instrument_id, []).append(c)
+    return out
+
+
 def history(
     session: Session,
     instrument_id: int,

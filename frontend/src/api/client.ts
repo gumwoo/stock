@@ -1,8 +1,7 @@
 import type {
-  BacktestRunDetail,
-  BacktestRunSummary,
   Candle,
   Diagnostics,
+  LabView,
   ListMembers,
   ListSignalRow,
   LiveBar,
@@ -43,8 +42,7 @@ export const api = {
   listBars: (day: string, instrumentId: number, interval: "1m" | "1s") =>
     get<LiveBar[]>(`/api/lists/${day}/bars/${instrumentId}?interval=${interval}`),
   config: () => get<Diagnostics>("/health/config"),
-  backtests: () => get<BacktestRunSummary[]>("/api/backtests"),
-  backtest: (id: number) => get<BacktestRunDetail>(`/api/backtests/${id}`),
+  lab: () => get<LabView>("/api/lab"),
   live: () => get<LiveState>("/api/live"),
   liveBars: (code: string, interval: "1m" | "1s" = "1m") =>
     get<LiveBar[]>(`/api/live/${code}/bars?interval=${interval}`),

@@ -77,69 +77,6 @@ export interface Diagnostics {
   summary: string;
 }
 
-/** One measured window of a stored backtest run. */
-export interface BacktestWindow {
-  window_index: number;
-  sample_type: "IN_SAMPLE" | "OUT_OF_SAMPLE" | "HOLDOUT";
-  period_start: string;
-  period_end: string;
-  strategy: string;
-  strategy_params: Record<string, unknown>;
-  sessions: number;
-  observations: number;
-  total_return: number | null;
-  cagr: number | null;
-  max_drawdown: number | null;
-  sharpe: number | null;
-  win_rate: number | null;
-  profit_factor: number | null;
-  trades: number;
-  abstained: number;
-  without_data: number;
-  unfilled: number;
-}
-
-export interface BacktestRunSummary {
-  id: number;
-  instrument_id: number;
-  symbol: string;
-  name: string;
-  strategy_kind: string;
-  strategy_version: string;
-  strategy_params: Record<string, unknown>;
-  fitter_version: string | null;
-  period_start: string;
-  period_end: string;
-  started_at: string;
-  windows: number;
-  has_holdout: boolean;
-}
-
-export interface BacktestRunDetail extends BacktestRunSummary {
-  market: string;
-  interval: string;
-  strategy_fingerprint: string;
-  fit_trace_fingerprint: string;
-  holdout_strategy_fingerprint: string | null;
-  git_commit_sha: string;
-  git_dirty: boolean;
-  data_snapshot_at: string;
-  starting_cash: number;
-  commission_bps: number;
-  slippage_bps: number;
-  min_commission: number;
-  execution_model: string;
-  bar_minutes: number | null;
-  universe: number[] | null;
-  train_sessions: number;
-  eval_sessions: number;
-  anchored: boolean;
-  require_complete_sessions: boolean;
-  holdout_start: string | null;
-  holdout_end: string | null;
-  window_rows: BacktestWindow[];
-}
-
 /** One name on today's morning list, as the live feed holds it. */
 export interface LiveMember extends MarketWeightFields {
   instrument_id: number;
@@ -353,4 +290,89 @@ export interface ListMembers {
   day: string;
   source: string;
   members: LiveMember[];
+}
+
+/** 전략 실험실(연구 탭). 수익률은 %, 비용(0.30%) 뒤. take·stop은 비율(0.025 = 2.5%), stop null은 손절 없음(10시 매도). */
+export interface LabRuleStat {
+  take: number;
+  stop: number | null;
+  n: number;
+  days: number;
+  mean: number | null;
+  t: number | null;
+  first: number | null;
+  second: number | null;
+  flag: string;
+}
+
+export interface LabGridCell extends LabRuleStat {
+  market: string;
+}
+
+export interface LabCondition {
+  feature: string;
+  label: string;
+  n: number;
+  hit25: number | null;
+  rules: LabRuleStat[];
+}
+
+export interface LabDay {
+  day: string;
+  asof: string;
+  members: number;
+  measured: number;
+  kospi: number;
+  kosdaq: number;
+  excluded: Record<string, number>;
+  pending: boolean;
+  hit25_10: number | null;
+  hit25_60: number | null;
+  hit5_60: number | null;
+  rules: { take: number; stop: number | null; mean: number | null }[];
+  at_ten: number | null;
+}
+
+export interface LabJudged {
+  days: number;
+  n: number;
+  mean: number | null;
+  t: number | null;
+  first: number | null;
+  second: number | null;
+  state: string;
+}
+
+export interface LabHypothesis {
+  key: string;
+  text: string;
+  take: number;
+  stop: number | null;
+  sign: number;
+  basis: string;
+  reference: LabRuleStat | null;
+  before: LabRuleStat;
+  after: LabJudged;
+}
+
+export interface LabListHypothesis {
+  key: string;
+  text: string;
+  days: number;
+  mean: number | null;
+  t: number | null;
+  first: number | null;
+  second: number | null;
+  state: string;
+}
+
+export interface LabView {
+  cost_pct: number;
+  frozen_at: string;
+  days: LabDay[];
+  grid: { ours: LabGridCell[]; reference: LabGridCell[] };
+  conditions: { ours: LabCondition[]; reference: LabCondition[] };
+  hypotheses: LabHypothesis[];
+  list_hypotheses: LabListHypothesis[];
+  reference_meta: Record<string, string | number>;
 }

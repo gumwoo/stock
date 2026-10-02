@@ -152,24 +152,46 @@ def r2(bars: Sequence[Bar], *, entry_ticks: int = 0) -> float | None:
     return None
 
 
-def r3(bars: Sequence[Bar], *, stop: float = STOP, take: float = TAKE) -> float | None:
+def r3(bars: Sequence[Bar], *, stop: float | None = STOP, take: float = TAKE) -> float | None:
+    """`stop=None`: 손절 없이 목표에 닿거나 10시 전 마지막 봉 종가에 판다(전략 실험실의 규칙 격자)."""
     b = hour(bars)
     if not b or b[0][0] != OPEN:
         return None
     e = b[0][1]
     target = round_up(e * (1 + take))
-    floor = e * (1 - stop)
+    floor = None if stop is None else e * (1 - stop)
     for bar in b[1:]:
         o, hi, lo = bar[1], bar[2], bar[3]
-        if o <= floor:
+        if floor is not None and o <= floor:
             return _sell_below(o) / e - 1
         if o >= target:
             return target / e - 1
-        if lo <= floor:
+        if floor is not None and lo <= floor:
             return _sell_below(floor) / e - 1
         if hi > target:
             return target / e - 1
     return b[-1][4] / e - 1
+
+
+def reached(bars: Sequence[Bar], *, take: float, stop: float | None = None) -> str | None:
+    """`r3`와 같은 판정으로 목표에 닿아 판 봉의 표기("0903"). 손절이 먼저거나 못 닿으면 None, 09:00 봉이 없어도 None."""
+    b = hour(bars)
+    if not b or b[0][0] != OPEN:
+        return None
+    e = b[0][1]
+    target = round_up(e * (1 + take))
+    floor = None if stop is None else e * (1 - stop)
+    for bar in b[1:]:
+        o, hi, lo = bar[1], bar[2], bar[3]
+        if floor is not None and o <= floor:
+            return None
+        if o >= target:
+            return bar[0]
+        if floor is not None and lo <= floor:
+            return None
+        if hi > target:
+            return bar[0]
+    return None
 
 
 # --- 관측과 판정 ---------------------------------------------------------------------------
