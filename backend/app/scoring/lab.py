@@ -105,7 +105,11 @@ RANK_LABELS = ("1~10위", "11~20위", "21~30위", "31~40위")
 VOLUME_LABELS = ("0.7배 미만", "0.7~1.5배", "1.5~3배", "3~10배", "10배 이상")
 PRICE_LABELS = ("2천 미만", "2천~5천", "5천~1만", "1만~5만", "5만 이상")
 MARKET_GAP_LABELS = ("갭 -1% 미만", "갭 ±1%", "갭 +1% 이상")
-EXCLUDED_LABEL = {"LOW_SCORE": "뺌: 판단 점수 40 미만", "PREV_SURGE": "뺌: 전일 +15% 이상"}
+EXCLUDED_LABEL = {
+    "LOW_SCORE": "뺌: 판단 점수 40 미만",
+    "PREV_SURGE": "뺌: 전일 +15% 이상",
+    "GAP_UP": "뺌: 예상 갭 +3% 이상(08:50)",
+}
 _ORDER = {
     label: i
     for i, label in enumerate(

@@ -142,6 +142,7 @@ def groups(rows: Sequence[Row]) -> list[Stats]:
         for code, label in (
             ("LOW_SCORE", "뺌: 판단 점수 40 미만"),
             ("PREV_SURGE", "뺌: 전일 +15% 이상"),
+            ("GAP_UP", "뺌: 예상 갭 +3% 이상(08:50)"),
         ):
             g = [r for r in screened if r.excluded and code in r.excluded]
             if g:
@@ -316,7 +317,10 @@ def review(session: Session, day: date, *, with_semis: bool = True) -> Review | 
             if found is not None:
                 kinds.setdefault(i, set()).add(event_explain.disclosure(found[0], found[1]).kind)
     # 점수 TOP3는 카톡과 같게 목록에 남은 종목으로만 매긴다(행과 묶음은 제외 전 40개 그대로).
-    ranks = _ranks([(m, name) for m, name in members if not m.excluded_reason])
+    # 갭 판정(08:50, GAP_UP)으로 뺀 종목은 08:44 카톡 순위에는 있었다 — 점수·전일 급등으로 뺀 것만 뺀다.
+    ranks = _ranks(
+        [(m, name) for m, name in members if not m.excluded_reason or m.excluded_reason == "GAP_UP"]
+    )
     out = Review(day=day)
     by_id: dict[int, Row] = {}
     for m, name in members:

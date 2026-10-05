@@ -12,6 +12,7 @@ from app.models.backtest import BacktestRun, BacktestWindow
 from app.models.base import Base
 from app.models.collector import CollectorRun, CollectorStatus
 from app.models.disclosure import Disclosure
+from app.models.expected_open import ExpectedOpen
 from app.models.filing import Filing
 from app.models.forward import CandidateOutcome, CandidateSnapshot, SignalOutcome
 from app.models.fundamental import (
@@ -86,6 +87,7 @@ __all__ = [
     "CorporateActionType",
     "Decider",
     "Disclosure",
+    "ExpectedOpen",
     "Filing",
     "FiscalPeriod",
     "Fundamental",

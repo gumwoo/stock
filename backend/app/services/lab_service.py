@@ -26,7 +26,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.calendar import Market, MarketCalendar
-from app.models import Instrument
+from app.models import ExpectedOpen, Instrument
 from app.models.intraday import IntradaySummary, MinuteFetch
 from app.models.watchlist import WatchlistMember, WatchlistSnapshot
 from app.scoring import disclosure_events, lab
@@ -332,6 +332,9 @@ def _key(session: Session) -> tuple[Any, ...]:
         session.execute(select(func.max(MinuteFetch.id))).scalar(),
         session.execute(select(func.max(WatchlistSnapshot.id))).scalar(),
         session.execute(select(func.max(IntradaySummary.id))).scalar(),
+        session.execute(
+            select(func.max(ExpectedOpen.id))
+        ).scalar(),  # 08:50 갭 판정이 목록 행을 바꾼다
     )
 
 

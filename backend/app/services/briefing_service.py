@@ -288,12 +288,15 @@ def build(
     rows: Sequence[Mapping[str, Any]],
     events_by_id: Mapping[int, Sequence[Mapping[str, Any]]],
     excluded: int = 0,
+    gap_up: int = 0,
 ) -> list[str]:
-    """`excluded`: 선정 3에서 뺀 종목 수(판단 점수 40 미만·전일 +15% 이상). 머리말에 한 번 적는다."""
+    """`excluded`: 선정 3에서 뺀 종목 수(판단 점수 40 미만·전일 +15% 이상). `gap_up`: 08:50 예상 갭 판정으로 뺀 수(브리핑이
+    늦게 돌아 판정 뒤에 만들어질 때만 0이 아니다). 머리말에 한 번 적는다."""
     ranks = rankings(rows)
     when = scored_at(rows)
     scored = f"{when}채점" if when else "채점 기록 없음"
     out = f"(점수 40 미만·전일 급등 {excluded}개 뺌)" if excluded else ""
+    out += f"(갭 +3% {gap_up}개 뺌)" if gap_up else ""
     title = f"[{day.month}/{day.day} 아침 목록 점수 순위] {len(rows)}종목{out}·{scored}·참고용(매매 권유 아님)"
     rank_lines = []
     for label, top in ranks.items():
@@ -328,3 +331,66 @@ def build(
             [score_message(r, tags[i], bool(events)), *event_messages(str(r["name"]), events)]
         )
     return messages
+
+
+def gap_messages(
+    day: date,
+    check: Mapping[str, Any],
+    gapped: Sequence[tuple[str, float | None]],
+    before: Mapping[str, Sequence[Mapping[str, Any]]],
+    after: Mapping[str, Sequence[Mapping[str, Any]]],
+    remaining: int,
+) -> list[str]:
+    """9시 전 예상 갭 판정 결과(카톡). `gapped`: (종목명, 예상 갭 %) — 판정으로 뺀 종목. `before`/`after`: 뺀 앞뒤의 점수 순위."""
+    at = datetime.fromisoformat(str(check["at"])).astimezone(SEOUL)
+    head = f"[{day.month}/{day.day} 9시 전 예상 갭] {at:%H:%M} 판정·참고용(매매 권유 아님)"
+    if gapped:
+        line = f"예상 시가 +3% 이상 {len(gapped)}개를 목록에서 뺌 · 남은 {remaining}종목"
+    else:
+        line = f"예상 시가 +3% 이상 종목 없음 · 남은 {remaining}종목"
+    counts = (
+        f"조회 {check.get('checked', 0)}·판정 {check.get('judgeable', 0)}·"
+        f"불일치 {check.get('mismatched', 0)}·실패 {check.get('failed', 0)}"
+    )
+    lines = [head, line, counts]
+    asked = int(check.get("checked") or 0) + int(check.get("failed") or 0)
+    if asked and (asked - int(check.get("judgeable") or 0)) * 2 > asked:
+        lines.append(
+            "⚠ 판정하지 못한 종목이 절반을 넘습니다(실패·불일치·값 없음 — 갭업 종목이 남아 있을 수 있음)"
+        )
+    parts = [clip_lines("\n".join(lines))]
+    if gapped:
+        names = [clip(n, 10) if p is None else f"{clip(n, 10)} {p:+.1f}%" for n, p in gapped]
+        current = "뺀 종목: " + names[0]
+        for item in names[1:]:
+            if len(current) + 2 + len(item) > MAX_CHARS:
+                parts.append(current)
+                current = "뺀 종목(이어서): " + item
+            else:
+                current = f"{current}, {item}"
+        parts.append(current)
+    changed = [
+        label
+        for label in after
+        if [r["instrument_id"] for r in before.get(label, [])]
+        != [r["instrument_id"] for r in after[label]]
+    ]
+    if changed:
+        rank_lines = ["08:44 순위에서 바뀜(뺀 종목 제외하고 다시 매김):"]
+        for label in changed:
+            key = {"기술": "technical_score", "재무": "fundamental_score", "종합": "total_score"}[
+                label
+            ]
+            items = (
+                ", ".join(f"{clip(r['name'], 10)} {float(r[key]):.1f}" for r in after[label])
+                or "해당 없음"
+            )
+            rank_lines.append(f"{label}: {items}")
+        parts.append(clip_lines("\n".join(rank_lines)))
+    return pack(parts)
+
+
+def gap_warning(day: date, why: str) -> list[str]:
+    return [
+        f"[{day.month}/{day.day} 9시 전 예상 갭] 판정을 하지 못했습니다({why}). 예상 시가 +3% 이상 종목이 목록에 남아 있을 수 있습니다"
+    ]

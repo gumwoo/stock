@@ -19,6 +19,7 @@ import sys
 import time as time_module
 from collections.abc import Callable
 from types import FrameType
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -26,6 +27,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.collectors.base import CollectorError, run_collector
 from app.collectors.dart_disclosure import DartDisclosureCollector
 from app.collectors.dart_fundamental import DartFundamentalCollector
+from app.collectors.kis_expected_open import DECIDE, RECORD, STOP_AT, KisExpectedOpenCollector
 from app.collectors.kis_invest_opinion import KisInvestOpinionCollector
 from app.collectors.kis_market_cap import KisMarketCapCollector
 from app.collectors.kis_minute import (
@@ -44,6 +46,7 @@ from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import advisory_lock, session_scope
 from app.models.collector import CollectorStatus
+from app.scoring.gap import DECIDE_BY
 from app.services import (
     forward_service,
     intraday_service,
@@ -57,6 +60,7 @@ from app.services import (
 MINUTE_CALLS_PER_DAY = 1_000
 
 logger = logging.getLogger("app.worker")
+SEOUL = ZoneInfo("Asia/Seoul")
 
 
 def guarded(job_name: str, fn: Callable[[], None]) -> Callable[[], None]:
@@ -109,6 +113,10 @@ _KR_MARKET_CAP = CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone
 # 리포트가 더 들어올 수 있고, 그런 조회는 개장 뒤 받은 것으로 표시된다.
 _KR_OPINIONS = CronTrigger(day_of_week="mon-fri", hour=8, minute=40, timezone="Asia/Seoul")
 _KR_OPINIONS_EVENING = CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone="Asia/Seoul")
+# 9시 전 예상체결가(`kis_expected_open`): 08:50 판정(예상 시가 +3% 이상이면 목록에서 뺌, 08:54까지 반영 — 08:55 실시간
+# 연결 전), 08:57 기록만. 2026-10-06부터.
+_KR_GAP_DECIDE = CronTrigger(day_of_week="mon-fri", hour=8, minute=50, timezone="Asia/Seoul")
+_KR_GAP_RECORD = CronTrigger(day_of_week="mon-fri", hour=8, minute=57, timezone="Asia/Seoul")
 # The day's minute bars, after the close and before the daily loop. A job of
 # its own: a failure here must not take the proven daily loop down with it.
 _KR_MINUTES = CronTrigger(day_of_week="mon-fri", hour=16, minute=20, timezone="Asia/Seoul")
@@ -227,6 +235,32 @@ def _kr_opinions(*, only_missing: bool = False) -> None:
             return
         if attempt < 2:
             time_module.sleep(60)
+
+
+def _kr_expected_open(purpose: str) -> None:
+    """예상체결가. 다른 KIS 실행이 잠금을 쥐고 있으면 시각 상한 안에서 30초마다 다시 해 본다."""
+    calendar = MarketCalendar(Market.KR)
+    limit = DECIDE_BY if purpose == DECIDE else STOP_AT
+    while True:
+        now = utc_now()
+        if (
+            not calendar.is_session(calendar.local_today(now))
+            or now.astimezone(SEOUL).time() >= limit
+        ):
+            return
+        with session_scope() as session:
+            run = run_collector(KisExpectedOpenCollector(purpose=purpose), session)
+        if run.status is not CollectorStatus.SKIPPED or "another KIS run" not in (run.detail or ""):
+            return
+        time_module.sleep(30)
+
+
+def _kr_gap_decide() -> None:
+    _kr_expected_open(DECIDE)
+
+
+def _kr_gap_record() -> None:
+    _kr_expected_open(RECORD)
 
 
 def _kr_opinions_evening() -> None:
@@ -362,6 +396,22 @@ def build_scheduler() -> BlockingScheduler:
         max_instances=1,
         coalesce=True,
         misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        guarded("kis_gap_decide", _kr_gap_decide),
+        _KR_GAP_DECIDE,
+        id="kis_gap_decide",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=180,
+    )
+    scheduler.add_job(
+        guarded("kis_gap_record", _kr_gap_record),
+        _KR_GAP_RECORD,
+        id="kis_gap_record",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=90,
     )
     scheduler.add_job(
         guarded("kis_opinions_evening", _kr_opinions_evening),

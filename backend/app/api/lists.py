@@ -11,13 +11,15 @@ from datetime import date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import ColumnElement
 
 from app.db import get_db
 from app.models import Instrument, WatchlistMember, WatchlistSnapshot
 from app.realtime.gateway import load_members, member_dict
 from app.repositories import instrument_repo, minute_repo
+from app.scoring.gap import GAP_UP
 from app.scoring.policy import THRESHOLDS
 from app.scoring.watchlist import STRATEGY_VERSION_V2
 from app.services import (
@@ -161,14 +163,21 @@ def list_signals(day: date, session: SessionDep) -> list[dict[str, Any]]:
     return signal_rows(session, day, _snapshot(session, day))
 
 
-def signal_rows(session: Session, day: date, snap: WatchlistSnapshot) -> list[dict[str, Any]]:
-    """신호 탭의 행들. 아침 브리핑(`app/api/briefing.py`)도 같은 행을 쓴다."""
+def signal_rows(
+    session: Session, day: date, snap: WatchlistSnapshot, *, with_gap_up: bool = False
+) -> list[dict[str, Any]]:
+    """신호 탭의 행들. 아침 브리핑(`app/api/briefing.py`)도 같은 행을 쓴다.
+
+    `with_gap_up`: 08:50 예상 갭 판정으로 뺀 종목도 넣는다(08:44 순위를 다시 만들 때만)."""
+    kept: ColumnElement[bool] = WatchlistMember.excluded_reason.is_(None)
+    if with_gap_up:
+        kept = or_(kept, WatchlistMember.excluded_reason == GAP_UP)
     rows = session.execute(
         select(WatchlistMember, Instrument.name)
         .join(Instrument, Instrument.instrument_id == WatchlistMember.instrument_id)
         .where(
             WatchlistMember.snapshot_id == snap.id,
-            WatchlistMember.excluded_reason.is_(None),  # 선정 3에서 뺀 종목은 신호 탭·카톡에 없다
+            kept,  # 선정 3·갭 판정에서 뺀 종목은 신호 탭·카톡에 없다
         )
         .order_by(WatchlistMember.rank)
     ).all()
