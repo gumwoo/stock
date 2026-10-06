@@ -159,3 +159,14 @@ def test_a_naive_time_skips_only_that_event_before_any_query() -> None:
     # 조회 전에 돌아오므로 세션이 필요 없다.
     naive = event("시간대 없는 기사", first_at="2026-09-27T23:18:00")
     assert _legacy_link(None, 1, naive, ASOF, timedelta(hours=24)) is None
+
+
+def test_the_technical_score_reaches_the_screen() -> None:
+    # "좋은 뉴스만 · 기술 점수 순" 정렬에 쓴다(표시 전용). 없으면 None.
+    from dataclasses import replace
+
+    from app.realtime.gateway import member_dict
+
+    m = member(1)
+    assert member_dict(m)["technical_score"] is None
+    assert member_dict(replace(m, technical_score=81.5))["technical_score"] == 81.5

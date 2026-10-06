@@ -117,6 +117,8 @@ class LiveMember:
     # 전일 상한가(표시 전용): LOCKED / CLOSED / TOUCHED. 전 거래일 등락(%)과 함께.
     prev_limit: str | None = None
     prev_change_pct: float | None = None
+    # 08:35 기술 점수(표시 전용: 화면의 "좋은 뉴스만 · 기술 점수 순"). 추적 종목 폴백은 비어 있다.
+    technical_score: float | None = None
 
 
 # 게이트웨이가 알리는 목록 출처. 화면이 이 코드로 문구를 고른다.
@@ -171,6 +173,7 @@ def load_members(day: date) -> tuple[str, list[LiveMember]]:
                             m.prefetch_status,
                             m.abstained_reason,
                             to_events(m.overlay_events),
+                            technical_score=m.technical_score,
                         )
                     )
             source = MORNING_LIST if rows else MORNING_LIST_EMPTY
@@ -460,6 +463,7 @@ def member_dict(m: LiveMember, last: dict[str, Any] | None = None) -> dict[str, 
         "total_score": m.total_score,
         "prefetch_status": m.prefetch_status,
         "abstained_reason": m.abstained_reason,
+        "technical_score": m.technical_score,
         "events": [
             {
                 "event_type": e.event_type,

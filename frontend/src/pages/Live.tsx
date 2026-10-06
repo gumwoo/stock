@@ -298,12 +298,23 @@ export function Live({
     };
   }, [mode, day, archiveRetry]);
 
+  const [goodNewsOnly, setGoodNewsOnly] = useState(false);
   const shown: LiveMember[] =
     mode === "live" ? (state?.members ?? []) : mode === "archive" && archive?.day === day ? archive.members : [];
   // 목록 날짜도 실시간 목록도 없으면(첫 목록 전) 고를 날이 없다. 그때는 아침 카드를 보인다.
   const noLists = state !== null && days !== null && days.length === 0 && !liveHasList;
   const loading = !noLists && (mode === "pending" || (mode === "archive" && archive?.day !== day));
   const empty = noLists || (!loading && shown.length === 0);
+  // 목록에 보이는 종목만 거르고 정렬한다(선택·차트·테마 배지·머리 숫자는 `shown` 그대로).
+  const goodNews = shown.filter((m) => m.reasons.includes("POSITIVE_NEWS_OVERLAY"));
+  const goodOnly = goodNewsOnly && goodNews.length > 0;
+  const visible: LiveMember[] = goodOnly
+    ? [...goodNews].sort(
+        (a, b) =>
+          (b.technical_score ?? Number.NEGATIVE_INFINITY) - (a.technical_score ?? Number.NEGATIVE_INFINITY) ||
+          a.rank - b.rank,
+      )
+    : shown;
 
   // 고른 종목이 이 목록에 없으면 첫 종목. 체결마다 도는 것을 막으려고 코드 목록 문자열로 본다.
   const codesKey = shown.map((m) => m.code).join(",");
@@ -491,6 +502,11 @@ export function Live({
           <p className="live__disclaimer">
             관찰 목록 — 매수 추천이 아닙니다. 그날 뉴스·공시·검색 급증이 있어 확인할 가치가 있던 종목입니다.
           </p>
+          <p className="live__principle">
+            <strong>내 매매 원칙(직접 정한 것):</strong> 목표 +2.5~5%에 닿으면 바로 매도, 지정가는 미리 걸어 둔다. 지난 3개월
+            공시 표본(9시 시가 매수, 09:05 전 +2.5% 도달 497건)에서 바로 매도 +2.26%·10시 보유 +2.31%로 평균은 비슷했고, 보유가 더 나쁜 날이
+            53%였다. 좋은 공시만 보면 바로 +2.26%·보유 +2.04%.
+          </p>
           <p className="live__status">
             {mode === "live" && state && <span aria-hidden="true">{statusMark(state.status)} </span>}
             {statusLine()}
@@ -507,6 +523,7 @@ export function Live({
                 userPicked.current = true;
                 setDay(e.target.value);
                 setSelected(null);
+                setGoodNewsOnly(false);
               }}
             >
               {dayOptions.map((d) => (
@@ -555,8 +572,29 @@ export function Live({
                 ? "목록 없음"
                 : `${day ? dayLabel(day) : ""} 목록 ${shown.length}종목${mode === "live" ? " · 등락은 전일 대비" : ""}`}
           </p>
+          {!empty && !loading && goodNews.length > 0 && (
+            <button
+              className={goodOnly ? "live__filter live__filter--on" : "live__filter"}
+              aria-pressed={goodOnly}
+              onClick={() => {
+                const on = !goodOnly;
+                setGoodNewsOnly(on);
+                if (on) {
+                  const first = [...goodNews].sort(
+                    (a, b) =>
+                      (b.technical_score ?? Number.NEGATIVE_INFINITY) -
+                        (a.technical_score ?? Number.NEGATIVE_INFINITY) || a.rank - b.rank,
+                  )[0];
+                  if (first && !goodNews.some((m) => m.code === selected)) setSelected(first.code);
+                }
+              }}
+              title="좋은 뉴스로 목록에 든 종목만, 기술 점수 높은 순(표시만 — 선정·점수는 그대로)"
+            >
+              좋은 뉴스만 · 기술 점수 순 ({goodNews.length})
+            </button>
+          )}
           <ol className="live__list">
-            {shown.map((m) => {
+            {visible.map((m) => {
               const reasons = m.reasons.map((r) => LIST_REASON_LABEL[r] ?? r);
               return (
                 <li key={m.code}>
@@ -577,6 +615,11 @@ export function Live({
                       </span>
                     </span>
                     <span className="live__tags">
+                      {goodOnly && (
+                        <span className="live__tag live__tech" title="08:35 기술 점수">
+                          기술 {m.technical_score == null ? "점수 없음" : m.technical_score.toFixed(1)}
+                        </span>
+                      )}
                       <HeavyweightBadge row={m} />
                       <PrevLimitBadge row={m} />
                       {reasons.slice(0, 3).map((r) => (

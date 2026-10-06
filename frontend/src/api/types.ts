@@ -94,6 +94,8 @@ export interface LiveMember extends MarketWeightFields {
   /** 목록 이유 뒤의 뉴스·공시 묶음(뉴스 점수가 큰 순, 최대 5개). 옛 서버는 보내지 않는다. */
   events?: LiveEvent[];
   last: { price: number; change_pct: number; day_volume: number } | null;
+  /** 08:35 기술 점수(표시 전용). 추적 종목 폴백·옛 응답에는 없다. */
+  technical_score?: number | null;
 }
 
 export interface LiveEvent {

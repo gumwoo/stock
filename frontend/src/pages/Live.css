@@ -406,3 +406,37 @@ a.live__eventTitle:hover {
   font-size: var(--t-micro);
   color: var(--c-text-tertiary);
 }
+
+.live__principle {
+  margin-top: var(--s-2);
+  font-size: var(--t-micro);
+  color: var(--c-text-secondary);
+  line-height: 1.5;
+  border-left: 3px solid var(--c-border-strong);
+  padding-left: var(--s-2);
+}
+
+.live__filter {
+  font: inherit;
+  font-size: var(--t-micro);
+  border: 1px solid var(--c-border-strong);
+  background: transparent;
+  color: var(--c-text-secondary);
+  border-radius: 999px;
+  padding: 2px var(--s-2);
+  margin: 0 0 var(--s-2);
+  cursor: pointer;
+}
+
+.live__filter--on {
+  background: var(--c-text);
+  border-color: var(--c-text);
+  color: var(--c-bg);
+}
+
+.live__tech {
+  font-size: var(--t-micro);
+  color: var(--c-text-tertiary);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}

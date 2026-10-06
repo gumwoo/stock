@@ -128,3 +128,64 @@ class TestMessages:
             date(2026, 10, 6), [_row(1, "가", 70)], {}, excluded=3, gap_up=2
         )
         assert "(점수 40 미만·전일 급등 3개 뺌)(갭 +3% 2개 뺌)" in out[0]
+
+
+class TestMorningExtras:
+    """08:44 브리핑에 더한 것: 내 매매 원칙(소유자가 정한 것), 좋은 뉴스 종목 기술 점수 순(표시만)."""
+
+    def test_the_principle_fits_and_says_it_is_not_advice(self) -> None:
+        assert len(briefing_service.PRINCIPLE) <= briefing_service.MAX_CHARS
+        assert (
+            "직접 정한 것" in briefing_service.PRINCIPLE
+            and "매매 권유 아님" in briefing_service.PRINCIPLE
+        )
+
+    def test_good_news_names_go_by_technical_score_and_missing_last(self) -> None:
+        rows = [
+            {
+                **_row(1, "가", 50),
+                "technical_score": 61.0,
+                "list_reasons": ["POSITIVE_NEWS_OVERLAY"],
+            },
+            {
+                **_row(2, "나", 50),
+                "technical_score": None,
+                "list_reasons": ["POSITIVE_NEWS_OVERLAY"],
+            },
+            {
+                **_row(3, "다", 50),
+                "technical_score": 88.0,
+                "list_reasons": ["POSITIVE_NEWS_OVERLAY", "DISCLOSURE_EVENT"],
+            },
+            {**_row(4, "라", 50), "technical_score": 99.0, "list_reasons": ["DISCLOSURE_EVENT"]},
+        ]
+        out = briefing_service.good_news_messages(rows)
+        assert out == [
+            "좋은 뉴스 종목 3개(기술 점수 순): 다 88.0, 가 61.0, 나 점수 없음\n\n"
+            + briefing_service.GOOD_NEWS_NOTE
+        ]
+
+    def test_many_good_news_names_split_under_the_limit(self) -> None:
+        rows = [
+            {
+                **_row(i, f"아주긴종목이름{i:02d}", 50),
+                "technical_score": 50.0 + i,
+                "list_reasons": ["POSITIVE_NEWS_OVERLAY"],
+            }
+            for i in range(26)
+        ]
+        out = briefing_service.good_news_messages(rows)
+        assert all(len(m) <= briefing_service.MAX_CHARS for m in out) and len(out) >= 3
+        assert sum(m.count("아주긴종목") for m in out) == 26
+
+    def test_no_good_news_no_message_and_order_in_the_briefing(self) -> None:
+        assert briefing_service.good_news_messages([_row(1, "가", 70)]) == []
+        rows = [
+            {
+                **_row(1, "가", 70),
+                "technical_score": 70.0,
+                "list_reasons": ["POSITIVE_NEWS_OVERLAY"],
+            }
+        ]
+        out = briefing_service.build(date(2026, 10, 6), rows, {})
+        assert out[1] == briefing_service.PRINCIPLE and out[2].startswith("좋은 뉴스 종목 1개")

@@ -54,6 +54,50 @@ GUIDE = (
 )
 
 
+# 소유자가 직접 정한 매매 원칙(2026-10-06). 시스템의 권유가 아니다. 숫자는 3개월 공시 표본(9시 시가 매수, 비용 0.30%,
+# 09:05 전에 +2.5%에 닿은 날)의 지난 기록이다: 평균은 비슷하고, 들고 있으면 더 나빴던 날이 절반을 넘는다.
+PRINCIPLE = (
+    "[내 매매 원칙·직접 정한 것] 목표 +2.5~5%에 닿으면 바로 판다(지정가 미리). 3개월 공시 표본(9시 시가 매수) 09:05 전 +2.5% 도달 497건: "
+    "바로 +2.26%·10시 보유 +2.31%로 평균 비슷, 보유가 더 나쁜 날 53%. 좋은 공시 144건은 바로 +2.26%·보유 +2.04%. "
+    "참고용(매매 권유 아님)"
+)
+GOOD_NEWS = "POSITIVE_NEWS_OVERLAY"
+GOOD_NEWS_NOTE = (
+    "참고: 선정 3 전 5일 기록(좋은 뉴스 67건)에서 결과와 같은 방향인 건 기술 점수(상관 +0.25)였고 재무는 아니었다"
+    "(-0.04). 표본이 작아 근거는 약하다"
+)
+
+
+def good_news_messages(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """좋은 뉴스로 목록에 든 종목을 기술 점수 높은 순으로(표시만 — 선정·점수 가중치는 그대로). 점수 없음은 맨 뒤 "점수 없음"."""
+    good = [r for r in rows if GOOD_NEWS in (r.get("list_reasons") or [])]
+    if not good:
+        return []
+
+    def score(r: Mapping[str, Any]) -> float | None:
+        v = r.get("technical_score")
+        return None if v is None else float(v)
+
+    good.sort(key=lambda r: (score(r) is None, -(score(r) or 0.0), r.get("rank") or 0))
+    items = [
+        f"{clip(str(r['name']), 10)} {'점수 없음' if score(r) is None else f'{score(r):.1f}'}"
+        for r in good
+    ]
+    out: list[str] = []
+    current = f"좋은 뉴스 종목 {len(good)}개(기술 점수 순): " + items[0]
+    for item in items[1:]:
+        if len(current) + 2 + len(item) > MAX_CHARS:
+            out.append(current)
+            current = "좋은 뉴스(이어서): " + item
+        else:
+            current = f"{current}, {item}"
+    out.append(current)
+    return [
+        *out[:-1],
+        *pack([out[-1], GOOD_NEWS_NOTE]),
+    ]  # 마지막 조각과 주의 줄은 들어가면 한 통으로
+
+
 def clip(text: str, limit: int) -> str:
     """공백을 하나로 줄이고(DART 제목에 공백이 몰려 있다) 넘치면 말줄임."""
     flat = " ".join(str(text).split())
@@ -309,7 +353,12 @@ def build(
     if len(text) <= MAX_CHARS:
         parts.append(text)
     else:
-        parts += [clip(line, MAX_CHARS) for line in header]
+        parts += pack(
+            [clip(line, MAX_CHARS) for line in header]
+        )  # 넘치면 줄 단위로 나눠 최대한 합친다
+    # 순서: 머리말 → 내 매매 원칙 → 좋은 뉴스(기술 점수 순) → 읽는 법(종목별 메시지 바로 앞) → 종목별.
+    parts.append(PRINCIPLE)
+    parts += good_news_messages(rows)
     if any(e.get("kind") for es in events_by_id.values() for e in es):
         parts.append(GUIDE)
 
