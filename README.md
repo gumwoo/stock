@@ -202,14 +202,16 @@ python -m app.cli review             # 포워드 기록의 검토 관문. 읽기
 ```
 
 **워커·API·화면은 윈도우 작업 스케줄러가 띄운다(2026-10-07부터).** 로그인하면 `stock-worker`·`stock-api`(8000)·`stock-web`(5173)이
-숨은 창으로 켜지고, 꺼지면 1분 뒤 다시 켜진다. Claude 앱이나 터미널을 닫아도 아침 작업(07:00~08:57)이 돈다 — 10/7에는 앱이
+숨은 창으로 켜지고, 프로세스가 끝나면 `ops\run.ps1`의 루프가 60초 뒤 다시 띄운다. Claude 앱이나 터미널을 닫아도 아침 작업(07:00~08:57)이 돈다 — 10/7에는 앱이
 닫히며 함께 꺼져 그날 아침이 통째로 빠졌다. 로그는 저장소의 `logs\worker.log`·`api.log`·`web.log`. 08:44·08:54 카톡은 Claude
 데스크톱 앱의 예약 작업이라, 그 시각에는 앱이 켜져 있어야 한다.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File ops\register-tasks.ps1   # 등록(다시 해도 됨)
-Stop-ScheduledTask stock-worker; Start-ScheduledTask stock-worker         # 코드를 바꾼 뒤 다시 띄우기(api·web도 같다)
-Get-ScheduledTask stock-*                                                 # 상태
+powershell -NoProfile -ExecutionPolicy Bypass -File ops\register-tasks.ps1   # 등록(다시 해도 됨). 처음 등록한 뒤에는 Start-ScheduledTask로 한 번 띄운다
+powershell -NoProfile -ExecutionPolicy Bypass -File ops\restart.ps1 -Part worker   # 코드를 바꾼 뒤 다시 띄우기(api·web·all)
+# Stop-ScheduledTask만으로는 안 된다: PowerShell만 끝나고 python·node가 남아 다시 시작하면 두 벌이 돈다(restart.ps1이 남은 것까지 끝낸다)
+Get-ScheduledTask stock-*                                                 # 상태(Running이어야 한다)
+Get-CimInstance Win32_Process -Filter "CommandLine like '%app.worker%'"   # 워커가 한 벌만 도는지(venv라 python.exe 두 개가 정상)
 ```
 
 ### 자격증명, 필요해질 때
