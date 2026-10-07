@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -409,3 +410,163 @@ class Exclusions:
 
     def add(self, why: str) -> None:
         self.counts[why] = self.counts.get(why, 0) + 1
+
+
+# --- 3개 겹침 + 기술 상위 2 추적(S3) -----------------------------------------------------------------------------
+#
+# 소유자 요청(2026-10-07): 이유 4개 중 3개 이상 겹친 종목 가운데 그날 기술 점수 상위 2개가 9시 시가 대비 최대 어디까지,
+# 몇 시에 오르는지 매일 쌓고, "10시 전 +2% 도달 비율이 50%보다 높다"를 고정 가설로 앞으로 잰다. 표시·기록 전용이다.
+# 정의는 결과를 보기 전에 고정했다. 고정 전에 본 것은 10/2 두 종목(둘 다 +2% 도달)뿐이고, 그걸 보고 만든 조건이라 근거는 약하다.
+
+FOUR_REASONS = ("POSITIVE_NEWS_OVERLAY", "DISCLOSURE_EVENT", "DISCOVERY_SURGE", "SEARCH_SURGE")
+"""좋은 뉴스 · 공시 · 뉴스 급증 · 검색 급증. 나쁜 뉴스(NEGATIVE_NEWS_OVERLAY)는 세지 않는다."""
+OVERLAP_MIN = 3
+PICK_TOP = 2
+PICK_TAKE = 0.02
+PICK_BASE = 0.5
+"""S3가 넘어야 하는 도달 비율. 같은 판정으로 우리 목록 전체는 34%, 3개월 공시 표본은 42%였다(2026-10-07 계산)."""
+LEVELS = (0.01, 0.02, 0.025, 0.03, 0.05)
+S3_FROZEN_AT = datetime(
+    2026, 10, 7, 7, 0, tzinfo=UTC
+)  # 2026-10-07 16:00 KST(커밋 무렵). 10/8 목록부터 센다
+PEAK_BUCKETS = ("09:00~09:04", "09:05~09:14", "09:15~09:29", "09:30~09:59", "10시 이후")
+
+
+def overlap(reasons: Iterable[str]) -> int:
+    return len(set(FOUR_REASONS) & set(reasons))
+
+
+@dataclass(frozen=True, slots=True)
+class Candidate:
+    """그날 목록 멤버 하나(고르기 입력). 1분봉 유무와 상관없이 고른다 — 결과가 고르기에 끼어들지 않게."""
+
+    instrument_id: int
+    rank: int
+    reasons: tuple[str, ...]
+    technical: float | None
+    excluded: str | None
+
+
+def pick_top(members: Iterable[Candidate]) -> list[Candidate]:
+    """목록에 남은 종목 중 네 이유가 3개 이상 겹치고 기술 점수가 있는 종목을 (기술 점수 내림차순, 목록 순위) 상위 2개."""
+    pool = [
+        m
+        for m in members
+        if not m.excluded and m.technical is not None and overlap(m.reasons) >= OVERLAP_MIN
+    ]
+    pool.sort(key=lambda m: (-(m.technical or 0.0), m.rank))
+    return pool[:PICK_TOP]
+
+
+def counted(asof: datetime, open_at: datetime, frozen_at: datetime = S3_FROZEN_AT) -> bool:
+    """S3 판정에 세는 목록 날인가: 가설 고정 뒤에 얼렸고, 개장 전에 얼린 목록(늦게 만든 목록은 장중 정보가 섞인다)."""
+    return frozen_at < asof < open_at
+
+
+def reached_day(bars: Sequence[Bar], *, take: float, before: str = "1531") -> str | None:
+    """`entry_rules.reached`(손절 없음)와 같은 판정을 하루 전체 봉에. 09:01 봉부터, 목표가 호가 올림, 봉 시가가 목표 이상이거나
+    고가가 목표를 넘으면 그 봉 표기. 09:00 봉이 없으면 None."""
+    b = sorted(x for x in bars if x[0] < before)
+    if not b or b[0][0] != entry_rules.OPEN:
+        return None
+    target = entry_rules.round_up(b[0][1] * (1 + take))
+    for bar in b[1:]:
+        if bar[1] >= target or bar[2] > target:
+            return bar[0]
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class Peak:
+    """9시 시가 대비 경로(%, 비용 전). 최대는 09:00 봉 고가를 포함한 원시 고가 기준이다(체결 판정이 아니라 묘사)."""
+
+    max_ten: float
+    max_ten_at: str
+    max_day: float
+    max_day_at: str
+    low_ten: float
+    dip_before_peak: float
+    """장중 최대가 나오기 전까지의 최저(%). 최대까지 가는 사이 먼저 얼마나 빠졌나."""
+    last: float
+    last_at: str
+    """그날 마지막 봉 종가와 그 표기(거래 없는 분은 봉이 없어 15:30 봉이 없을 수 있다)."""
+    after_ten: bool
+    """10시 뒤 봉이 있었나. 없으면(거래정지 등) 장중 최대 = 10시 전 최대."""
+
+
+def peak(bars: Sequence[Bar]) -> Peak | None:
+    b = sorted(bars)
+    if not b or b[0][0] != entry_rules.OPEN:
+        return None
+    o = b[0][1]
+    ten = [x for x in b if x[0] < entry_rules.HOUR_END]
+    hi_ten = max(ten, key=lambda x: x[2])  # 같은 값이면 먼저 나온 봉(max는 처음 것을 준다)
+    hi_day = max(b, key=lambda x: x[2])
+    before = [x for x in b if x[0] <= hi_day[0]]
+
+    def p(v: float) -> float:
+        return (v / o - 1) * 100
+
+    return Peak(
+        max_ten=p(hi_ten[2]),
+        max_ten_at=hi_ten[0],
+        max_day=p(hi_day[2]),
+        max_day_at=hi_day[0],
+        low_ten=p(min(x[3] for x in ten)),
+        dip_before_peak=p(min(x[3] for x in before)),
+        last=p(b[-1][4]),
+        last_at=b[-1][0],
+        after_ten=len(ten) < len(b),
+    )
+
+
+def peak_bucket(at: str) -> str:
+    if at < "0905":
+        return PEAK_BUCKETS[0]
+    if at < "0915":
+        return PEAK_BUCKETS[1]
+    if at < "0930":
+        return PEAK_BUCKETS[2]
+    if at < "1000":
+        return PEAK_BUCKETS[3]
+    return PEAK_BUCKETS[4]
+
+
+def sign_test(wins: int, losses: int) -> float | None:
+    """한쪽 부호 검정 p: 0.5를 넘은 날(wins)이 넘지 못한 날(losses)보다 이만큼 많을 확률. 같은 날(0.5)은 뺀다. 참고값."""
+    n = wins + losses
+    if n == 0:
+        return None
+    return float(sum(math.comb(n, k) for k in range(wins, n + 1))) / float(2**n)
+
+
+def judge_share(shares: dict[date, float], n: int, base: float = PICK_BASE) -> Judged:
+    """날짜마다 (그날 도달 비율 - base) 하나가 관측. 문턱은 S1·S2와 같다(20일 전 기록만, 처음 60일로 한 번, 평균 > 0,
+    t ≥ 2, 앞·뒤 절반 > 0). 날마다 값이 같아 표준편차가 0이면 t는 정의되지 않으니, 평균의 부호로 무한대처럼 다룬다."""
+    first_days = sorted(shares)[:DECIDE_DAYS]
+    ordered = [shares[d] - base for d in first_days]
+    m, t = mean_t(ordered)
+    if m is not None and t is None and len(ordered) > 1:
+        t = float("inf") if m > 0 else float("-inf") if m < 0 else None
+    half = len(ordered) // 2
+    a = mean_t(ordered[:half])[0] if half else None
+    b = mean_t(ordered[half:])[0] if half else None
+    if len(ordered) < READ_DAYS:
+        state = f"기록 중 ({len(ordered)}/{READ_DAYS}일, 판정 아님)"
+    elif len(ordered) < DECIDE_DAYS:
+        state = f"읽는 중 ({len(ordered)}/{DECIDE_DAYS}일, 판정 아님)"
+    elif (
+        m is not None
+        and t is not None
+        and m > 0
+        and t >= MIN_T
+        and a is not None
+        and b is not None
+        and a > 0
+        and b > 0
+    ):
+        state = "성립"
+    else:
+        state = "성립 안 함"
+    finite_t = t if t is None or abs(t) != float("inf") else None
+    return Judged(len(ordered), n, m, finite_t, a, b, state)

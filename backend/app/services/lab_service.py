@@ -29,7 +29,7 @@ from app.core.calendar import Market, MarketCalendar
 from app.models import ExpectedOpen, Instrument
 from app.models.intraday import IntradaySummary, MinuteFetch
 from app.models.watchlist import WatchlistMember, WatchlistSnapshot
-from app.scoring import disclosure_events, lab
+from app.scoring import disclosure_events, entry_rules, lab
 from app.scoring.entry_rules import Bar
 from app.scoring.watchlist import (
     SELECTION_VERSION_V2_EXCLUDE,
@@ -380,6 +380,7 @@ def lab_view(session: Session) -> dict[str, Any]:
             for h in lab.HYPOTHESES
         ],
         "list_hypotheses": _list_hypotheses(session),
+        "pick_track": _pick_track_safe(session),
         "reference_meta": ref.get("meta", {}),
     }
     _CACHE.clear()
@@ -393,6 +394,200 @@ def _frozen(
     """목록을 얼린 시각이 가설 고정 뒤인 날의 표본인가."""
     after = {r["day"] for r in days if datetime.fromisoformat(str(r["asof"])) > lab.FROZEN_AT}
     return [(s, s.day.isoformat() in after) for s in samples]
+
+
+S3_TEXT = (
+    "목록에 남은 종목 중 이유 4개(좋은 뉴스·공시·뉴스 급증·검색 급증) 가운데 3개 이상이 겹친 종목의 그날 기술 점수 상위 "
+    "2개를 9시 시가에 사면, 10시 전에 +2%에 닿는(체결 판정) 비율이 50%보다 높다"
+)
+S3_BASIS = (
+    "소유자 요청(2026-10-07). 고정 전에 본 것은 10/2 두 종목(둘 다 +2% 도달)뿐이고, 그걸 보고 만든 조건이라 근거는 약하다. "
+    "같은 판정으로 우리 목록 전체(9/28~10/6)는 34%, 3개월 공시 표본은 42%였다. 하루 최대 2종목이라, 진짜 비율이 60%여도 "
+    "60일 판정에서 성립할 확률은 대략 반반이다(추정) — '성립 안 함'이 '50% 이하'라는 뜻은 아니다."
+)
+
+
+def _full_days(
+    session: Session, pairs: Sequence[tuple[date, int]]
+) -> dict[tuple[date, int], list[Bar]]:
+    """고른 종목의 그날 1분봉 전체(09:00~15:30)."""
+    if not pairs:
+        return {}
+    rows = session.execute(
+        text(
+            "select b.session_date, b.instrument_id, b.ts, b.open, b.high, b.low, b.close "
+            "from unnest(cast(:days as date[]), cast(:ids as bigint[])) as p(d, i) "
+            "join minute_bar b on b.session_date = p.d and b.instrument_id = p.i "
+            "order by b.session_date, b.instrument_id, b.ts"
+        ),
+        {"days": [d for d, _ in pairs], "ids": [i for _, i in pairs]},
+    ).all()
+    out: dict[tuple[date, int], list[Bar]] = defaultdict(list)
+    for d, i, ts, o, h, lo, c in rows:
+        out[(d, i)].append((hhmm(ts), float(o), float(h), float(lo), float(c)))
+    return out
+
+
+def _pick_summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """잰 행들의 묘사 통계(판정 아님): 단계별 도달 비율(10시 전·장중), 최대 시각 분포, 최대 상승 중앙값."""
+    got = [r for r in rows if r["peak"] is not None]
+
+    def median(key: str) -> float | None:
+        values = [r["peak"][key] for r in got]
+        return statistics.median(values) if values else None
+
+    def reached(level: float, when: str) -> float | None:
+        if not got:
+            return None
+        return sum(1 for r in got if r["levels"][str(level)][when] is not None) / len(got)
+
+    return {
+        "measured": len(got),
+        "days": len({r["day"] for r in got}),
+        "levels": [
+            {"level": x, "ten": reached(x, "ten"), "day": reached(x, "day")} for x in lab.LEVELS
+        ],
+        "peak_ten_at": {
+            b: sum(1 for r in got if r["peak_ten_bucket"] == b) for b in lab.PEAK_BUCKETS[:4]
+        },
+        "peak_day_at": {
+            b: sum(1 for r in got if r["peak_day_bucket"] == b) for b in lab.PEAK_BUCKETS
+        },
+        "median_max_ten": median("max_ten"),
+        "median_max_day": median("max_day"),
+        "median_dip": median("dip_before_peak"),
+    }
+
+
+def pick_track(session: Session) -> dict[str, Any]:
+    """S3: 3개 겹침 + 기술 상위 2. 목록 멤버 전체에서 고르고(1분봉 유무와 무관), 고른 종목만 하루 전체 1분봉으로 잰다."""
+    snaps = _snapshots(session)
+    by_snap: dict[int, list[tuple[WatchlistMember, str]]] = defaultdict(list)
+    if snaps:
+        for m, name in session.execute(
+            select(WatchlistMember, Instrument.name)
+            .join(Instrument, Instrument.instrument_id == WatchlistMember.instrument_id)
+            .where(WatchlistMember.snapshot_id.in_([s.id for s in snaps]))
+        ).tuples():
+            by_snap[m.snapshot_id].append((m, name))
+    picked: list[tuple[WatchlistSnapshot, WatchlistMember, str]] = []
+    for snap in snaps:
+        names = {m.instrument_id: (m, name) for m, name in by_snap[snap.id]}
+        top = lab.pick_top(
+            lab.Candidate(
+                instrument_id=m.instrument_id,
+                rank=m.rank,
+                reasons=tuple(m.reasons or ()),
+                technical=m.technical_score,
+                excluded=m.excluded_reason,
+            )
+            for m, _ in by_snap[snap.id]
+        )
+        picked += [(snap, *names[c.instrument_id]) for c in top]
+    pairs = [(s.session_date, m.instrument_id) for s, m, _ in picked]
+    bars = _full_days(session, pairs)
+    status = _fetch_status(session, pairs)
+    rows: list[dict[str, Any]] = []
+    for snap, m, name in picked:
+        d = snap.session_date
+        open_at = KR.session_open(d)
+        if snap.asof >= open_at:
+            phase = "late"
+        elif lab.counted(snap.asof, open_at):
+            phase = "after"
+        else:
+            phase = "before"
+        got = bars.get((d, m.instrument_id), [])
+        st = status.get((d, m.instrument_id))
+        why: str | None = None
+        if st is None and not got:
+            why = "수집 전"
+        elif st is not None and st not in SETTLED:
+            why = "부분 수집"
+        elif not got:
+            why = "1분봉 없음"
+        elif got[0][0] != "0900":
+            why = "09:00 봉 없음"
+        elif lab.locked(got):
+            why = "시초 잠김(살 수 없었음)"
+        pk = lab.peak(got) if why is None else None
+        rows.append(
+            {
+                "day": d.isoformat(),
+                "phase": phase,
+                "instrument_id": m.instrument_id,
+                "name": name,
+                "rank": m.rank,
+                "technical": m.technical_score,
+                "reasons": [r for r in lab.FOUR_REASONS if r in (m.reasons or ())],
+                "unmeasured": why,
+                "peak": None
+                if pk is None
+                else {
+                    "max_ten": pk.max_ten,
+                    "max_ten_at": pk.max_ten_at,
+                    "max_day": pk.max_day,
+                    "max_day_at": pk.max_day_at,
+                    "low_ten": pk.low_ten,
+                    "dip_before_peak": pk.dip_before_peak,
+                    "last": pk.last,
+                    "last_at": pk.last_at,
+                    "after_ten": pk.after_ten,
+                },
+                "peak_ten_bucket": None if pk is None else lab.peak_bucket(pk.max_ten_at),
+                "peak_day_bucket": None if pk is None else lab.peak_bucket(pk.max_day_at),
+                "levels": {
+                    str(x): {
+                        "ten": None if pk is None else entry_rules.reached(got, take=x),
+                        "day": None if pk is None else lab.reached_day(got, take=x),
+                    }
+                    for x in lab.LEVELS
+                },
+                "ret_take": None if pk is None else lab.ret(got, lab.PICK_TAKE, None),
+            }
+        )
+    after = [r for r in rows if r["phase"] == "after" and r["peak"] is not None]
+    by_day: dict[str, list[bool]] = defaultdict(list)
+    for r in after:
+        by_day[r["day"]].append(r["levels"][str(lab.PICK_TAKE)]["ten"] is not None)
+    shares = {date.fromisoformat(d): sum(v) / len(v) for d, v in by_day.items()}
+    judged = lab.judge_share(shares, n=len(after))
+    wins = sum(1 for v in shares.values() if v > lab.PICK_BASE)
+    losses = sum(1 for v in shares.values() if v < lab.PICK_BASE)
+    # +2% 지정가(r3, 비용 뒤)의 날짜 평균. 판정 아님 — 50%를 넘어도 손실 쪽이 크면 남지 않는다.
+    ret_by_day: dict[str, list[float]] = defaultdict(list)
+    for r in after:
+        if r["ret_take"] is not None:
+            ret_by_day[r["day"]].append(r["ret_take"])
+    ret_days = [sum(v) / len(v) for _, v in sorted(ret_by_day.items())]
+    return {
+        "key": "S3",
+        "text": S3_TEXT,
+        "basis": S3_BASIS,
+        "frozen_at": lab.S3_FROZEN_AT.isoformat(),
+        "base": lab.PICK_BASE,
+        "take": lab.PICK_TAKE,
+        "rows": rows,
+        "after": {
+            **_pick_summary(after),
+            "judged": judged.as_dict(),
+            "sign_p": lab.sign_test(wins, losses),
+            "wins": wins,
+            "losses": losses,
+            "ret_take_mean": statistics.fmean(ret_days) if ret_days else None,
+            "unmeasured": sum(1 for r in rows if r["phase"] == "after" and r["peak"] is None),
+        },
+        "before": _pick_summary([r for r in rows if r["phase"] == "before"]),
+    }
+
+
+def _pick_track_safe(session: Session) -> dict[str, Any] | None:
+    try:
+        with session.begin_nested():
+            return pick_track(session)
+    except Exception:  # 보조 섹션: 실패해도 나머지 화면은 나간다
+        logger.exception("lab: pick track failed")
+        return None
 
 
 def _list_hypotheses(session: Session) -> list[dict[str, Any]]:

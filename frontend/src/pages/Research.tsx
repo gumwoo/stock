@@ -7,6 +7,9 @@ import type {
   LabGridCell,
   LabHypothesis,
   LabListHypothesis,
+  LabPickRow,
+  LabPickSummary,
+  LabPickTrack,
   LabRuleStat,
   LabView,
 } from "../api/types";
@@ -310,6 +313,181 @@ function HypothesisCard({ h, frozenAt }: { h: LabHypothesis; frozenAt: string })
   );
 }
 
+// --- S3: 3개 겹침 + 기술 상위 2 추적 ----------------------------------------------------------------------
+
+const PHASE_LABEL: Record<LabPickRow["phase"], string> = {
+  after: "판정에 셈",
+  before: "고정 전(참고)",
+  late: "늦게 만든 목록(셈 안 함)",
+};
+
+function hm(label: string | null | undefined): string {
+  return label ? `${label.slice(0, 2)}:${label.slice(2)}` : "–";
+}
+
+function LevelsTable({ s, title }: { s: LabPickSummary; title: string }) {
+  return (
+    <div className="lab__tablewrap">
+      <table className="lab__table">
+        <caption className="lab__small">
+          {title}: {s.days}일 · {s.measured}종목 · 10시 전 최대 중앙값 {pct(s.median_max_ten)} · 장중 최대 중앙값{" "}
+          {pct(s.median_max_day)} · 최대 전에 먼저 빠진 깊이 중앙값 {pct(s.median_dip)}
+        </caption>
+        <thead>
+          <tr>
+            <th>시가 대비</th>
+            {s.levels.map((l) => (
+              <th key={l.level} className="lab__num">
+                +{+(l.level * 100).toFixed(1)}%
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>10시 전 체결</td>
+            {s.levels.map((l) => (
+              <td key={l.level} className="lab__num">
+                {share(l.ten)}
+              </td>
+            ))}
+          </tr>
+          <tr>
+            <td>장 마감까지 체결</td>
+            {s.levels.map((l) => (
+              <td key={l.level} className="lab__num">
+                {share(l.day)}
+              </td>
+            ))}
+          </tr>
+          <tr>
+            <td>10시 전 최대가 나온 시각</td>
+            <td colSpan={s.levels.length} className="lab__small">
+              {Object.entries(s.peak_ten_at)
+                .map(([k, v]) => `${k} ${v}`)
+                .join(" · ")}
+            </td>
+          </tr>
+          <tr>
+            <td>장중 최대가 나온 시각</td>
+            <td colSpan={s.levels.length} className="lab__small">
+              {Object.entries(s.peak_day_at)
+                .map(([k, v]) => `${k} ${v}`)
+                .join(" · ")}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function PickTrack({ t }: { t: LabPickTrack }) {
+  const a = t.after;
+  const j = a.judged;
+  const rows = [...t.rows].reverse();
+  return (
+    <>
+      <article className="lab__hyp">
+        <header className="lab__hyphead">
+          <span className="lab__key">{t.key}</span>
+          <span className={j.state === "성립" ? "lab__state lab__state--yes" : "lab__state"}>{j.state}</span>
+        </header>
+        <p className="lab__hyptext">{t.text}</p>
+        <p className="lab__small">
+          예측: 날마다 고른 종목 중 +{+(t.take * 100).toFixed(1)}% 체결 비율이 {Math.round(t.base * 100)}%보다 높다 · 고정{" "}
+          {new Date(t.frozen_at).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}
+        </p>
+        <dl className="lab__hypnums">
+          <div>
+            <dt>고정 뒤 우리 목록</dt>
+            <dd>
+              {j.days}/60일 · 종목 {j.n} · 날짜 평균 도달률{" "}
+              {j.mean === null ? "–" : `${Math.round((j.mean + t.base) * 100)}%`} · t {num(j.t, 2)} · 앞{" "}
+              {j.first === null ? "–" : `${Math.round((j.first + t.base) * 100)}%`} / 뒤{" "}
+              {j.second === null ? "–" : `${Math.round((j.second + t.base) * 100)}%`}
+            </dd>
+          </div>
+          <div>
+            <dt>참고(판정 아님)</dt>
+            <dd>
+              50% 넘은 날 {a.wins} · 못 넘은 날 {a.losses} · 부호 검정 p {a.sign_p === null ? "–" : a.sign_p.toFixed(3)} · +
+              {+(t.take * 100).toFixed(1)}% 지정가(10시 매도, 비용 뒤) 평균 {pct(a.ret_take_mean)} · 잴 수 없던 종목 {a.unmeasured}
+            </dd>
+          </div>
+        </dl>
+        <p className="lab__basis">{t.basis}</p>
+      </article>
+      <LevelsTable s={a} title="고정 뒤" />
+      {t.before.measured > 0 && <LevelsTable s={t.before} title="고정 전(참고, 결과를 보고 만든 조건)" />}
+      <div className="lab__tablewrap">
+        <table className="lab__table">
+          <thead>
+            <tr>
+              <th>날짜</th>
+              <th>종목</th>
+              <th className="lab__num">순위</th>
+              <th className="lab__num">기술</th>
+              <th>겹친 이유</th>
+              <th className="lab__num">10시 전 최대</th>
+              <th className="lab__num">장중 최대</th>
+              <th className="lab__num">최대 전 최저</th>
+              <th className="lab__num">마감</th>
+              <th>+2% 체결</th>
+              <th>구분</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={11}>아직 고른 종목이 없습니다.</td>
+              </tr>
+            )}
+            {rows.map((r) => {
+              const p = r.peak;
+              const hit = r.levels[String(t.take)];
+              return (
+                <tr key={`${r.day}-${r.instrument_id}`} className={r.phase === "after" ? "" : "lab__muted"}>
+                  <td>{r.day.slice(5).replace("-", "/")}</td>
+                  <td>{r.name}</td>
+                  <td className="lab__num">{r.rank}</td>
+                  <td className="lab__num">{num(r.technical, 0)}</td>
+                  <td>{r.reasons.map((x) => LIST_REASON_LABEL[x] ?? x).join(" · ")}</td>
+                  {p ? (
+                    <>
+                      <td className="lab__num">
+                        <span className={sign(p.max_ten)}>{pct(p.max_ten, 1)}</span> {hm(p.max_ten_at)}
+                      </td>
+                      <td className="lab__num">
+                        <span className={sign(p.max_day)}>{pct(p.max_day, 1)}</span> {hm(p.max_day_at)}
+                        {!p.after_ten && <span className="lab__pending">10시 뒤 거래 없음</span>}
+                      </td>
+                      <td className="lab__num">{pct(p.dip_before_peak, 1)}</td>
+                      <td className="lab__num">
+                        <span className={sign(p.last)}>{pct(p.last, 1)}</span> {hm(p.last_at)}
+                      </td>
+                      <td>{hit?.ten ? `10시 전 ${hm(hit.ten)}` : hit?.day ? `10시 뒤 ${hm(hit.day)}` : "안 닿음"}</td>
+                    </>
+                  ) : (
+                    <td colSpan={5}>{r.unmeasured}</td>
+                  )}
+                  <td>{PHASE_LABEL[r.phase]}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="lab__caption">
+        고르기: 목록에 남은 종목 중 좋은 뉴스·공시·뉴스 급증·검색 급증 가운데 3개 이상이 겹친 종목을 기술 점수 순(같으면 목록
+        순위)으로 2개. 1분봉이 있든 없든 먼저 고르고, 잴 수 없으면 이유만 남깁니다. 최대·최저·마감은 9시 시가 대비(비용 전)이고
+        최대는 09:00 봉 고가까지 포함한 원시 고가입니다. "체결"은 성적표와 같은 판정(09:01부터, 목표가 호가 올림, 고가가 목표가를
+        넘거나 봉 시가가 목표가 이상이어야)이라 최대 %가 +2%를 넘어도 체결로 안 칠 수 있습니다. 1분봉은 장 마감 뒤 16:20에 받습니다.
+      </p>
+    </>
+  );
+}
+
 const LIST_HYP_TEXT: Record<string, string> = {
   H1: "좋은 뉴스 종목이 그날 목록 평균보다 낫다(시가→종가)",
   H2: "나쁜 뉴스 종목이 그날 목록 평균보다 못하다(시가→종가)",
@@ -497,6 +675,14 @@ export function Research() {
         <p className="lab__caption">
           한 종목이 여러 이유로 목록에 들면 여러 줄에 함께 들어갑니다. 지수 대형주도 포함합니다(list-review는 따로 뺍니다).
         </p>
+      </Section>
+
+      <Section title="3개 겹침 + 기술 상위 2 추적" badge="고정 뒤 기록으로만 판정">
+        {view.pick_track ? (
+          <PickTrack t={view.pick_track} />
+        ) : (
+          <p className="lab__error">이 섹션을 계산하지 못했습니다(나머지 화면은 그대로입니다).</p>
+        )}
       </Section>
 
       <Section title="가설 추적" badge="고정 뒤 기록으로만 판정">

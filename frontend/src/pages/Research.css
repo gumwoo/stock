@@ -261,3 +261,8 @@
 .lab__grid {
   min-width: 0;
 }
+
+/* S3 추적: 고정 전·늦은 목록 행은 흐리게(판정에 세지 않음) */
+.lab__muted td {
+  opacity: 0.6;
+}

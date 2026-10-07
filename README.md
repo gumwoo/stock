@@ -131,7 +131,7 @@ LLM에게 투자 판단을 맡기지 않는다. 점수, 신선도, 백테스트,
 | [아침 관찰 목록](docs/design/morning-list.md) | 장전 목록(V1), 단타용 아침 흐름(V2), 테마어 뉴스 |
 | [한국투자증권, 1분봉, 장중 분석, 실시간 차트](docs/design/intraday.md) | 응답의 의미, 분봉 정본, 누적 보고서, 실시간 차트 |
 | [포워드 기록과 검토 관문](docs/design/forward-test.md) | 매일 결과를 채우는 루프, 미리 고정한 결정 규칙 |
-| [전략 실험실](docs/design/strategy-lab.md) | 연구 탭: 매일 성적표, 규칙 비교표, 종목 조건 비교, 고정 가설 S1·S2 |
+| [전략 실험실](docs/design/strategy-lab.md) | 연구 탭: 매일 성적표, 규칙 비교표, 종목 조건 비교, 고정 가설 S1·S2, 3개 겹침 + 기술 상위 2 추적(S3, 10/8 목록부터) |
 | [백테스트](docs/studies/backtest.md) | 18종목 10년, v0.3 분포, walk-forward |
 | [공시 이벤트 분석](docs/studies/disclosure.md) | v1 다음 날, v2 9~10시, v3 진입·청산 규칙 |
 | [밤사이 미국 업종 연구](docs/studies/overnight-us-sectors.md) | 미국 업종 지표 → 한국 연동 종목, NXT 8시 진입 |

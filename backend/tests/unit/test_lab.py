@@ -158,3 +158,109 @@ def test_the_freeze_is_before_the_first_counted_list() -> None:
 
 def test_minute_labels_are_seoul_time() -> None:
     assert hhmm(datetime(2026, 10, 5, 0, 3, tzinfo=UTC)) == "0903"
+
+
+class TestPickTrack:
+    """S3: 3개 겹침 + 기술 상위 2. 고르기·경로·판정."""
+
+    FOUR3 = ("POSITIVE_NEWS_OVERLAY", "DISCLOSURE_EVENT", "SEARCH_SURGE")
+
+    def cand(self, i: int, tech: float | None, *, rank: int = 1, reasons=FOUR3, excluded=None):  # type: ignore[no-untyped-def]
+        return lab.Candidate(i, rank, tuple(reasons), tech, excluded)
+
+    def test_picks_the_top_two_kept_names_with_three_reasons(self) -> None:
+        picks = lab.pick_top(
+            [
+                self.cand(1, 60, rank=1),
+                self.cand(2, 90, rank=2, excluded="PREV_SURGE"),  # 목록에서 뺀 종목은 고르지 않는다
+                self.cand(3, 95, rank=3, reasons=("POSITIVE_NEWS_OVERLAY", "DISCLOSURE_EVENT")),
+                self.cand(4, None, rank=4),  # 기술 점수 없음
+                self.cand(5, 80, rank=5),
+                self.cand(6, 70, rank=6),
+            ]
+        )
+        assert [p.instrument_id for p in picks] == [5, 6]
+
+    def test_bad_news_does_not_count_toward_the_three(self) -> None:
+        two_and_bad = ("POSITIVE_NEWS_OVERLAY", "DISCLOSURE_EVENT", "NEGATIVE_NEWS_OVERLAY")
+        assert lab.overlap(two_and_bad) == 2
+        assert lab.pick_top([self.cand(1, 90, reasons=two_and_bad)]) == []
+
+    def test_a_tie_goes_to_the_better_list_rank(self) -> None:
+        picks = lab.pick_top(
+            [self.cand(9, 76, rank=9), self.cand(1, 76, rank=1), self.cand(7, 82, rank=7)]
+        )
+        assert [p.instrument_id for p in picks] == [7, 1]
+
+    def test_only_lists_frozen_after_the_hypothesis_and_before_the_open_count(self) -> None:
+        open_at = datetime(2026, 10, 8, 0, 0, tzinfo=UTC)
+        assert lab.counted(datetime(2026, 10, 7, 23, 38, tzinfo=UTC), open_at)
+        assert not lab.counted(
+            datetime(2026, 10, 8, 1, 17, tzinfo=UTC), open_at
+        )  # 장중에 만든 목록
+        assert not lab.counted(
+            datetime(2026, 10, 2, 23, 38, tzinfo=UTC), datetime(2026, 10, 3, 0, 0, tzinfo=UTC)
+        )  # 고정 전
+        # 10/7 목록(10:17 KST)은 고정 전이기도 하다.
+        assert datetime(2026, 10, 7, 1, 17, tzinfo=UTC) < lab.S3_FROZEN_AT
+
+    def test_peak_reports_the_first_highest_bar_and_the_dip_before_it(self) -> None:
+        b = bars(
+            ("0900", 10000, 10100, 9900, 10000),
+            ("0901", 10000, 10000, 9700, 9800),
+            ("0930", 9800, 10300, 9800, 10200),
+            ("0945", 10200, 10300, 10100, 10100),
+            ("1300", 10100, 10500, 10000, 10400),
+            ("1520", 10400, 10400, 10300, 10300),
+        )
+        p = lab.peak(b)
+        assert p is not None
+        assert p.max_ten == pytest.approx(3.0) and p.max_ten_at == "0930"
+        assert p.max_day == pytest.approx(5.0) and p.max_day_at == "1300"
+        assert p.dip_before_peak == pytest.approx(-3.0) and p.low_ten == pytest.approx(-3.0)
+        # 마지막 봉이 15:30 전이어도 그 봉 종가가 마감이다.
+        assert p.last == pytest.approx(3.0) and p.last_at == "1520" and p.after_ten
+        assert lab.peak_bucket(p.max_ten_at) == "09:30~09:59"
+        assert lab.peak_bucket(p.max_day_at) == "10시 이후"
+
+    def test_peak_without_bars_after_ten_or_without_the_open_bar(self) -> None:
+        b = bars(("0900", 10000, 10200, 10000, 10100), ("0905", 10100, 10100, 10000, 10000))
+        p = lab.peak(b)
+        assert p is not None and not p.after_ten and p.max_day == p.max_ten
+        assert p.max_day_at == "0900"  # 09:00 봉 고가도 묘사에는 들어간다
+        assert lab.peak(b[1:]) is None
+
+    def test_reached_day_uses_the_same_fill_rule_over_the_whole_day(self) -> None:
+        b = bars(
+            ("0900", 10000, 10300, 10000, 10000),  # 09:00 봉 안의 고가는 체결 판정에 넣지 않는다
+            ("0901", 10000, 10200, 10000, 10100),  # 목표 10200에 닿기만 함: 체결 아님
+            ("1100", 10100, 10210, 10100, 10200),
+        )
+        assert entry_rules.reached(b, take=0.02) is None
+        assert lab.reached_day(b, take=0.02) == "1100"
+
+    def test_judge_share_needs_the_days_and_handles_a_constant_series(self) -> None:
+        all_hit = {D0 + timedelta(days=i): 1.0 for i in range(60)}
+        j = lab.judge_share(all_hit, n=120)
+        assert (
+            j.state == "성립" and j.t is None and j.n == 120
+        )  # 표준편차 0: t는 없지만 방향은 분명하다
+        assert lab.judge_share(dict(list(all_hit.items())[:10]), n=20).state.startswith("기록 중")
+        half = {D0 + timedelta(days=i): 0.5 for i in range(60)}
+        assert lab.judge_share(half, n=120).state == "성립 안 함"
+        mixed = {D0 + timedelta(days=i): (1.0 if i % 3 else 0.0) for i in range(60)}
+        assert (
+            lab.judge_share(mixed, n=120).state == "성립"
+        )  # 평균 0.67, t 약 2.7, 앞·뒤 절반 모두 0.5 위
+        # 뒤 절반이 0.5 아래로 갈리면 전체 평균·t가 넘어도 성립하지 않는다.
+        split = {
+            D0 + timedelta(days=i): 1.0 if i < 30 else (0.0 if i % 2 else 0.5) for i in range(60)
+        }
+        j = lab.judge_share(split, n=120)
+        assert j.mean is not None and j.mean > 0 and j.second is not None and j.second < 0
+        assert j.state == "성립 안 함"
+
+    def test_sign_test_is_one_sided(self) -> None:
+        assert lab.sign_test(0, 0) is None
+        assert lab.sign_test(3, 0) == pytest.approx(1 / 8)
+        assert lab.sign_test(1, 1) == pytest.approx(3 / 4)

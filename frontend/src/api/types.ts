@@ -371,6 +371,65 @@ export interface LabListHypothesis {
   state: string;
 }
 
+/** S3(3개 겹침 + 기술 상위 2)가 고른 종목 하나의 그날 경로. 최대는 09:00 봉 고가 포함 원시 고가(묘사), 도달은 체결 판정. */
+export interface LabPickRow {
+  day: string;
+  /** before: 가설 고정 전(참고) · after: 판정에 셈 · late: 장중에 늦게 만든 목록(셈하지 않음) */
+  phase: "before" | "after" | "late";
+  instrument_id: number;
+  name: string;
+  rank: number;
+  technical: number | null;
+  reasons: string[];
+  unmeasured: string | null;
+  peak: {
+    max_ten: number;
+    max_ten_at: string;
+    max_day: number;
+    max_day_at: string;
+    low_ten: number;
+    dip_before_peak: number;
+    last: number;
+    last_at: string;
+    after_ten: boolean;
+  } | null;
+  peak_ten_bucket: string | null;
+  peak_day_bucket: string | null;
+  /** 단계("0.02" 등)별 처음 체결된 봉 표기. 10시 전(ten)·장중(day). */
+  levels: Record<string, { ten: string | null; day: string | null }>;
+  ret_take: number | null;
+}
+
+export interface LabPickSummary {
+  measured: number;
+  days: number;
+  levels: { level: number; ten: number | null; day: number | null }[];
+  peak_ten_at: Record<string, number>;
+  peak_day_at: Record<string, number>;
+  median_max_ten: number | null;
+  median_max_day: number | null;
+  median_dip: number | null;
+}
+
+export interface LabPickTrack {
+  key: string;
+  text: string;
+  basis: string;
+  frozen_at: string;
+  base: number;
+  take: number;
+  rows: LabPickRow[];
+  after: LabPickSummary & {
+    judged: LabJudged;
+    sign_p: number | null;
+    wins: number;
+    losses: number;
+    ret_take_mean: number | null;
+    unmeasured: number;
+  };
+  before: LabPickSummary;
+}
+
 export interface LabView {
   cost_pct: number;
   frozen_at: string;
@@ -380,5 +439,7 @@ export interface LabView {
   kept_rules: LabRuleStat[];
   hypotheses: LabHypothesis[];
   list_hypotheses: LabListHypothesis[];
+  /** 보조 섹션: 계산이 실패하면 null(나머지 화면은 그대로). */
+  pick_track: LabPickTrack | null;
   reference_meta: Record<string, string | number>;
 }
