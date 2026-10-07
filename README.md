@@ -201,6 +201,17 @@ python -m app.cli rule-reference --disclosures data/disclosure_study/disclosures
 python -m app.cli review             # 포워드 기록의 검토 관문. 읽기만 한다
 ```
 
+**워커·API·화면은 윈도우 작업 스케줄러가 띄운다(2026-10-07부터).** 로그인하면 `stock-worker`·`stock-api`(8000)·`stock-web`(5173)이
+숨은 창으로 켜지고, 꺼지면 1분 뒤 다시 켜진다. Claude 앱이나 터미널을 닫아도 아침 작업(07:00~08:57)이 돈다 — 10/7에는 앱이
+닫히며 함께 꺼져 그날 아침이 통째로 빠졌다. 로그는 저장소의 `logs\worker.log`·`api.log`·`web.log`. 08:44·08:54 카톡은 Claude
+데스크톱 앱의 예약 작업이라, 그 시각에는 앱이 켜져 있어야 한다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File ops\register-tasks.ps1   # 등록(다시 해도 됨)
+Stop-ScheduledTask stock-worker; Start-ScheduledTask stock-worker         # 코드를 바꾼 뒤 다시 띄우기(api·web도 같다)
+Get-ScheduledTask stock-*                                                 # 상태
+```
+
 ### 자격증명, 필요해질 때
 
 `.env`에 일부만 채우고 재시작하면 된다 — 코드 수정 없음.
