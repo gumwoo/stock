@@ -1,9 +1,10 @@
 ﻿# 워커·API·화면을 Claude 앱과 상관없이 띄운다. 윈도우 작업 스케줄러가 로그인할 때 부른다(ops/register-tasks.ps1).
 # 경로에 공백이 없다는 전제(C:/Users/GUNWOO/Documents/stock). 공백이 생기면 따옴표 처리를 다시 볼 것.
 # 사용: powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ops\run.ps1 -Part worker|api|web
+# 작업 스케줄러는 conhost --headless로 띄운다(Windows Terminal 위임을 피하려고, register-tasks.ps1 참고).
 # 출력은 logs\<part>.log에 덧붙인다(cmd 리다이렉트: PowerShell 5.1의 >>는 UTF-16으로 써서 쓰지 않는다).
 # 프로세스가 끝나면(오류든 아니든) 60초 뒤 이 스크립트가 다시 띄운다 — 작업 스케줄러의 "실패 시 다시 시작"은 프로그램이
-# 오류 코드로 끝난 경우에는 동작하지 않아서다. Stop-ScheduledTask는 이 PowerShell까지 끝내므로 루프도 함께 멈춘다.
+# 오류 코드로 끝난 경우에는 동작하지 않아서다. Stop-ScheduledTask는 이 PowerShell까지 끝내므로 루프도 함께 멈춘다(conhost 전환 전 관찰).
 param([Parameter(Mandatory = $true)][ValidateSet("worker", "api", "web")][string]$Part)
 
 $root = Split-Path -Parent $PSScriptRoot

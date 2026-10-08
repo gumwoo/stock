@@ -202,14 +202,22 @@ python -m app.cli review             # 포워드 기록의 검토 관문. 읽기
 ```
 
 **워커·API·화면은 윈도우 작업 스케줄러가 띄운다(2026-10-07부터).** 로그인하면 `stock-worker`·`stock-api`(8000)·`stock-web`(5173)이
-숨은 창으로 켜지고, 프로세스가 끝나면 `ops\run.ps1`의 루프가 60초 뒤 다시 띄운다. Claude 앱이나 터미널을 닫아도 아침 작업(07:00~08:57)이 돈다 — 10/7에는 앱이
+창 없이(conhost --headless) 켜지고, 프로세스가 끝나면 `ops\run.ps1`의 루프가 60초 뒤 다시 띄운다. Claude 앱이나 터미널을 닫아도 아침 작업(07:00~08:57)이 돈다 — 10/7에는 앱이
 닫히며 함께 꺼져 그날 아침이 통째로 빠졌다. 로그는 저장소의 `logs\worker.log`·`api.log`·`web.log`. 08:44·08:54 카톡은 Claude
 데스크톱 앱의 예약 작업이라, 그 시각에는 앱이 켜져 있어야 한다.
+
+**10/8 보강.** 10/7 밤 세 작업이 루프까지 함께 꺼져(0xC000013A) 10/8 아침이 빠졌다. 콘솔을 Windows Terminal 패키지의
+`OpenConsole.exe`가 맡고 있었고 같은 밤 그 패키지의 스토어 업데이트 시도가 세 번 있어, 업데이트에 끌려 닫힌 것으로 추정한다(직접
+근거는 없음). 그래서 (1) 작업을 `conhost.exe --headless`로 띄워 기본 터미널 위임을 피하고, (2) 로그인 트리거에 더해 매일 06:30부터
+30분마다 "안 떠 있으면 띄우기"를 건다(이미 떠 있으면 무시, 반복이 끝나도 실행 중인 루프는 끄지 않음). 다른 방법으로 이 사용자의
+기본 터미널을 "콘솔 호스트"로 바꾸는 설정도 있지만(모든 콘솔 창이 옛 창으로 뜸) 쓰지 않았다 — 원하면 직접 고른다.
+**로그인 전(재부팅·로그오프 뒤)에는 30분 트리거로도 뜨지 않는다**(로그인한 사용자로 도는 작업이라). 반복 트리거가 이미 떠 있는 작업을
+건너뛸 때 마지막 결과가 0x800710E0으로 찍히는 것은 정상이다.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File ops\register-tasks.ps1   # 등록(다시 해도 됨). 처음 등록한 뒤에는 Start-ScheduledTask로 한 번 띄운다
 powershell -NoProfile -ExecutionPolicy Bypass -File ops\restart.ps1 -Part worker   # 코드를 바꾼 뒤 다시 띄우기(api·web·all)
-# Stop-ScheduledTask만으로는 안 된다: PowerShell만 끝나고 python·node가 남아 다시 시작하면 두 벌이 돈다(restart.ps1이 남은 것까지 끝낸다)
+# Stop-ScheduledTask만으로는 안 된다: 남은 python·node나 Running 상태 때문에 두 벌이 돌거나 시작이 무시될 수 있다(restart.ps1이 남은 것까지 끝내고, 멈춤을 기다렸다가 시작을 확인한다)
 Get-ScheduledTask stock-*                                                 # 상태(Running이어야 한다)
 Get-CimInstance Win32_Process -Filter "CommandLine like '%app.worker%'"   # 워커가 한 벌만 도는지(venv라 python.exe 두 개가 정상)
 ```
