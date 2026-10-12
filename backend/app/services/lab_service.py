@@ -334,7 +334,7 @@ def _key(session: Session) -> tuple[Any, ...]:
         session.execute(select(func.max(IntradaySummary.id))).scalar(),
         session.execute(
             select(func.max(ExpectedOpen.id))
-        ).scalar(),  # 08:50 갭 판정이 목록 행을 바꾼다
+        ).scalar(),  # 08:50 갭 판정이 목록 행을 바꿨다(2026-10-12까지). 지금은 새 조회 기록을 알리는 표시로만 남는다
     )
 
 

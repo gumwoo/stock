@@ -113,8 +113,8 @@ _KR_MARKET_CAP = CronTrigger(day_of_week="mon-fri", hour=16, minute=10, timezone
 # 리포트가 더 들어올 수 있고, 그런 조회는 개장 뒤 받은 것으로 표시된다.
 _KR_OPINIONS = CronTrigger(day_of_week="mon-fri", hour=8, minute=40, timezone="Asia/Seoul")
 _KR_OPINIONS_EVENING = CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone="Asia/Seoul")
-# 9시 전 예상체결가(`kis_expected_open`): 08:50 판정(예상 시가 +3% 이상이면 목록에서 뺌, 08:54까지 반영 — 08:55 실시간
-# 연결 전), 08:57 기록만. 2026-10-06부터.
+# 9시 전 예상체결가(`kis_expected_open`): 08:50 조회(예상 시가 +3% 이상을 08:54 카톡에 참고로 알림 — 2026-10-12부터 목록에서
+# 빼지 않음, 그 전에는 뺐다), 08:57 기록만. 2026-10-06부터.
 _KR_GAP_DECIDE = CronTrigger(day_of_week="mon-fri", hour=8, minute=50, timezone="Asia/Seoul")
 _KR_GAP_RECORD = CronTrigger(day_of_week="mon-fri", hour=8, minute=57, timezone="Asia/Seoul")
 # The day's minute bars, after the close and before the daily loop. A job of

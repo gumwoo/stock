@@ -21,9 +21,9 @@ from app.api.lists import signal_rows
 from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import get_db
-from app.models import ExpectedOpen, WatchlistMember, WatchlistSnapshot
+from app.models import ExpectedOpen, Instrument, WatchlistMember, WatchlistSnapshot
 from app.realtime.gateway import load_members, member_dict
-from app.scoring.gap import DECIDE_BY, GAP_UP
+from app.scoring.gap import DECIDE_BY, GAP_UP, GAP_UP_AT
 from app.scoring.watchlist import LOW_SCORE, PREV_SURGE, STRATEGY_VERSION_V2
 from app.services import briefing_service
 
@@ -116,7 +116,8 @@ def _snapshot(session: Session, day: date) -> WatchlistSnapshot | None:
 
 
 def _gap(session: Session, day: date, *, force: bool) -> dict[str, Any]:
-    """08:50 예상 갭 판정 결과. 판정이 아직 진행 중이면(08:54 전) 최대 50초 기다린다 — 거짓 "판정 못 함"이 가지 않게."""
+    """08:50 예상 갭 조회 결과(참고 — 2026-10-12부터 목록에서 빼지 않는다). 조회가 아직 진행 중이면(08:54 전) 최대 50초
+    기다린다 — 거짓 "조회 못 함"이 가지 않게."""
     local = utc_now().astimezone(SEOUL)
     if not force and not (GAP_WINDOW[0] <= local.time() <= GAP_WINDOW[1] and local.date() == day):
         return {"status": "NOT_YET" if local.time() < GAP_WINDOW[0] else "LATE", "messages": []}
@@ -148,46 +149,46 @@ def _gap(session: Session, day: date, *, force: bool) -> dict[str, Any]:
         # 조회는 됐지만 판정할 수 있는 값이 하나도 없다(장전 응답 모양이 예상과 다름 등) — "갭업 없음"으로 읽히지 않게.
         why = f"조회 {check.get('checked', 0)}·실패 {check.get('failed', 0)}·불일치 {check.get('mismatched', 0)}, 판정할 값 없음"
         return {"status": "NO_CHECK", "messages": briefing_service.gap_warning(day, why)}
-    before = signal_rows(session, day, snap, with_gap_up=True)
-    reasons = dict(
+    gapped = _gapped(session, day, snap.id, str(check["at"]))
+    # 화면·카톡에 남은 종목 수(지난 날의 GAP_UP 행은 그날 빠졌으니 세지 않는다).
+    remaining = int(
         session.execute(
-            select(WatchlistMember.instrument_id, WatchlistMember.excluded_reason).where(
-                WatchlistMember.snapshot_id == snap.id
+            select(func.count()).where(
+                WatchlistMember.snapshot_id == snap.id,
+                WatchlistMember.excluded_reason.is_(None),
             )
-        )
-        .tuples()
-        .all()
+        ).scalar_one()
     )
-    after = [r for r in before if reasons.get(int(r["instrument_id"])) != GAP_UP]
-    gapped_ids = [
-        int(r["instrument_id"]) for r in before if reasons.get(int(r["instrument_id"])) == GAP_UP
-    ]
-    pct = _latest_pct(session, day, gapped_ids, str(check["at"]))
-    names = {int(r["instrument_id"]): str(r["name"]) for r in before}
-    gapped = [(names[i], pct.get(i)) for i in gapped_ids]
     return {
         "status": "OK" if gapped else "NONE",
-        "messages": briefing_service.gap_messages(
-            day,
-            check,
-            gapped,
-            briefing_service.rankings(before),
-            briefing_service.rankings(after),
-            len(after),
-        ),
+        "messages": briefing_service.gap_messages(day, check, gapped, remaining),
     }
 
 
-def _latest_pct(
-    session: Session, day: date, ids: list[int], check_at: str
-) -> dict[int, float | None]:
-    if not ids:
-        return {}
+def _gapped(
+    session: Session, day: date, snapshot_id: int, check_at: str
+) -> list[tuple[str, float]]:
+    """그 판정 실행(check_at)에서 판정할 수 있는 값으로 예상 시가 +3% 이상인, 목록에 남은 종목(이름, 예상 갭 %), 큰 순.
+
+    2026-10-12부터 목록에서 빼지 않으므로 제외 이유가 아니라 기록에서 고른다. 같은 날 재실행 행·08:57 record 행은 check_at으로,
+    점수·전일 급등으로 이미 뺀 종목은 제외 이유로 거른다(과거 날을 force로 볼 때를 위해 GAP_UP으로 뺀 행은 남긴다)."""
     rows = session.execute(
-        select(ExpectedOpen.instrument_id, ExpectedOpen.change_pct).where(
-            ExpectedOpen.session_date == day,
-            ExpectedOpen.instrument_id.in_(ids),
-            ExpectedOpen.check_at == datetime.fromisoformat(check_at),
+        select(Instrument.name, ExpectedOpen.change_pct)
+        .join(Instrument, Instrument.instrument_id == ExpectedOpen.instrument_id)
+        .join(
+            WatchlistMember,
+            (WatchlistMember.instrument_id == ExpectedOpen.instrument_id)
+            & (WatchlistMember.snapshot_id == snapshot_id),
         )
+        .where(
+            ExpectedOpen.session_date == day,
+            ExpectedOpen.check_at == datetime.fromisoformat(check_at),
+            ExpectedOpen.judgeable.is_(True),
+            ExpectedOpen.change_pct >= GAP_UP_AT,
+            or_(
+                WatchlistMember.excluded_reason.is_(None), WatchlistMember.excluded_reason == GAP_UP
+            ),
+        )
+        .order_by(ExpectedOpen.change_pct.desc())
     ).all()
-    return {int(i): (float(p) if p is not None else None) for i, p in rows}
+    return [(str(n), float(p)) for n, p in rows]

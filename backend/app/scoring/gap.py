@@ -1,4 +1,7 @@
-"""9시 전 예상 시가 갭 판정(순수). 예상 시가가 전일 대비 +3% 이상이면 9시 시가 매수 목록에서 뺀다.
+"""9시 전 예상 시가 갭 판정(순수). 예상 시가가 전일 대비 +3% 이상인 종목을 08:54 카톡에 참고로 알린다.
+
+2026-10-12부터 목록에서 빼지 않는다(소유자 결정). 10/6~10/12 목록에는 GAP_UP 제외 기록이 남아 있다(과거 기록을 읽으려고
+`GAP_UP`을 남긴다). 아래 근거는 빼던 때의 것이고, 지금도 연구 탭 "시가 갭" 조건으로 계속 본다.
 
 근거: 3개월 공시 표본에서 시가 갭 +3% 이상 종목을 9시 시가에 사서 +2.5% 익절·손절 없음(비용 0.30% 뒤)은 평균 -1.38%
 (277건, t -3.9, 앞·뒤 절반 모두 마이너스), 우리 목록 5일도 매일 마이너스였다(소유자 결정, 2026-10-05).
@@ -20,7 +23,7 @@ GAP_UP = "GAP_UP"
 GAP_UP_AT = 3.0
 MISMATCH_PP = 0.15
 DECIDE_BY = time(8, 54)
-"""08:50 판정을 반영하는 마지막 시각. 08:55 실시간 연결 전에 목록이 걸러져 있어야 한다."""
+"""08:50 조회가 이 시각 전에 끝나야 08:54 카톡이 그 결과를 읽는다(2026-10-12 전에는 목록을 거르는 마감이었다)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,10 +87,3 @@ def parse(output2: Mapping[str, Any] | None) -> Quote | None:
 def gap_up(q: Quote) -> bool:
     c = q.change_pct
     return q.judgeable and c is not None and c >= GAP_UP_AT
-
-
-def next_reason(current: str | None, is_gap_up: bool) -> str | None:
-    """08:50 판정 뒤 목록 행의 제외 이유. 이미 다른 이유(점수·전일 급등)로 빠진 행은 건드리지 않는다."""
-    if current not in (None, GAP_UP):
-        return current
-    return GAP_UP if is_gap_up else None
