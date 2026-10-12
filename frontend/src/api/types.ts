@@ -371,6 +371,32 @@ export interface LabListHypothesis {
   state: string;
 }
 
+/** 장 초반 동반주(표시 전용): 개장 1~10분 매분 등락률 순위에서 +7% 이상인 이끄는 종목과, 이름이 같거나 AI가 추정한 동반 후보. */
+export interface Companion {
+  instrument_id: number;
+  name: string;
+  change_pct: number | null;
+  price: number | null;
+  fetched_at: string | null;
+  /** NAME(이름 같음) / AI(AI 추정) */
+  sources: string[];
+  reason: string | null;
+}
+
+export interface CompanionLeader {
+  instrument_id: number;
+  name: string;
+  change_pct: number;
+  companions: Companion[];
+}
+
+export interface CompanionsToday {
+  day: string | null;
+  at: string | null;
+  last_run: { status: string; at: string; detail: string | null } | null;
+  leaders: CompanionLeader[];
+}
+
 /** S3(3개 겹침 + 기술 상위 2)가 고른 종목 하나의 그날 경로. 최대는 09:00 봉 고가 포함 원시 고가(묘사), 도달은 체결 판정. */
 export interface LabPickRow {
   day: string;

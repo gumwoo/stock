@@ -206,3 +206,15 @@ def test_minute_bars_have_jobs_of_their_own() -> None:
     job = build_scheduler().get_job("kis_minutes_after_close")
     fields = {f.name: str(f) for f in job.trigger.fields}
     assert (fields["hour"], fields["minute"]) == ("16", "20")
+
+
+def test_open_movers_run_each_minute_after_a_nine_or_ten_oclock_open() -> None:
+    # 장 초반 동반주: 9·10시 1~10분(10시에 여는 날 대비 — 실제 개장 시각은 잡 안에서 거른다), 밤 18:10 AI 관련주.
+    scheduler = build_scheduler()
+    job = scheduler.get_job("kis_open_movers")
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert (fields["hour"], fields["minute"], fields["day_of_week"]) == ("9,10", "1-10", "mon-fri")
+    assert str(job.trigger.timezone) == "Asia/Seoul" and job.misfire_grace_time == 30
+    ai = scheduler.get_job("companions_ai")
+    fields = {f.name: str(f) for f in ai.trigger.fields}
+    assert (fields["hour"], fields["minute"]) == ("18", "10")

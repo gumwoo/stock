@@ -11,6 +11,7 @@ from app.models.attention import SearchTrend, SignalAttention
 from app.models.backtest import BacktestRun, BacktestWindow
 from app.models.base import Base
 from app.models.collector import CollectorRun, CollectorStatus
+from app.models.companion import CompanionAlert, CompanionAsk, CompanionRelation, OpenMover
 from app.models.disclosure import Disclosure
 from app.models.expected_open import ExpectedOpen
 from app.models.filing import Filing
@@ -83,6 +84,9 @@ __all__ = [
     "Candle",
     "CollectorRun",
     "CollectorStatus",
+    "CompanionAlert",
+    "CompanionAsk",
+    "CompanionRelation",
     "CorporateAction",
     "CorporateActionType",
     "Decider",
@@ -116,6 +120,7 @@ __all__ = [
     "NewsSentiment",
     "NewsSource",
     "NewsSweepCoverage",
+    "OpenMover",
     "PortfolioSnapshot",
     "PreopenPool",
     "PreopenPoolMember",

@@ -1011,6 +1011,27 @@ def cmd_rule_reference(disclosures: str, minutes: str, first: date, last: date) 
     return 0
 
 
+def cmd_companions_build(names: list[str], max_batches: int) -> int:
+    """장 초반 동반주: AI에게 관련주를 묻는다(밤 잡과 같은 규칙, Claude 구독 — 호출 최대 `max_batches`). `names`는 정확한 종목명."""
+    from app.repositories import instrument_repo
+    from app.services import companion_service
+
+    with session_scope() as session:
+        today = MarketCalendar(Market.KR).local_today(utc_now())
+        by_name = {
+            i.name: i.instrument_id
+            for i in instrument_repo.list_active(
+                session, asof=today, market=Market.KR, tracked=None
+            )
+        }
+        missing = [n for n in names if n not in by_name]
+        if missing:
+            print(f"not in the KR master: {', '.join(missing)}")
+        extra = [by_name[n] for n in names if n in by_name]
+        print(companion_service.ask_ai(session, extra=extra, max_batches=max_batches))
+    return 0
+
+
 def cmd_opinion_backfill(days: list[date]) -> int:
     """지난 목록 종목의 증권사 의견을 한 번 받는다. 조회 끝은 오늘이고, 화면은 목록 날보다 앞선 날짜만 쓴다."""
     too_old = [
@@ -1490,6 +1511,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     ob.add_argument("--days", required=True, help="list days, comma separated YYYY-MM-DD")
 
+    cb = sub.add_parser(
+        "companions-build",
+        help="ask Claude for each stock's companions (open movers, latest list, --names); Claude subscription",
+    )
+    cb.add_argument("--names", default="", help="extra exact stock names, comma separated")
+    cb.add_argument(
+        "--max-batches", type=int, default=6, help="at most this many calls of 25 names"
+    )
+
     sub.add_parser("forward", help="the forward-test record so far; reads only")
     sub.add_parser(
         "review", help="the forward record against its review gates and decision rule; reads only"
@@ -1574,6 +1604,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.minutes,
                 date.fromisoformat(args.first),
                 date.fromisoformat(args.last),
+            )
+        case "companions-build":
+            return cmd_companions_build(
+                [n.strip() for n in args.names.split(",") if n.strip()], args.max_batches
             )
         case "opinion-backfill":
             return cmd_opinion_backfill(

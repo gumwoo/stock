@@ -35,6 +35,7 @@ from app.collectors.kis_minute import (
     KisIndexMinuteCollector,
     KisMinuteCollector,
 )
+from app.collectors.kis_open_movers import KisOpenMoverCollector
 from app.collectors.market_index import MarketIndexCollector, UsSemiReferenceCollector
 from app.collectors.naver_news import NaverNewsCollector
 from app.collectors.quota import QuotaGuard
@@ -46,8 +47,10 @@ from app.core.calendar import Market, MarketCalendar
 from app.core.clock import utc_now
 from app.db import advisory_lock, session_scope
 from app.models.collector import CollectorStatus
+from app.scoring import companions
 from app.scoring.gap import DECIDE_BY
 from app.services import (
+    companion_service,
     forward_service,
     intraday_service,
     preopen_service,
@@ -117,6 +120,12 @@ _KR_OPINIONS_EVENING = CronTrigger(day_of_week="mon-fri", hour=18, minute=0, tim
 # 빼지 않음, 그 전에는 뺐다), 08:57 기록만. 2026-10-06부터.
 _KR_GAP_DECIDE = CronTrigger(day_of_week="mon-fri", hour=8, minute=50, timezone="Asia/Seoul")
 _KR_GAP_RECORD = CronTrigger(day_of_week="mon-fri", hour=8, minute=57, timezone="Asia/Seoul")
+# 장 초반 동반주(`kis_open_movers`, 2026-10-12부터): 개장 1~10분 매분. 9시와 10시 둘 다 걸고(연초처럼 10시에 여는 날), 수집기가
+# 실제 개장 시각과 체결 유무로 거른다. 밤 18:10에 AI 관련주 묻기(`companion_service.ask_ai`, LLM_SCHEDULE_ENABLED일 때).
+_KR_OPEN_MOVERS = CronTrigger(
+    day_of_week="mon-fri", hour="9,10", minute="1-10", timezone="Asia/Seoul"
+)
+_KR_COMPANIONS_AI = CronTrigger(day_of_week="mon-fri", hour=18, minute=10, timezone="Asia/Seoul")
 # The day's minute bars, after the close and before the daily loop. A job of
 # its own: a failure here must not take the proven daily loop down with it.
 _KR_MINUTES = CronTrigger(day_of_week="mon-fri", hour=16, minute=20, timezone="Asia/Seoul")
@@ -267,6 +276,29 @@ def _kr_opinions_evening() -> None:
     _kr_opinions(only_missing=True)
 
 
+def _kr_open_movers() -> None:
+    # 휴장·창 밖(9·10시 중 개장 시각이 아닌 쪽)은 여기서 거른다 — collector_run에 SKIPPED가 매일 열 줄씩 쌓여 화면과 /health가
+    # "건너뜀"으로 보이지 않게. 수집기 안의 같은 검사는 이중 안전장치다.
+    calendar = MarketCalendar(Market.KR)
+    now = utc_now()
+    day = calendar.local_today(now)
+    if not calendar.is_session(day) or not companions.in_window(now, calendar.session_open(day)):
+        return
+    with session_scope() as session:
+        run_collector(KisOpenMoverCollector(companions=companion_service.companions_for), session)
+
+
+def _kr_companions_ai() -> None:
+    calendar = MarketCalendar(Market.KR)
+    if not calendar.is_session(calendar.local_today(utc_now())):
+        return
+    if not get_settings().llm_schedule_enabled:
+        logger.info("companions ai: LLM_SCHEDULE_ENABLED is off")
+        return
+    with session_scope() as session:
+        logger.info("companions ai: %s", companion_service.ask_ai(session))
+
+
 def _kr_minutes() -> None:
     """Today's minute bars for the names in focus, then a bounded piece of their recent past."""
     calendar = MarketCalendar(Market.KR)
@@ -412,6 +444,23 @@ def build_scheduler() -> BlockingScheduler:
         max_instances=1,
         coalesce=True,
         misfire_grace_time=90,
+    )
+    scheduler.add_job(
+        guarded("kis_open_movers", _kr_open_movers),
+        _KR_OPEN_MOVERS,
+        id="kis_open_movers",
+        max_instances=1,
+        coalesce=True,
+        # 1분 늦은 발화는 다음 분 몫이다.
+        misfire_grace_time=30,
+    )
+    scheduler.add_job(
+        guarded("companions_ai", _kr_companions_ai),
+        _KR_COMPANIONS_AI,
+        id="companions_ai",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
     )
     scheduler.add_job(
         guarded("kis_opinions_evening", _kr_opinions_evening),

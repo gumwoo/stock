@@ -36,7 +36,7 @@ from app.scoring.intraday import ANALYSIS_VERSION, Bar, DaySummary, bucket_of, i
 from app.scoring.intraday_review import MemberDay, Result, evaluate
 from app.scoring.watchlist import SELECTION_VERSIONS_V2 as WATCHLIST_SELECTIONS
 from app.scoring.watchlist import STRATEGY_VERSION_V2 as WATCHLIST_STRATEGY
-from app.services import llm_service, regime_service, watchlist_service
+from app.services import companion_service, llm_service, regime_service, watchlist_service
 
 SEOUL = ZoneInfo("Asia/Seoul")
 # Whole bars without an opening price to measure from: settled, not retried.
@@ -46,9 +46,12 @@ WATCHLIST_DAYS = 10
 
 
 def minute_targets(session: Session) -> list[int]:
+    # 장 초반 동반주 알림의 오늘 종목(최대 30, 2026-10-12부터) — 나중에 "알림 시각에 샀다면"을 재려고.
+
     return sorted(
         set(llm_service.focus_ids(session))
         | set(watchlist_service.members_since(session, WATCHLIST_DAYS))
+        | set(companion_service.minute_targets_today(session))
     )
 
 

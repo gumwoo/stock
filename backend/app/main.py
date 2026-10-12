@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import (
     backtests,
     briefing,
+    companions,
     health,
     lab,
     lists,
@@ -99,6 +100,7 @@ def create_app() -> FastAPI:
     app.include_router(backtests.router)
     app.include_router(live.router)
     app.include_router(themes.router)
+    app.include_router(companions.router)
     app.include_router(preopen.router)
     app.include_router(lists.router)
     app.include_router(overnight.router)

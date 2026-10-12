@@ -1,5 +1,6 @@
 import type {
   Candle,
+  CompanionsToday,
   Diagnostics,
   LabView,
   ListMembers,
@@ -48,6 +49,7 @@ export const api = {
     get<LiveBar[]>(`/api/live/${code}/bars?interval=${interval}`),
   liveSparks: () => get<Record<string, number[]>>("/api/live/sparks"),
   themes: () => get<ThemeNewsDay>("/api/themes/today"),
+  companions: () => get<CompanionsToday>("/api/companions/today"),
   preopenToday: () => get<PreopenToday>("/api/preopen/today"),
   overnightSemis: (day: string) => get<OvernightSemis>(`/api/overnight/us-semis?day=${day}`),
 };

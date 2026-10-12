@@ -13,6 +13,7 @@ import {
 import { AnalystLine } from "../components/AnalystLine";
 import { ScoreParts, hasScoreParts } from "../components/ScoreParts";
 import { ThemeNews } from "../components/ThemeNews";
+import { Companions } from "../components/Companions";
 import type { ListSignalRow, LiveBar, LiveMember, LiveMessage, LiveState, PreopenToday } from "../api/types";
 import { useLiveChart } from "../hooks/useLiveChart";
 import "./Live.css";
@@ -561,6 +562,7 @@ export function Live({
       )}
 
       <OvernightSemis day={day} />
+      <Companions onlyDay={day} />
       <ThemeNews listIds={listIds} listDay={day} onlyDay={day} />
 
       <div className="live__body">
