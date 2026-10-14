@@ -4,6 +4,9 @@ services:
   db:
     image: postgres:16
     container_name: stock-db
+    # 재부팅 뒤 Docker가 뜨면 DB도 같이 뜨게(2026-10-14: restart가 없어 06:09 재부팅 뒤 꺼진 채로 남아 그날 워커·API가 DB에
+    # 붙지 못했다). 직접 멈춘 경우(docker stop)에는 다시 켜지 않는다.
+    restart: unless-stopped
     environment:
       POSTGRES_USER: stock
       POSTGRES_PASSWORD: stock
